@@ -1,0 +1,9 @@
+{
+  "input": "Checkout latency increased after deployment. Analyze and suggest remediation.",
+  "service_name": "checkout-api",
+  "raw_logs": [
+    "2026-02-18T09:40:01Z ERROR timeout while calling payment provider",
+    "2026-02-18T09:40:03Z WARN retry attempt=1",
+    "2026-02-18T09:40:08Z ERROR timeout while calling payment provider"
+  ]
+}
