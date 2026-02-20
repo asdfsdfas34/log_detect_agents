@@ -1,19 +1,36 @@
-from __future__ import annotations
+"""FastAPI entrypoint for 장애 예방 AI backend."""
 
-import os
-
-from dotenv import load_dotenv
 from fastapi import FastAPI
+from pydantic import BaseModel, Field
 
-from app.api.agents import router as agents_router
+from app.config import settings
+from app.graph.engine import build_graph
+from app.state import Scope, SharedState, create_initial_state
 
-load_dotenv()
+app = FastAPI(title="Failure Prevention AI Backend", version="0.2.0")
 
-app = FastAPI(title="LangGraph Multi-Agent API", version="0.1.0")
 
-app.include_router(agents_router)
+class AnalyzeRequest(BaseModel):
+    """Analyze API input schema."""
+
+    goal: str = Field(..., description="Analysis goal")
+    scope: Scope
+
+
+class AnalyzeResponse(BaseModel):
+    """Analyze API output schema."""
+
+    result: SharedState
 
 
 @app.get("/health")
-def health():
-    return {"status": "ok", "model": os.getenv("OPENAI_MODEL", "gpt-4o-mini")}
+def health() -> dict[str, str]:
+    return {"status": "ok", "model": settings.openai_model, "stub_mode": str(settings.llm_stub_mode)}
+
+
+@app.post("/analyze", response_model=AnalyzeResponse)
+def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
+    graph = build_graph()
+    initial_state = create_initial_state(goal=req.goal, scope=req.scope)
+    result = graph.invoke(initial_state)
+    return AnalyzeResponse(result=result)
