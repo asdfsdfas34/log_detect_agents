@@ -13,7 +13,7 @@ from app.agents.prompts import (
     SOURCE_CODE_ANALYSIS_SYSTEM,
 )
 from app.db.chroma_store import find_related_analyses, save_analysis_document
-from app.db.postgres import fetch_recent_logs
+from app.db.sqlite_store import fetch_recent_logs
 from app.llm.openai_client import generate_text
 from app.state import AgentState
 
