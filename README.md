@@ -72,3 +72,24 @@ pytest -q
 - SQLite: structured data (local file)
 - ChromaDB: vector embeddings
 - Out of scope: infra changes, DB schema changes, secret rotation, destructive operations
+
+## Vue 3 Enterprise Dashboard (LogDetect)
+
+A Vue 3 + TypeScript + Vite dashboard is included in this repository and integrates with the backend API contracts:
+
+- `GET /health`
+- `POST /analyze`
+
+SSE is not currently exposed by the backend, so the frontend automatically uses a 5-second polling fallback for health updates during execution.
+
+### Frontend run
+
+```bash
+npm install
+npm run dev
+```
+
+Optional env vars:
+
+- `VITE_API_BASE_URL` (default: `http://localhost:8000`)
+- `VITE_ANALYZE_SSE_URL` (optional SSE endpoint if added later)
