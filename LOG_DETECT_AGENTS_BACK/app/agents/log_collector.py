@@ -1,45 +1,71 @@
-"""Stub LogCollectorAgent implementation."""
+"""LogCollectorAgent implementation backed by SQLite."""
 
 from datetime import datetime, timedelta
 
+from app.db.sqlite_store import fetch_recent_log_entries
 from app.state import SharedState
 
 
 class LogCollectorAgent:
-    """Collect and normalize logs as deterministic stub data."""
+    """Collect and normalize logs from SQLite storage."""
 
     name = "LogCollectorAgent"
 
     def run(self, state: SharedState) -> SharedState:
-        systems = state["scope"]["systems"] or ["unknown-system"]
-        high_risk = any(k in state["goal"].lower() for k in ["auth", "payment", "결제", "인증"])
+        systems = state["scope"]["systems"] or []
         disable_stack = bool(state["scope"].get("filters", {}).get("disable_stack_traces", False))
-        now = datetime.utcnow()
+
+        log_entries = fetch_recent_log_entries(service_names=systems, limit=200)
+
+        if not log_entries:
+            now = datetime.utcnow()
+            fallback_systems = systems or ["unknown-system"]
+            high_risk_goal = any(k in state["goal"].lower() for k in ["auth", "payment", "결제", "인증"])
+            log_entries = []
+            for idx in range(10):
+                is_error = high_risk_goal and idx % 3 == 0
+                log_entries.append(
+                    {
+                        "timestamp": (now - timedelta(minutes=idx)).isoformat(),
+                        "system": fallback_systems[idx % len(fallback_systems)],
+                        "level": "ERROR" if is_error else "INFO",
+                        "message": (
+                            "exception detected in auth/payment flow"
+                            if is_error
+                            else "no recent sqlite log rows found"
+                        ),
+                        "stack_trace": (
+                            f"Traceback: {fallback_systems[idx % len(fallback_systems)]}.service.process -> PaymentAuthError[{idx}]"
+                            if is_error and not disable_stack
+                            else ""
+                        ),
+                    }
+                )
+            state["decisions"]["assumptions"].append(
+                "SQLite에서 최근 로그를 찾지 못해 fallback 로그를 생성했습니다."
+            )
+
         logs: list[dict] = []
         stack_traces: list[str] = []
 
-        for idx in range(20):
-            level = "INFO"
-            message = "heartbeat ok"
-            if high_risk and idx % 3 == 0:
-                level = "ERROR"
-                message = "exception detected in auth/payment flow"
-            elif idx % 7 == 0:
-                level = "WARN"
-                message = "retry triggered"
+        for row in log_entries:
+            level = str(row.get("level", "INFO") or "INFO").upper()
+            stack_trace = str(row.get("stack_trace", "") or "")
 
-            log_item = {
-                "timestamp": (now - timedelta(minutes=idx)).isoformat(),
-                "system": systems[idx % len(systems)],
+            if disable_stack:
+                stack_trace = ""
+
+            normalized = {
+                "timestamp": str(row.get("timestamp") or datetime.utcnow().isoformat()),
+                "system": str(row.get("system") or "unknown-system"),
                 "level": level,
-                "message": message,
+                "message": str(row.get("message") or ""),
             }
-            if level == "ERROR" and not disable_stack:
-                trace = f"Traceback: {log_item['system']}.service.process -> PaymentAuthError[{idx}]"
-                log_item["stack_trace"] = trace
-                stack_traces.append(trace)
+            if stack_trace:
+                normalized["stack_trace"] = stack_trace
+                stack_traces.append(stack_trace)
 
-            logs.append(log_item)
+            logs.append(normalized)
 
         state["evidence"]["normalized_logs"] = logs
         state["evidence"]["stack_traces"] = stack_traces
