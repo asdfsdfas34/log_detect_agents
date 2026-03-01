@@ -14,7 +14,6 @@ class LogCollectorAgent:
     def run(self, state: SharedState) -> SharedState:
         systems = state["scope"]["systems"] or []
         disable_stack = bool(state["scope"].get("filters", {}).get("disable_stack_traces", False))
-
         log_entries = fetch_recent_log_entries(service_names=systems, limit=200)
 
         if not log_entries:

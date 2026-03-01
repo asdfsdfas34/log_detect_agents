@@ -47,7 +47,6 @@ class LogAnalysisAgent:
             "반드시 다음 항목을 포함해 한국어로 작성하세요: 주요 원인 추정, 위험 신호, 즉시 조치.\n\n"
             f"로그:\n{chr(10).join(log_lines)}"
         )
-
         try:
             analysis_text = generate_text(
                 messages=[

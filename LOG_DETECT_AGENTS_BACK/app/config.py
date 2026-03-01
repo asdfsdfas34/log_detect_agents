@@ -3,6 +3,18 @@
 import os
 from dataclasses import dataclass
 
+from pathlib import Path
+from dotenv import load_dotenv
+
+# config.py 파일 기준 경로
+BASE_DIR = Path(__file__).resolve().parent        # app/
+ENV_PATH = BASE_DIR.parent / ".env.dev"          # project/.env.dev
+
+# 실제 존재 여부 확인
+if ENV_PATH.exists():
+    load_dotenv(dotenv_path=ENV_PATH, override=False)
+else:
+    print(f"⚠ .env.dev not found at: {ENV_PATH}")
 
 @dataclass(frozen=True)
 class Settings:

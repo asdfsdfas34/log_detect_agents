@@ -27,7 +27,6 @@ def generate_text(
 ) -> str:
     model = model or os.getenv("OPENAI_MODEL", "gpt-4o-mini")
     client = _client()
-
     # Using Responses API with role-based message input.
     resp = client.responses.create(
         model=model,

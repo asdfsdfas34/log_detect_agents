@@ -7,7 +7,23 @@ from app.config import settings
 from app.graph.engine import build_graph
 from app.state import Scope, SharedState, create_initial_state
 
+from fastapi.middleware.cors import CORSMiddleware
+
 app = FastAPI(title="Failure Prevention AI Backend", version="0.2.0")
+
+# 로컬 개발용: Vue dev server 주소(보통 5173 또는 8080)
+origins = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173"
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,          # 개발 단계에서는 ["*"]도 가능(단, credentials면 안됨)
+    allow_credentials=True,
+    allow_methods=["*"],            # OPTIONS 포함
+    allow_headers=["*"],            # Authorization 포함
+)
 
 
 class AnalyzeRequest(BaseModel):
