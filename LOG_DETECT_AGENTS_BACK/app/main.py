@@ -13,8 +13,9 @@ app = FastAPI(title="Failure Prevention AI Backend", version="0.2.0")
 class AnalyzeRequest(BaseModel):
     """Analyze API input schema."""
 
-    goal: str = Field(..., description="Analysis goal")
-    scope: Scope
+    service_name: str = Field(..., min_length=1, description="Target service name")
+    goal: str = Field(default="service log anomaly investigation", description="Analysis goal")
+    scope: Scope | None = Field(default=None, description="Optional detailed analysis scope")
 
 
 class AnalyzeResponse(BaseModel):
@@ -31,6 +32,13 @@ def health() -> dict[str, str]:
 @app.post("/analyze", response_model=AnalyzeResponse)
 def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
     graph = build_graph()
-    initial_state = create_initial_state(goal=req.goal, scope=req.scope)
+    effective_scope: Scope = req.scope or {
+        "systems": [req.service_name],
+        "time_range": {"from": "", "to": ""},
+        "filters": {},
+    }
+    effective_scope["systems"] = [req.service_name]
+
+    initial_state = create_initial_state(goal=req.goal, scope=effective_scope)
     result = graph.invoke(initial_state)
     return AnalyzeResponse(result=result)

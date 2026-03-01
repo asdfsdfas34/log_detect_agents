@@ -2,6 +2,12 @@
   <AppLayout>
     <template #header-right>
       <div class="flex items-center gap-3">
+        <input
+          v-model="serviceName"
+          type="text"
+          placeholder="서비스 이름 입력 (예: auth-api)"
+          class="w-56 rounded border border-slate-300 px-3 py-2 text-sm"
+        />
         <div class="text-right text-xs text-slate-600">
           <p>Status: <span class="font-semibold">{{ store.executionStatus }}</span></p>
           <p>Stage: <span class="font-semibold">{{ store.currentStage }}</span></p>
@@ -9,8 +15,8 @@
         </div>
         <button
           class="rounded bg-blue-600 px-3 py-2 text-sm text-white disabled:cursor-not-allowed disabled:bg-slate-300"
-          :disabled="store.loading"
-          @click="store.runAnalysis()"
+          :disabled="store.loading || !serviceName.trim()"
+          @click="handleRunAnalysis"
         >
           Re-run analysis
         </button>
@@ -59,7 +65,7 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted } from 'vue'
+import { onMounted, ref } from 'vue'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import OverviewCard from '@/components/dashboard/OverviewCard.vue'
 import ImpactGauge from '@/components/dashboard/ImpactGauge.vue'
@@ -74,6 +80,13 @@ import EmptyState from '@/components/common/EmptyState.vue'
 import { useLogDetectStore } from '@/stores/logDetectStore'
 
 const store = useLogDetectStore()
+const serviceName = ref('billing-api')
+
+function handleRunAnalysis() {
+  const trimmed = serviceName.value.trim()
+  if (!trimmed) return
+  void store.runAnalysis(trimmed)
+}
 
 onMounted(async () => {
   await store.fetchHealth()

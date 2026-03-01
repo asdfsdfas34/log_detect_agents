@@ -10,8 +10,9 @@ export interface Scope {
 }
 
 export interface AnalyzeRequest {
-  goal: string
-  scope: Scope
+  service_name: string
+  goal?: string
+  scope?: Scope
 }
 
 export interface NormalizedLog {

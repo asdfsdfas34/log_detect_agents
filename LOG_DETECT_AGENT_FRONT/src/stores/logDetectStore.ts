@@ -17,17 +17,10 @@ const stepNames = [
   'RecommendationAgent'
 ]
 
-function buildDefaultRequest(): AnalyzeRequest {
+function buildDefaultRequest(serviceName: string): AnalyzeRequest {
   return {
-    goal: 'payment auth exception risk investigation',
-    scope: {
-      systems: ['billing-api', 'auth-api'],
-      time_range: {
-        from: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
-        to: new Date().toISOString()
-      },
-      filters: { env: 'prod' }
-    }
+    service_name: serviceName,
+    goal: `${serviceName} service log anomaly investigation`
   }
 }
 
@@ -113,7 +106,8 @@ export const useLogDetectStore = defineStore('logDetect', () => {
     }, 5000)
   }
 
-  async function runAnalysis(request: AnalyzeRequest = buildDefaultRequest()) {
+  async function runAnalysis(serviceName: string) {
+    const request = buildDefaultRequest(serviceName)
     loading.value = true
     executionStatus.value = 'running'
     error.value = null

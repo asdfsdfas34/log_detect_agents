@@ -9,6 +9,7 @@ def test_analyze_runs_full_flow_with_code_analysis():
     res = client.post(
         "/analyze",
         json={
+            "service_name": "billing-api",
             "goal": "payment auth exception risk investigation",
             "scope": {
                 "systems": ["billing-api", "auth-api"],
@@ -29,6 +30,7 @@ def test_analyze_skips_code_analysis_without_stack_trace_when_forced():
     res = client.post(
         "/analyze",
         json={
+            "service_name": "api",
             "goal": "auth 이슈 대응",
             "scope": {
                 "systems": ["api"],
