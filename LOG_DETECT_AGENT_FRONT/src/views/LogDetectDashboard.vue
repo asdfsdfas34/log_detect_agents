@@ -45,6 +45,7 @@
       <RecommendationPanel
         :actions="store.state.final.recommended_actions ?? []"
         :verification="store.state.final.verification_steps ?? []"
+        :generated-answer="store.state.final.generated_answer"
       />
       <AgentProgressTimeline :steps="store.agentTimeline" />
     </template>

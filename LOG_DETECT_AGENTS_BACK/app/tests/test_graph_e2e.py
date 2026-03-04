@@ -5,7 +5,7 @@ from app.main import app
 client = TestClient(app)
 
 
-def test_analyze_runs_full_flow_with_code_analysis():
+def test_analyze_always_skips_code_analysis_and_returns_generated_answer():
     res = client.post(
         "/analyze",
         json={
@@ -21,8 +21,9 @@ def test_analyze_runs_full_flow_with_code_analysis():
 
     assert res.status_code == 200
     body = res.json()["result"]
-    assert body["assessment"]["risk_score"] >= 70
-    assert "SourceCodeAnalysisAgent" in body["decisions"]["agents_run"]
+    assert "SourceCodeAnalysisAgent" in body["decisions"]["skipped_agents"]
+    assert "SourceCodeAnalysisAgent" not in body["decisions"]["agents_run"]
+    assert body["final"]["generated_answer"] is not None
     assert body["final"]["recommended_actions"] is not None
 
 
@@ -43,4 +44,4 @@ def test_analyze_skips_code_analysis_without_stack_trace_when_forced():
     assert res.status_code == 200
     body = res.json()["result"]
     assert "SourceCodeAnalysisAgent" in body["decisions"]["skipped_agents"]
-    assert body["final"]["additional_data_needed"] is not None
+    assert body["final"]["generated_answer"] is not None

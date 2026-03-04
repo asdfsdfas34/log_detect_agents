@@ -10,7 +10,6 @@ from app.agents.prompts import (
     LOG_ANALYSIS_SYSTEM,
     LOG_COLLECTOR_SYSTEM,
     RECOMMENDATION_SYSTEM,
-    SOURCE_CODE_ANALYSIS_SYSTEM,
 )
 from app.db.chroma_store import find_related_analyses, save_analysis_document
 from app.db.sqlite_store import fetch_recent_logs
@@ -68,35 +67,19 @@ def _impact_evaluation(state: AgentState) -> AgentState:
         temperature=0.1,
     )
     state["impact_evaluation"] = impact
-    state["next"] = "source_code_analysis"
+    state["next"] = "recommendation"
     return state
 
 
 def _source_code_analysis(state: AgentState) -> AgentState:
-    user_msg = state["messages"][-1]["content"]
-    analysis = state.get("log_analysis") or ""
-    impact = state.get("impact_evaluation") or ""
-
-    code_analysis = generate_text(
-        messages=[
-            {"role": "system", "content": SOURCE_CODE_ANALYSIS_SYSTEM},
-            {
-                "role": "user",
-                "content": f"User request:\n{user_msg}\n\nLog analysis:\n{analysis}\n\nImpact:\n{impact}",
-            },
-        ],
-        temperature=0.1,
-    )
-    state["source_code_analysis"] = code_analysis
+    state["source_code_analysis"] = "SKIPPED: source_code_analysis step disabled by workflow policy."
     state["next"] = "recommendation"
     return state
 
 
 def _recommendation(state: AgentState) -> AgentState:
-    collected_logs = state.get("collected_logs") or ""
     analysis = state.get("log_analysis") or ""
     impact = state.get("impact_evaluation") or ""
-    code_analysis = state.get("source_code_analysis") or ""
 
     recommendation = generate_text(
         messages=[
@@ -104,10 +87,9 @@ def _recommendation(state: AgentState) -> AgentState:
             {
                 "role": "user",
                 "content": (
-                    f"Collected logs:\n{collected_logs}\n\n"
+                    "Impact evaluation 결과를 기반으로 권고안을 한국어로 작성하세요.\n\n"
                     f"Log analysis:\n{analysis}\n\n"
-                    f"Impact evaluation:\n{impact}\n\n"
-                    f"Source code analysis:\n{code_analysis}"
+                    f"Impact evaluation:\n{impact}"
                 ),
             },
         ],
@@ -120,7 +102,7 @@ def _recommendation(state: AgentState) -> AgentState:
         doc_id=doc_id,
         text=(
             f"Log analysis:\n{analysis}\n\nImpact evaluation:\n{impact}\n\n"
-            f"Source code analysis:\n{code_analysis}\n\nRecommendation:\n{recommendation}"
+            f"Recommendation:\n{recommendation}"
         ),
     )
     state["next"] = "end"
@@ -155,7 +137,7 @@ def build_graph():
     g.add_conditional_edges(
         "impact_evaluation",
         _route,
-        {"source_code_analysis": "source_code_analysis", "end": END},
+        {"recommendation": "recommendation", "end": END},
     )
     g.add_conditional_edges(
         "source_code_analysis",

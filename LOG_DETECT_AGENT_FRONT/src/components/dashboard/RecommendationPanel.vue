@@ -2,6 +2,10 @@
   <div class="rounded-xl border bg-white p-4 shadow-sm">
     <h3 class="mb-3 text-lg font-semibold">Recommendations</h3>
     <div class="space-y-3">
+      <div v-if="generatedAnswer" class="rounded border border-blue-200 bg-blue-50 p-3 text-sm text-slate-800">
+        <p class="mb-1 text-xs font-semibold uppercase text-blue-700">Generated Answer</p>
+        <p class="whitespace-pre-line">{{ generatedAnswer }}</p>
+      </div>
       <div v-for="item in actions" :key="item.action" class="rounded border p-3">
         <span class="rounded bg-slate-900 px-2 py-1 text-xs text-white">{{ item.priority }}</span>
         <p class="mt-2 text-sm">{{ item.action }}</p>
@@ -17,7 +21,7 @@
 import { computed } from 'vue'
 import type { RecommendedAction } from '@/types/agentTypes'
 
-const props = defineProps<{ actions: RecommendedAction[]; verification: string[] }>()
+const props = defineProps<{ actions: RecommendedAction[]; verification: string[]; generatedAnswer?: string | null }>()
 
 const verificationText = computed(() => props.verification.join('\n'))
 

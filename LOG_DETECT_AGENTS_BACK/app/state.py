@@ -43,6 +43,7 @@ class Final(TypedDict):
     recommended_actions: list[dict] | None
     verification_steps: list[str] | None
     additional_data_needed: list[str] | None
+    generated_answer: str | None
 
 
 class SharedState(TypedDict):
@@ -81,5 +82,6 @@ def create_initial_state(goal: str, scope: Scope) -> SharedState:
             "recommended_actions": None,
             "verification_steps": None,
             "additional_data_needed": None,
+            "generated_answer": None,
         },
     }
