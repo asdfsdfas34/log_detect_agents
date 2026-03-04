@@ -78,6 +78,7 @@ export interface SharedState {
     recommended_actions: RecommendedAction[] | null
     verification_steps: string[] | null
     additional_data_needed: string[] | null
+    generated_answer: string | null
   }
 }
 

@@ -24,21 +24,7 @@ def should_run_code_analysis(state: SharedState) -> bool:
 def next_after_impact(state: SharedState) -> str:
     """Route from impact evaluation to next node."""
 
-    risk = state["assessment"].get("risk_score") or 0
-    anomalies = state["evidence"]["anomalies"]
-
-    if not anomalies and risk < 30:
-        state["decisions"]["assumptions"].append("low-risk early exit condition met")
-        return "recommend"
-
-    if should_run_code_analysis(state):
-        if state["evidence"]["stack_traces"]:
-            return "source_code_analysis"
-        state["decisions"]["assumptions"].append(
-            "추가 데이터 필요: risk가 높지만 stack_traces가 없어 코드 분석을 생략했습니다."
-        )
+    state["decisions"]["assumptions"].append("요청 정책에 따라 source_code_analysis 단계를 항상 생략합니다.")
+    if "SourceCodeAnalysisAgent" not in state["decisions"]["skipped_agents"]:
         state["decisions"]["skipped_agents"].append("SourceCodeAnalysisAgent")
-        return "recommend"
-
-    state["decisions"]["skipped_agents"].append("SourceCodeAnalysisAgent")
     return "recommend"
