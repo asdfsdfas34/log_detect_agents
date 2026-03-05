@@ -1,6 +1,6 @@
-"""ImpactEvaluationAgent implementation backed by SQLite analysis history."""
+"""ImpactEvaluationAgent implementation backed by MCP tool calls."""
 
-from app.db.sqlite_store import fetch_latest_log_analyses, save_impact_evaluation
+from app.mcp import get_mcp_client
 from app.state import SharedState
 
 
@@ -11,7 +11,11 @@ class ImpactEvaluationAgent:
 
     def run(self, state: SharedState) -> SharedState:
         systems = state["scope"].get("systems") or []
-        stored_analyses = fetch_latest_log_analyses(service_names=systems, limit=20)
+        mcp = get_mcp_client()
+        stored_analyses = mcp.call_tool(
+            "sqlite.fetch_latest_log_analyses",
+            {"service_names": systems, "limit": 20},
+        )
 
         if not stored_analyses:
             state["decisions"]["assumptions"].append(
@@ -57,11 +61,14 @@ class ImpactEvaluationAgent:
         }
 
         target_service = systems[0] if systems else "all"
-        save_impact_evaluation(
-            service_name=target_service,
-            risk_score=risk_score,
-            confidence=confidence,
-            rationale=", ".join(rationale),
+        mcp.call_tool(
+            "sqlite.save_impact_evaluation",
+            {
+                "service_name": target_service,
+                "risk_score": risk_score,
+                "confidence": confidence,
+                "rationale": ", ".join(rationale),
+            },
         )
 
         state["decisions"]["agents_run"].append(self.name)
