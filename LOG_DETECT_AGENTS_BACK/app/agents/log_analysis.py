@@ -1,9 +1,8 @@
-"""LogAnalysisAgent implementation using OpenAI + SQLite persistence."""
+"""LogAnalysisAgent implementation using MCP tools for OpenAI/SQLite/ChromaDB."""
 
 from collections import Counter
 
-from app.db.sqlite_store import save_log_analysis
-from app.llm.openai_client import generate_text
+from app.mcp import get_mcp_client
 from app.state import SharedState
 
 
@@ -47,13 +46,17 @@ class LogAnalysisAgent:
             "반드시 다음 항목을 포함해 한국어로 작성하세요: 주요 원인 추정, 위험 신호, 즉시 조치.\n\n"
             f"로그:\n{chr(10).join(log_lines)}"
         )
+        mcp = get_mcp_client()
         try:
-            analysis_text = generate_text(
-                messages=[
-                    {"role": "system", "content": "당신은 SRE 로그 분석 전문가입니다."},
-                    {"role": "user", "content": prompt},
-                ],
-                temperature=0.1,
+            analysis_text = mcp.call_tool(
+                "openai.generate_text",
+                {
+                    "messages": [
+                        {"role": "system", "content": "당신은 SRE 로그 분석 전문가입니다."},
+                        {"role": "user", "content": prompt},
+                    ],
+                    "temperature": 0.1,
+                },
             )
         except Exception as exc:  # noqa: BLE001
             analysis_text = (
@@ -68,7 +71,14 @@ class LogAnalysisAgent:
         ]
 
         target_service = (state["scope"].get("systems") or ["all"])[0]
-        save_log_analysis(goal=state["goal"], service_name=target_service, analysis=analysis_text)
+        mcp.call_tool(
+            "sqlite.save_log_analysis",
+            {"goal": state["goal"], "service_name": target_service, "analysis": analysis_text},
+        )
+        mcp.call_tool(
+            "chromadb.save_analysis_document",
+            {"doc_id": f"{target_service}:{state['request_id']}", "text": analysis_text},
+        )
 
         state["decisions"]["agents_run"].append(self.name)
         return state

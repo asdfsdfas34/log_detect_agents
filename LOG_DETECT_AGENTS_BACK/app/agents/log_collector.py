@@ -1,8 +1,8 @@
-"""LogCollectorAgent implementation backed by SQLite."""
+"""LogCollectorAgent implementation backed by SQLite via MCP tools."""
 
 from datetime import datetime, timedelta
 
-from app.db.sqlite_store import fetch_recent_log_entries
+from app.mcp import get_mcp_client
 from app.state import SharedState
 
 
@@ -14,7 +14,11 @@ class LogCollectorAgent:
     def run(self, state: SharedState) -> SharedState:
         systems = state["scope"]["systems"] or []
         disable_stack = bool(state["scope"].get("filters", {}).get("disable_stack_traces", False))
-        log_entries = fetch_recent_log_entries(service_names=systems, limit=200)
+        mcp = get_mcp_client()
+        log_entries = mcp.call_tool(
+            "sqlite.fetch_recent_log_entries",
+            {"service_names": systems, "limit": 200},
+        )
 
         if not log_entries:
             now = datetime.utcnow()
