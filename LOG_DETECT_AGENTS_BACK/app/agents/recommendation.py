@@ -1,8 +1,8 @@
-"""RecommendationAgent implementation using OpenAI responses."""
+"""RecommendationAgent implementation using MCP tools."""
 
 import json
 
-from app.llm.openai_client import generate_text
+from app.mcp import get_mcp_client
 from app.state import SharedState
 
 
@@ -42,25 +42,35 @@ class RecommendationAgent:
         if needs_data:
             additional_data = ["stack trace 원문", "실패 요청 샘플 payload", "배포 변경 이력"]
 
+        mcp = get_mcp_client()
+        related = mcp.call_tool(
+            "chromadb.find_related_analyses",
+            {"query": state["goal"], "n_results": 3},
+        )
+
         recommendation_prompt = (
             "다음 장애 영향 평가 결과를 바탕으로 운영자가 바로 활용할 수 있는 한국어 권고안을 작성하세요.\n"
             "반드시 포함: 1) 한 줄 요약 2) 즉시 조치 3) 검증 방법 4) 재발 방지.\n\n"
             f"영향 평가 근거: {impact_text}\n"
             f"리스크 점수: {risk}\n"
             f"지표: {json.dumps(metrics, ensure_ascii=False)}\n"
-            f"이상 징후 수: {len(anomalies)}"
+            f"이상 징후 수: {len(anomalies)}\n"
+            f"유사 과거 분석: {json.dumps(related, ensure_ascii=False)}"
         )
 
         try:
-            generated_answer = generate_text(
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "당신은 장애 대응을 지원하는 SRE Recommendation Agent 입니다.",
-                    },
-                    {"role": "user", "content": recommendation_prompt},
-                ],
-                temperature=0.1,
+            generated_answer = mcp.call_tool(
+                "openai.generate_text",
+                {
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": "당신은 장애 대응을 지원하는 SRE Recommendation Agent 입니다.",
+                        },
+                        {"role": "user", "content": recommendation_prompt},
+                    ],
+                    "temperature": 0.1,
+                },
             )
         except Exception as exc:  # noqa: BLE001
             generated_answer = (
