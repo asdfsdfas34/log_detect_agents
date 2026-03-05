@@ -13,6 +13,7 @@ from app.db.sqlite_store import (
     save_impact_evaluation,
     save_log_analysis,
 )
+from app.integrations.microsoft_graph import call_microsoft_graph_api
 from app.llm.openai_client import generate_text
 
 ToolHandler = Callable[[dict[str, Any]], Any]
@@ -31,6 +32,7 @@ class MCPServer:
             "chromadb.save_analysis_document": self._chromadb_save_analysis_document,
             "chromadb.find_related_analyses": self._chromadb_find_related_analyses,
             "openai.generate_text": self._openai_generate_text,
+            "msgraph.request": self._msgraph_request,
         }
 
     def call_tool(self, tool_name: str, arguments: dict[str, Any] | None = None) -> Any:
@@ -90,6 +92,20 @@ class MCPServer:
         return find_related_analyses(
             query=str(arguments.get("query", "")),
             n_results=int(arguments.get("n_results", 3)),
+        )
+
+
+    @staticmethod
+    def _msgraph_request(arguments: dict[str, Any]) -> dict[str, Any]:
+        params = arguments.get("params")
+        body = arguments.get("body")
+        return call_microsoft_graph_api(
+            endpoint=str(arguments.get("endpoint", "")),
+            method=str(arguments.get("method", "GET")),
+            token=arguments.get("token"),
+            params=params if isinstance(params, dict) else None,
+            body=body if isinstance(body, dict) else None,
+            timeout_s=float(arguments.get("timeout_s", 15.0)),
         )
 
     @staticmethod
