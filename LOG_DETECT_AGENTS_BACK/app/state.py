@@ -16,12 +16,14 @@ class Evidence(TypedDict):
     anomalies: list[dict]
     clusters: list[dict]
     stack_traces: list[str]
+    incident_candidates: list[dict]
 
 
 class Metrics(TypedDict):
     error_rate: float | None
     latency_p95: float | None
     rps: float | None
+    anomaly_score: float | None
 
 
 class Assessment(TypedDict):
@@ -46,29 +48,45 @@ class Final(TypedDict):
     generated_answer: str | None
 
 
+class Orchestration(TypedDict):
+    next_agent: str | None
+    pending_agents: list[str]
+    completed_agents: list[str]
+
+
+class Preferences(TypedDict):
+    save_to_chromadb: bool
+
+
 class SharedState(TypedDict):
     goal: str
+    request_id: str
     scope: Scope
     evidence: Evidence
     metrics: Metrics
     assessment: Assessment
     decisions: Decisions
     final: Final
+    orchestration: Orchestration
+    preferences: Preferences
+    rag: dict
 
 
-def create_initial_state(goal: str, scope: Scope) -> SharedState:
+def create_initial_state(goal: str, scope: Scope, request_id: str, save_to_chromadb: bool = False) -> SharedState:
     """Build a fully-initialized shared state."""
 
     return {
         "goal": goal,
+        "request_id": request_id,
         "scope": scope,
         "evidence": {
             "normalized_logs": [],
             "anomalies": [],
             "clusters": [],
             "stack_traces": [],
+            "incident_candidates": [],
         },
-        "metrics": {"error_rate": None, "latency_p95": None, "rps": None},
+        "metrics": {"error_rate": None, "latency_p95": None, "rps": None, "anomaly_score": None},
         "assessment": {"risk_score": None, "confidence": "low", "rationale": []},
         "decisions": {
             "agents_run": [],
@@ -84,4 +102,11 @@ def create_initial_state(goal: str, scope: Scope) -> SharedState:
             "additional_data_needed": None,
             "generated_answer": None,
         },
+        "orchestration": {
+            "next_agent": None,
+            "pending_agents": [],
+            "completed_agents": [],
+        },
+        "preferences": {"save_to_chromadb": save_to_chromadb},
+        "rag": {"related_knowledge": [], "saved_to_chromadb": False},
     }

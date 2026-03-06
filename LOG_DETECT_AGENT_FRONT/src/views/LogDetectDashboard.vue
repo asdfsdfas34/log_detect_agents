@@ -13,6 +13,10 @@
           <p>Stage: <span class="font-semibold">{{ store.currentStage }}</span></p>
           <p>Last run: {{ store.lastExecutionAt ?? '-' }}</p>
         </div>
+        <label class="flex items-center gap-2 text-xs text-slate-700">
+          <input v-model="saveToChromaDb" type="checkbox" class="h-4 w-4" />
+          분석 결과를 ChromaDB에 저장
+        </label>
         <button
           class="rounded bg-blue-600 px-3 py-2 text-sm text-white disabled:cursor-not-allowed disabled:bg-slate-300"
           :disabled="store.loading || !serviceName.trim()"
@@ -82,11 +86,12 @@ import { useLogDetectStore } from '@/stores/logDetectStore'
 
 const store = useLogDetectStore()
 const serviceName = ref('billing-api')
+const saveToChromaDb = ref(false)
 
 function handleRunAnalysis() {
   const trimmed = serviceName.value.trim()
   if (!trimmed) return
-  void store.runAnalysis(trimmed)
+  void store.runAnalysis(trimmed, saveToChromaDb.value)
 }
 
 onMounted(async () => {

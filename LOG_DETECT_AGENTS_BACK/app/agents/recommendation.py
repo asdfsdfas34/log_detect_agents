@@ -43,10 +43,7 @@ class RecommendationAgent:
             additional_data = ["stack trace 원문", "실패 요청 샘플 payload", "배포 변경 이력"]
 
         mcp = get_mcp_client()
-        related = mcp.call_tool(
-            "chromadb.find_related_analyses",
-            {"query": state["goal"], "n_results": 3},
-        )
+        related = state.get("rag", {}).get("related_knowledge", [])
 
         recommendation_prompt = (
             "다음 장애 영향 평가 결과를 바탕으로 운영자가 바로 활용할 수 있는 한국어 권고안을 작성하세요.\n"
