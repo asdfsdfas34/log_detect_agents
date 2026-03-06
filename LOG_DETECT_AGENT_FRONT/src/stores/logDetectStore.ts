@@ -10,17 +10,22 @@ import type {
 } from '@/types/agentTypes'
 
 const stepNames = [
+  'OrchestratorAgent',
   'LogCollectorAgent',
   'LogAnalysisAgent',
+  'AnomalyDetectionAgent',
+  'IncidentCorrelationAgent',
   'ImpactEvaluationAgent',
   'SourceCodeAnalysisAgent',
+  'KnowledgeBaseRAGAgent',
   'RecommendationAgent'
 ]
 
-function buildDefaultRequest(serviceName: string): AnalyzeRequest {
+function buildDefaultRequest(serviceName: string, saveToChromaDb: boolean): AnalyzeRequest {
   return {
     service_name: serviceName,
-    goal: `${serviceName} service log anomaly investigation`
+    goal: `${serviceName} service log anomaly investigation`,
+    save_to_chromadb: saveToChromaDb
   }
 }
 
@@ -106,8 +111,8 @@ export const useLogDetectStore = defineStore('logDetect', () => {
     }, 5000)
   }
 
-  async function runAnalysis(serviceName: string) {
-    const request = buildDefaultRequest(serviceName)
+  async function runAnalysis(serviceName: string, saveToChromaDb: boolean) {
+    const request = buildDefaultRequest(serviceName, saveToChromaDb)
     loading.value = true
     executionStatus.value = 'running'
     error.value = null

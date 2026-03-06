@@ -13,6 +13,7 @@ export interface AnalyzeRequest {
   service_name: string
   goal?: string
   scope?: Scope
+  save_to_chromadb?: boolean
 }
 
 export interface NormalizedLog {
@@ -55,11 +56,13 @@ export interface SharedState {
     anomalies: Anomaly[]
     clusters: Cluster[]
     stack_traces: string[]
+    incident_candidates?: Array<Record<string, unknown>>
   }
   metrics: {
     error_rate: number | null
     latency_p95: number | null
     rps: number | null
+    anomaly_score?: number | null
   }
   assessment: {
     risk_score: number | null
@@ -72,6 +75,10 @@ export interface SharedState {
     assumptions: string[]
     failures: FailureRecord[]
     timeouts: string[]
+  }
+  rag?: {
+    related_knowledge?: string[]
+    saved_to_chromadb?: boolean
   }
   final: {
     executive_summary: string | null

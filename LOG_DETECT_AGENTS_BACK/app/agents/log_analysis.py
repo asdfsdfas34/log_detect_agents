@@ -75,10 +75,6 @@ class LogAnalysisAgent:
             "sqlite.save_log_analysis",
             {"goal": state["goal"], "service_name": target_service, "analysis": analysis_text},
         )
-        mcp.call_tool(
-            "chromadb.save_analysis_document",
-            {"doc_id": f"{target_service}:{state['request_id']}", "text": analysis_text},
-        )
 
         state["decisions"]["agents_run"].append(self.name)
         return state

@@ -49,11 +49,9 @@ class ImpactEvaluationAgent:
             f"history_records={len(stored_analyses)}",
         ]
 
-        state["metrics"] = {
-            "error_rate": round(len(anomalies) / total, 3),
-            "latency_p95": round(180.0 + (high_count * 35.0) + (mid_count * 10.0), 2),
-            "rps": round(max(20.0, 120.0 - (len(anomalies) * 3.5)), 2),
-        }
+        state["metrics"]["error_rate"] = round(len(anomalies) / total, 3)
+        state["metrics"]["latency_p95"] = round(180.0 + (high_count * 35.0) + (mid_count * 10.0), 2)
+        state["metrics"]["rps"] = round(max(20.0, 120.0 - (len(anomalies) * 3.5)), 2)
         state["assessment"] = {
             "risk_score": risk_score,
             "confidence": confidence,

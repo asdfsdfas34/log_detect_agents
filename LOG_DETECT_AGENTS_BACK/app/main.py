@@ -1,5 +1,7 @@
 """FastAPI entrypoint for 장애 예방 AI backend."""
 
+from uuid import uuid4
+
 from fastapi import FastAPI
 from pydantic import BaseModel, Field
 
@@ -11,7 +13,6 @@ from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(title="Failure Prevention AI Backend", version="0.2.0")
 
-# 로컬 개발용: Vue dev server 주소(보통 5173 또는 8080)
 origins = [
     "http://localhost:5173",
     "http://127.0.0.1:5173"
@@ -19,10 +20,10 @@ origins = [
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,          # 개발 단계에서는 ["*"]도 가능(단, credentials면 안됨)
+    allow_origins=origins,
     allow_credentials=True,
-    allow_methods=["*"],            # OPTIONS 포함
-    allow_headers=["*"],            # Authorization 포함
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
@@ -32,6 +33,7 @@ class AnalyzeRequest(BaseModel):
     service_name: str = Field(..., min_length=1, description="Target service name")
     goal: str = Field(default="service log anomaly investigation", description="Analysis goal")
     scope: Scope | None = Field(default=None, description="Optional detailed analysis scope")
+    save_to_chromadb: bool = Field(default=False, description="Persist final answer to ChromaDB")
 
 
 class AnalyzeResponse(BaseModel):
@@ -55,6 +57,11 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
     }
     effective_scope["systems"] = [req.service_name]
 
-    initial_state = create_initial_state(goal=req.goal, scope=effective_scope)
+    initial_state = create_initial_state(
+        goal=req.goal,
+        scope=effective_scope,
+        request_id=uuid4().hex,
+        save_to_chromadb=req.save_to_chromadb,
+    )
     result = graph.invoke(initial_state)
     return AnalyzeResponse(result=result)
