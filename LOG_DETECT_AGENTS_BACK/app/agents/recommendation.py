@@ -16,6 +16,9 @@ class RecommendationAgent:
         anomalies = state["evidence"]["anomalies"]
         impact_text = "\n".join(state["assessment"]["rationale"])
         metrics = state["metrics"]
+        incidents = state["evidence"].get("incident_candidates", [])
+        source_evidence = state["evidence"].get("source_code_evidence", [])
+        known_matches = state["evidence"].get("known_pattern_matches", [])
 
         needs_data = any("추가 데이터 필요" in item for item in state["decisions"]["assumptions"])
 
@@ -45,14 +48,25 @@ class RecommendationAgent:
         mcp = get_mcp_client()
         related = state.get("rag", {}).get("related_knowledge", [])
 
+        evidence_bundle = {
+            "core_logs": [item.get("message") for item in anomalies[:5]],
+            "anomaly_score": state["metrics"].get("anomaly_score"),
+            "risk_score": risk,
+            "incident_candidates": incidents[:3],
+            "source_code_evidence": source_evidence[:5],
+            "known_pattern_summary": {
+                "total_matches": len(known_matches),
+                "suppressed": len(state["evidence"].get("suppressed_logs", [])),
+            },
+            "similar_cases": related,
+        }
+
         recommendation_prompt = (
-            "다음 장애 영향 평가 결과를 바탕으로 운영자가 바로 활용할 수 있는 한국어 권고안을 작성하세요.\n"
+            "다음 evidence bundle을 바탕으로 근거 중심(evidence-first) 한국어 권고안을 작성하세요.\n"
             "반드시 포함: 1) 한 줄 요약 2) 즉시 조치 3) 검증 방법 4) 재발 방지.\n\n"
             f"영향 평가 근거: {impact_text}\n"
-            f"리스크 점수: {risk}\n"
             f"지표: {json.dumps(metrics, ensure_ascii=False)}\n"
-            f"이상 징후 수: {len(anomalies)}\n"
-            f"유사 과거 분석: {json.dumps(related, ensure_ascii=False)}"
+            f"evidence_bundle: {json.dumps(evidence_bundle, ensure_ascii=False)}"
         )
 
         try:
@@ -84,6 +98,7 @@ class RecommendationAgent:
             "verification_steps": verification,
             "additional_data_needed": additional_data,
             "generated_answer": generated_answer,
+            "evidence_bundle": evidence_bundle,
         }
         state["decisions"]["agents_run"].append(self.name)
         return state

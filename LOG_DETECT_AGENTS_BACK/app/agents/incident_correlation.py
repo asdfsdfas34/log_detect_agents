@@ -12,10 +12,15 @@ class IncidentCorrelationAgent:
 
     def run(self, state: SharedState) -> SharedState:
         logs = state["evidence"]["normalized_logs"]
+        anomalies = state["evidence"].get("anomalies", [])
         grouped: dict[str, list[dict]] = defaultdict(list)
+
+        core_messages = {str(item.get("message", "")) for item in anomalies if item.get("severity") in {"high", "mid"}}
 
         for log in logs:
             service = str(log.get("system") or "unknown-service")
+            if core_messages and str(log.get("message", "")) not in core_messages:
+                continue
             grouped[service].append(log)
 
         incident_candidates: list[dict] = []
@@ -31,6 +36,7 @@ class IncidentCorrelationAgent:
                     "window_end": error_logs[0].get("timestamp"),
                     "error_count": len(error_logs),
                     "root_cause_hint": error_logs[0].get("message", ""),
+                    "core_log_count": len(items),
                 }
             )
 

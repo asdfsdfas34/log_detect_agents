@@ -13,7 +13,12 @@ class KnowledgeBaseRAGAgent:
 
     def run(self, state: SharedState) -> SharedState:
         mcp = get_mcp_client()
-        query = state["goal"]
+        top_incident = (state["evidence"].get("incident_candidates") or [{}])[0]
+        top_anomaly = (state["evidence"].get("anomalies") or [{}])[0]
+        query = (
+            f"{state['goal']} | incident_hint={top_incident.get('root_cause_hint', '')} "
+            f"| anomaly_pattern={top_anomaly.get('pattern', '')}"
+        )
         related = mcp.call_tool(
             "chromadb.find_related_analyses",
             {"query": query, "n_results": 3},
