@@ -37,7 +37,9 @@ export const useLogDetectStore = defineStore('logDetect', () => {
   const healthStatus = ref<string>('unknown')
   const stubMode = ref<string>('unknown')
   const loading = ref(false)
+  const loadingServices = ref(false)
   const error = ref<string | null>(null)
+  const serviceOptions = ref<string[]>([])
   const state = ref<SharedState | null>(null)
   const toasts = ref<Array<{ id: number; level: 'info' | 'error'; message: string }>>([])
   const agentTimeline = ref<AgentStepStatus[]>(stepNames.map((name) => ({ name, status: 'pending' })))
@@ -98,6 +100,18 @@ export const useLogDetectStore = defineStore('logDetect', () => {
     healthStatus.value = data.status
     healthModel.value = data.model
     stubMode.value = data.stub_mode
+  }
+
+  async function fetchServices() {
+    loadingServices.value = true
+    try {
+      const { data } = await agentApi.services()
+      serviceOptions.value = data.services
+    } catch {
+      addToast('error', '서비스 목록을 불러오지 못했습니다.')
+    } finally {
+      loadingServices.value = false
+    }
   }
 
   function startPollingHealth() {
@@ -168,13 +182,16 @@ export const useLogDetectStore = defineStore('logDetect', () => {
     healthStatus,
     stubMode,
     loading,
+    loadingServices,
     error,
     state,
+    serviceOptions,
     toasts,
     agentTimeline,
     riskClassification,
     overview,
     fetchHealth,
+    fetchServices,
     runAnalysis
   }
 })

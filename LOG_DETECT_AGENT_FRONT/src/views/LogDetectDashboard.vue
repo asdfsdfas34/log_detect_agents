@@ -2,21 +2,36 @@
   <AppLayout>
     <template #header-right>
       <div class="flex items-center gap-3">
+        <button
+          class="rounded border border-slate-300 bg-white px-3 py-2 text-sm hover:bg-slate-50"
+          :disabled="store.loadingServices"
+          @click="openServiceLayer"
+        >
+          서비스선택
+        </button>
         <input
-          v-model="serviceName"
+          :value="serviceName"
           type="text"
-          placeholder="서비스 이름 입력 (예: auth-api)"
-          class="w-56 rounded border border-slate-300 px-3 py-2 text-sm"
+          readonly
+          placeholder="선택된 서비스 없음"
+          class="w-56 rounded border border-slate-300 bg-slate-50 px-3 py-2 text-sm"
         />
         <div class="text-right text-xs text-slate-600">
           <p>Status: <span class="font-semibold">{{ store.executionStatus }}</span></p>
           <p>Stage: <span class="font-semibold">{{ store.currentStage }}</span></p>
           <p>Last run: {{ store.lastExecutionAt ?? '-' }}</p>
         </div>
-        <label class="flex items-center gap-2 text-xs text-slate-700">
-          <input v-model="saveToChromaDb" type="checkbox" class="h-4 w-4" />
-          분석 결과를 ChromaDB에 저장
-        </label>
+        <button
+          class="rounded border px-3 py-2 text-xs"
+          :class="
+            saveToChromaDb
+              ? 'border-emerald-600 bg-emerald-600 text-white'
+              : 'border-slate-300 bg-white text-slate-700 hover:bg-slate-50'
+          "
+          @click="saveToChromaDb = !saveToChromaDb"
+        >
+          {{ saveToChromaDb ? 'ChromaDB 저장: ON' : 'ChromaDB 저장: OFF' }}
+        </button>
         <button
           class="rounded bg-blue-600 px-3 py-2 text-sm text-white disabled:cursor-not-allowed disabled:bg-slate-300"
           :disabled="store.loading || !serviceName.trim()"
@@ -66,6 +81,29 @@
         {{ toast.message }}
       </div>
     </div>
+
+    <div v-if="showServiceLayer" class="fixed inset-0 z-40 flex items-center justify-center bg-black/40" @click.self="showServiceLayer = false">
+      <div class="w-full max-w-md rounded-lg bg-white p-4 shadow-xl">
+        <div class="mb-3 flex items-center justify-between">
+          <h3 class="text-base font-semibold text-slate-800">서비스 선택</h3>
+          <button class="rounded px-2 py-1 text-sm text-slate-500 hover:bg-slate-100" @click="showServiceLayer = false">닫기</button>
+        </div>
+        <div v-if="store.loadingServices" class="py-8 text-center text-sm text-slate-500">서비스 목록 로딩중...</div>
+        <div v-else-if="store.serviceOptions.length === 0" class="py-8 text-center text-sm text-slate-500">
+          선택 가능한 서비스가 없습니다.
+        </div>
+        <ul v-else class="max-h-72 space-y-2 overflow-y-auto">
+          <li v-for="service in store.serviceOptions" :key="service">
+            <button
+              class="w-full rounded border border-slate-200 px-3 py-2 text-left text-sm hover:bg-slate-50"
+              @click="handleSelectService(service)"
+            >
+              {{ service }}
+            </button>
+          </li>
+        </ul>
+      </div>
+    </div>
   </AppLayout>
 </template>
 
@@ -85,8 +123,19 @@ import EmptyState from '@/components/common/EmptyState.vue'
 import { useLogDetectStore } from '@/stores/logDetectStore'
 
 const store = useLogDetectStore()
-const serviceName = ref('billing-api')
+const serviceName = ref('')
 const saveToChromaDb = ref(false)
+const showServiceLayer = ref(false)
+
+async function openServiceLayer() {
+  await store.fetchServices()
+  showServiceLayer.value = true
+}
+
+function handleSelectService(service: string) {
+  serviceName.value = service
+  showServiceLayer.value = false
+}
 
 function handleRunAnalysis() {
   const trimmed = serviceName.value.trim()
@@ -96,5 +145,6 @@ function handleRunAnalysis() {
 
 onMounted(async () => {
   await store.fetchHealth()
+  await store.fetchServices()
 })
 </script>

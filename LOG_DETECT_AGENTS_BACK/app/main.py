@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from pydantic import BaseModel, Field
 
 from app.config import settings
+from app.db.sqlite_store import fetch_service_names
 from app.graph.engine import build_graph
 from app.state import Scope, SharedState, create_initial_state
 
@@ -42,9 +43,18 @@ class AnalyzeResponse(BaseModel):
     result: SharedState
 
 
+class ServiceListResponse(BaseModel):
+    services: list[str]
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok", "model": settings.openai_model, "stub_mode": str(settings.llm_stub_mode)}
+
+
+@app.get("/services", response_model=ServiceListResponse)
+def list_services() -> ServiceListResponse:
+    return ServiceListResponse(services=fetch_service_names())
 
 
 @app.post("/analyze", response_model=AnalyzeResponse)

@@ -109,6 +109,31 @@ def fetch_recent_log_entries(*, service_names: list[str] | None, limit: int = 20
     ]
 
 
+def fetch_service_names(limit: int = 100) -> list[str]:
+    """Read distinct service names from service_logs table."""
+
+    db_path = _resolve_db_path()
+    if not db_path:
+        return []
+
+    query = (
+        "SELECT DISTINCT service_name FROM service_logs "
+        "WHERE COALESCE(TRIM(service_name), '') != '' "
+        "ORDER BY service_name ASC "
+        "LIMIT ?"
+    )
+
+    try:
+        with sqlite3.connect(db_path) as conn:
+            cur = conn.cursor()
+            cur.execute(query, (limit,))
+            rows = cur.fetchall()
+    except Exception:
+        return []
+
+    return [str(row[0]) for row in rows]
+
+
 def save_log_analysis(*, goal: str, service_name: str, analysis: str) -> None:
     """Persist log analysis output to SQLite."""
 
