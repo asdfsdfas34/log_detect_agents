@@ -1,5 +1,5 @@
 import axios from 'axios'
-import type { AnalyzeRequest, AnalyzeResponse, HealthResponse } from '@/types/agentTypes'
+import type { AnalyzeRequest, AnalyzeResponse, HealthResponse, ServiceListResponse } from '@/types/agentTypes'
 
 const apiClient = axios.create({
   baseURL: import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000',
@@ -12,5 +12,8 @@ export const agentApi = {
   },
   health() {
     return apiClient.get<HealthResponse>('/health')
+  },
+  services() {
+    return apiClient.get<ServiceListResponse>('/services')
   }
 }

@@ -99,6 +99,10 @@ export interface HealthResponse {
   stub_mode: string
 }
 
+export interface ServiceListResponse {
+  services: string[]
+}
+
 export type ExecutionStatus = 'idle' | 'running' | 'completed' | 'failed'
 
 export interface AgentStepStatus {
