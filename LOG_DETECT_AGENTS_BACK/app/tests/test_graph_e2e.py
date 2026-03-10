@@ -28,6 +28,8 @@ def test_analyze_orchestrator_flow_and_skip_code_analysis():
     assert "IncidentCorrelationAgent" in body["decisions"]["agents_run"]
     assert "KnowledgeBaseRAGAgent" in body["decisions"]["agents_run"]
     assert body["final"]["generated_answer"] is not None
+    assert body["final"]["evidence_bundle"] is not None
+    assert "known_pattern_summary" in body["final"]["evidence_bundle"]
     assert body["rag"]["saved_to_chromadb"] is False
 
 
@@ -50,4 +52,5 @@ def test_analyze_can_save_final_answer_to_chromadb():
     body = res.json()["result"]
     assert "SourceCodeAnalysisAgent" in body["decisions"]["skipped_agents"]
     assert body["final"]["generated_answer"] is not None
+    assert body["final"]["evidence_bundle"] is not None
     assert body["rag"]["saved_to_chromadb"] is True

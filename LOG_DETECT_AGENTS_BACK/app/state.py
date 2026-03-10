@@ -13,10 +13,13 @@ class Scope(TypedDict):
 
 class Evidence(TypedDict):
     normalized_logs: list[dict]
+    suppressed_logs: list[dict]
+    known_pattern_matches: list[dict]
     anomalies: list[dict]
     clusters: list[dict]
     stack_traces: list[str]
     incident_candidates: list[dict]
+    source_code_evidence: list[dict]
 
 
 class Metrics(TypedDict):
@@ -46,6 +49,7 @@ class Final(TypedDict):
     verification_steps: list[str] | None
     additional_data_needed: list[str] | None
     generated_answer: str | None
+    evidence_bundle: dict | None
 
 
 class Orchestration(TypedDict):
@@ -81,10 +85,13 @@ def create_initial_state(goal: str, scope: Scope, request_id: str, save_to_chrom
         "scope": scope,
         "evidence": {
             "normalized_logs": [],
+            "suppressed_logs": [],
+            "known_pattern_matches": [],
             "anomalies": [],
             "clusters": [],
             "stack_traces": [],
             "incident_candidates": [],
+            "source_code_evidence": [],
         },
         "metrics": {"error_rate": None, "latency_p95": None, "rps": None, "anomaly_score": None},
         "assessment": {"risk_score": None, "confidence": "low", "rationale": []},
@@ -101,6 +108,7 @@ def create_initial_state(goal: str, scope: Scope, request_id: str, save_to_chrom
             "verification_steps": None,
             "additional_data_needed": None,
             "generated_answer": None,
+            "evidence_bundle": None,
         },
         "orchestration": {
             "next_agent": None,

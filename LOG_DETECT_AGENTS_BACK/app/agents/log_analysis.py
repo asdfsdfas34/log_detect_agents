@@ -11,9 +11,20 @@ class LogAnalysisAgent:
 
     name = "LogAnalysisAgent"
 
+    _known_pattern_registry = [
+        {"pattern": "health check", "classification": "harmless", "suppression": True},
+        {"pattern": "readiness probe", "classification": "harmless", "suppression": True},
+        {"pattern": "broken pipe", "classification": "false_positive", "suppression": True},
+        {"pattern": "connection reset by peer", "classification": "false_positive", "suppression": True},
+        {"pattern": "out of memory", "classification": "critical", "suppression": False},
+        {"pattern": "deadlock", "classification": "critical", "suppression": False},
+    ]
+
     def run(self, state: SharedState) -> SharedState:
         logs = state["evidence"]["normalized_logs"]
         anomalies: list[dict] = []
+        suppressed_logs: list[dict] = []
+        known_pattern_matches: list[dict] = []
         cluster_counter: Counter[str] = Counter()
 
         for log in logs:
@@ -21,13 +32,35 @@ class LogAnalysisAgent:
             msg = message.lower()
             level = str(log.get("level", "INFO")).upper()
 
+            matched_pattern = None
+            for entry in self._known_pattern_registry:
+                if entry["pattern"] in msg:
+                    matched_pattern = entry
+                    known_pattern_matches.append(
+                        {
+                            "system": log.get("system"),
+                            "pattern": entry["pattern"],
+                            "classification": entry["classification"],
+                            "suppression": entry["suppression"],
+                            "message": message,
+                        }
+                    )
+                    break
+
+            if matched_pattern and matched_pattern["suppression"]:
+                suppressed_logs.append(log)
+                cluster_counter[f"suppressed:{matched_pattern['classification']}"] += 1
+                continue
+
             if level == "ERROR" or "error" in msg or "exception" in msg or "fail" in msg:
                 severity = "high" if ("exception" in msg or "critical" in msg or level == "ERROR") else "mid"
+                if matched_pattern and matched_pattern["classification"] == "critical":
+                    severity = "high"
                 anomalies.append(
                     {
                         "system": log.get("system"),
                         "severity": severity,
-                        "pattern": "error_exception",
+                        "pattern": matched_pattern["pattern"] if matched_pattern else "error_exception",
                         "message": message,
                     }
                 )
@@ -66,9 +99,15 @@ class LogAnalysisAgent:
             state["decisions"]["assumptions"].append("OpenAI API 호출 실패로 fallback 분석을 사용했습니다.")
 
         state["evidence"]["anomalies"] = anomalies
+        state["evidence"]["suppressed_logs"] = suppressed_logs
+        state["evidence"]["known_pattern_matches"] = known_pattern_matches
         state["evidence"]["clusters"] = [
             {"cluster": key, "count": value} for key, value in sorted(cluster_counter.items())
         ]
+
+        state["decisions"]["assumptions"].append(
+            f"Known Pattern Registry match={len(known_pattern_matches)}, suppressed={len(suppressed_logs)}"
+        )
 
         target_service = (state["scope"].get("systems") or ["all"])[0]
         mcp.call_tool(

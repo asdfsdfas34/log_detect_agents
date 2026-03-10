@@ -24,6 +24,7 @@ class ImpactEvaluationAgent:
 
         anomalies = state["evidence"]["anomalies"]
         logs = state["evidence"]["normalized_logs"]
+        suppressed_count = len(state["evidence"].get("suppressed_logs", []))
         total = max(len(logs), 1)
 
         high_count = sum(1 for a in anomalies if a.get("severity") == "high")
@@ -34,7 +35,8 @@ class ImpactEvaluationAgent:
             text = item.get("analysis", "").lower()
             history_risk_signals += sum(text.count(token) for token in ["critical", "장애", "timeout", "error"])
 
-        risk_score = min(100, high_count * 25 + mid_count * 12 + history_risk_signals)
+        suppression_credit = min(20, suppressed_count * 2)
+        risk_score = min(100, max(0, high_count * 25 + mid_count * 12 + history_risk_signals - suppression_credit))
 
         confidence = "low"
         if risk_score >= 70:
@@ -47,6 +49,8 @@ class ImpactEvaluationAgent:
             f"mid_severity={mid_count}",
             f"history_signals={history_risk_signals}",
             f"history_records={len(stored_analyses)}",
+            f"suppressed_count={suppressed_count}",
+            f"suppression_credit={suppression_credit}",
         ]
 
         state["metrics"]["error_rate"] = round(len(anomalies) / total, 3)

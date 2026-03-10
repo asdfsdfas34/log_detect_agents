@@ -12,14 +12,26 @@ class AnomalyDetectionAgent:
 
     def run(self, state: SharedState) -> SharedState:
         logs = state["evidence"]["normalized_logs"]
-        if not logs:
+        suppressed_logs = state["evidence"].get("suppressed_logs", [])
+        suppressed_keys = {
+            (str(item.get("timestamp")), str(item.get("system")), str(item.get("message"))) for item in suppressed_logs
+        }
+        filtered_logs = [
+            log
+            for log in logs
+            if (str(log.get("timestamp")), str(log.get("system")), str(log.get("message"))) not in suppressed_keys
+        ]
+
+        if not filtered_logs:
             state["metrics"]["anomaly_score"] = 0.0
-            state["decisions"]["assumptions"].append("분석할 로그가 없어 anomaly score를 0으로 설정했습니다.")
+            state["decisions"]["assumptions"].append(
+                "suppression 적용 후 분석할 로그가 없어 anomaly score를 0으로 설정했습니다."
+            )
             state["decisions"]["agents_run"].append(self.name)
             return state
 
-        level_counter: Counter[str] = Counter(str(log.get("level", "INFO")).upper() for log in logs)
-        total = len(logs)
+        level_counter: Counter[str] = Counter(str(log.get("level", "INFO")).upper() for log in filtered_logs)
+        total = len(filtered_logs)
         error_rate = level_counter.get("ERROR", 0) / total
         warn_rate = level_counter.get("WARN", 0) / total
 
