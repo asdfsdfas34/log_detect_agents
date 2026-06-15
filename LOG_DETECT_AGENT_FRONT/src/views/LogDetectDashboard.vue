@@ -42,20 +42,41 @@
       </div>
     </template>
 
-    <section class="grid gap-4 md:grid-cols-3 xl:grid-cols-6">
-      <OverviewCard label="Total logs" :value="store.overview.totalLogs" />
-      <OverviewCard label="Anomalies" :value="store.overview.totalAnomalies" />
-      <OverviewCard label="Unique patterns" :value="store.overview.uniquePatterns" />
-      <OverviewCard label="Impact score" :value="store.overview.impactScore" />
-      <OverviewCard label="Risk" :value="store.riskClassification" />
-      <OverviewCard label="System health" :value="store.healthStatus" :subtitle="store.healthModel" />
+    <section class="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+      <div class="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+        <h2 class="mb-3 text-sm font-semibold uppercase tracking-wide text-slate-500">Detection Summary</h2>
+        <div class="grid grid-cols-2 gap-3 text-sm">
+          <OverviewCard label="Total Logs" :value="store.overview.totalLogs" />
+          <OverviewCard label="Total Fingerprints" :value="store.overview.totalFingerprints" />
+          <OverviewCard label="Known Patterns" :value="store.overview.knownPatterns" />
+          <OverviewCard label="New Patterns" :value="store.overview.newPatterns" />
+          <OverviewCard label="Anomalies Detected" :value="store.overview.anomaliesDetected" />
+          <OverviewCard label="Exception Registered Count" :value="store.overview.exceptionRegisteredCount" />
+        </div>
+      </div>
+
+      <div class="rounded-lg border border-slate-200 bg-white p-4 text-center shadow-sm">
+        <h2 class="mb-3 text-sm font-semibold uppercase tracking-wide text-slate-500">Risk Summary</h2>
+        <p class="text-sm text-slate-500">Impact Score</p>
+        <p class="text-5xl font-bold text-slate-900">{{ store.overview.riskScore }}</p>
+        <p class="mt-1 text-lg font-semibold text-red-600">{{ store.overview.riskLevel }}</p>
+        <p class="mt-4 text-sm text-slate-600">Detection Status: <span class="font-semibold">{{ store.overview.detectionStatus }}</span></p>
+      </div>
+
+      <div class="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+        <h2 class="mb-3 text-sm font-semibold uppercase tracking-wide text-slate-500">Recommendation Summary</h2>
+        <dl class="space-y-3 text-sm">
+          <div><dt class="font-semibold text-slate-600">Cause</dt><dd>{{ store.recommendationSummary?.cause ?? '-' }}</dd></div>
+          <div><dt class="font-semibold text-slate-600">Recommendation</dt><dd>{{ store.recommendationSummary?.recommendation ?? '-' }}</dd></div>
+          <div><dt class="font-semibold text-slate-600">Confidence</dt><dd>{{ store.recommendationSummary?.confidence ?? '-' }}</dd></div>
+        </dl>
+      </div>
     </section>
 
     <LoadingSpinner v-if="store.loading" label="Running multi-agent analysis" />
     <ErrorState v-else-if="store.error" :message="store.error" />
 
     <template v-if="store.state">
-      <ImpactGauge :score="store.overview.impactScore" :metrics="store.state.metrics" />
       <div class="grid gap-6 xl:grid-cols-2">
         <PatternClusterTable :clusters="store.state.evidence.clusters" />
         <AnomalyTimelineChart :anomalies="store.state.evidence.anomalies" :logs="store.state.evidence.normalized_logs" />
@@ -111,7 +132,6 @@
 import { onMounted, ref } from 'vue'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import OverviewCard from '@/components/dashboard/OverviewCard.vue'
-import ImpactGauge from '@/components/dashboard/ImpactGauge.vue'
 import PatternClusterTable from '@/components/dashboard/PatternClusterTable.vue'
 import AnomalyTimelineChart from '@/components/dashboard/AnomalyTimelineChart.vue'
 import SourceCodePanel from '@/components/dashboard/SourceCodePanel.vue'
