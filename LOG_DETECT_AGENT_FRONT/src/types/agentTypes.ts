@@ -16,6 +16,11 @@ export interface AnalyzeRequest {
   save_to_chromadb?: boolean
 }
 
+export interface FingerprintRecommendationRequest {
+  service_name: string
+  fingerprint: string
+}
+
 export interface NormalizedLog {
   timestamp?: string
   system?: string
@@ -34,6 +39,8 @@ export interface Anomaly {
 export interface Cluster {
   cluster: string
   count: number
+  message?: string
+  log_level?: string
 }
 
 export interface FailureRecord {
@@ -86,6 +93,20 @@ export interface SharedState {
     verification_steps: string[] | null
     additional_data_needed: string[] | null
     generated_answer: string | null
+    evidence_bundle?: {
+      summary?: {
+        total_logs: number
+        total_fingerprints: number
+        known_patterns: number
+        new_patterns: number
+        anomalies_detected: number
+        exception_registered_count: number
+        risk_score: number
+        risk_level: string
+        detection_status: string
+      }
+      recommendation?: { cause: string; recommendation: string; confidence: string }
+    } | null
   }
 }
 
