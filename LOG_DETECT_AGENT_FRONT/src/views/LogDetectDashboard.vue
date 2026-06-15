@@ -78,7 +78,7 @@
 
     <template v-if="store.state">
       <div class="grid gap-6 xl:grid-cols-2">
-        <PatternClusterTable :clusters="store.state.evidence.clusters" />
+        <PatternClusterTable :clusters="store.state.evidence.clusters" @select-cluster="handleSelectCluster" />
         <AnomalyTimelineChart :anomalies="store.state.evidence.anomalies" :logs="store.state.evidence.normalized_logs" />
       </div>
       <RecommendationPanel
@@ -139,6 +139,7 @@ import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
 import ErrorState from '@/components/common/ErrorState.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import { useLogDetectStore } from '@/stores/logDetectStore'
+import type { Cluster } from '@/types/agentTypes'
 
 const store = useLogDetectStore()
 const serviceName = ref('')
@@ -159,6 +160,12 @@ function handleRunAnalysis() {
   const trimmed = serviceName.value.trim()
   if (!trimmed) return
   void store.runAnalysis(trimmed, saveToChromaDb.value)
+}
+
+function handleSelectCluster(cluster: Cluster) {
+  const trimmed = serviceName.value.trim()
+  if (!trimmed) return
+  void store.runClusterRecommendation(trimmed, cluster.cluster)
 }
 
 onMounted(async () => {

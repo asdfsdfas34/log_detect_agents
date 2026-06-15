@@ -16,6 +16,11 @@ export interface AnalyzeRequest {
   save_to_chromadb?: boolean
 }
 
+export interface FingerprintRecommendationRequest {
+  service_name: string
+  fingerprint: string
+}
+
 export interface NormalizedLog {
   timestamp?: string
   system?: string

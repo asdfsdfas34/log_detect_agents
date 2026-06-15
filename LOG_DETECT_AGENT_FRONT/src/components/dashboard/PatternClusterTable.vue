@@ -1,6 +1,9 @@
 <template>
   <div class="rounded-xl border bg-white p-4 shadow-sm">
-    <h3 class="mb-3 text-lg font-semibold">Pattern Clusters</h3>
+    <div class="mb-3 flex items-center justify-between">
+      <h3 class="text-lg font-semibold">Pattern Clusters</h3>
+      <p class="text-xs text-slate-500">Click a pattern to rerun recommendations</p>
+    </div>
     <div class="overflow-x-auto">
       <table class="min-w-full text-left text-sm">
         <thead class="text-xs uppercase text-slate-500">
@@ -13,7 +16,12 @@
           </tr>
         </thead>
         <tbody>
-          <tr v-for="item in sortedClusters" :key="item.cluster" class="border-t">
+          <tr
+            v-for="item in sortedClusters"
+            :key="item.cluster"
+            class="cursor-pointer border-t hover:bg-blue-50"
+            @click="emit('selectCluster', item)"
+          >
             <td class="py-2 font-mono text-xs" :class="isErrorLevel(item) ? 'font-semibold text-red-600' : ''">
               {{ item.cluster }}
             </td>
@@ -39,6 +47,7 @@ import { computed } from 'vue'
 import type { Cluster } from '@/types/agentTypes'
 
 const props = defineProps<{ clusters: Cluster[] }>()
+const emit = defineEmits<{ selectCluster: [cluster: Cluster] }>()
 
 const sortedClusters = computed(() => [...props.clusters].sort((a, b) => b.count - a.count))
 const total = computed(() => props.clusters.reduce((sum, item) => sum + item.count, 0) || 1)

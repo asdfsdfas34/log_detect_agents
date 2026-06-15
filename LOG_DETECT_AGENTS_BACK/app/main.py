@@ -61,6 +61,13 @@ class ApprovalRequest(BaseModel):
     confidence: str = "HIGH"
 
 
+class FingerprintRecommendationRequest(BaseModel):
+    """Request body for rerunning downstream recommendation agents for one fingerprint."""
+
+    service_name: str
+    fingerprint: str
+
+
 class ServiceListResponse(BaseModel):
     services: list[str]
 
@@ -109,6 +116,72 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
     result["final"]["generated_answer"] = rec["recommendation"]
     result["final"]["evidence_bundle"] = scenario
     return AnalyzeResponse(result=result)
+
+
+@app.post("/recommendations/fingerprint", response_model=AnalyzeResponse)
+def recommend_for_fingerprint(req: FingerprintRecommendationRequest) -> AnalyzeResponse:
+    """Run the Incident Recommendation through RecommendationAgent slice for a selected cluster."""
+    scenario = run_detection_pipeline(req.service_name)
+    selected = next((item for item in scenario["fingerprints"] if item["fingerprint"] == req.fingerprint), None)
+    selected_recommendation = next(
+        (item for item in scenario.get("recommendations", []) if item["fingerprint"] == req.fingerprint),
+        scenario["recommendation"],
+    )
+    selected_impact = next(
+        (item for item in scenario.get("impacts", []) if item["fingerprint"] == req.fingerprint),
+        {"risk_score": 0, "risk_level": "Low", "detected": False},
+    )
+
+    state = create_initial_state(
+        goal=f"selected fingerprint recommendation: {req.fingerprint}",
+        scope={"systems": [req.service_name], "time_range": {"from": "", "to": ""}, "filters": {"fingerprint": req.fingerprint}},
+        request_id=uuid4().hex,
+    )
+    # Mark only the downstream agents requested by cluster selection as executed.
+    state["decisions"]["agents_run"] = [
+        "IncidentCorrelationAgent",
+        "ImpactEvaluationAgent",
+        "KnowledgeBaseRAGAgent",
+        "RecommendationAgent",
+    ]
+    state["decisions"]["skipped_agents"] = [
+        "OrchestratorAgent",
+        "LogCollectorAgent",
+        "LogAnalysisAgent",
+        "AnomalyDetectionAgent",
+        "SourceCodeAnalysisAgent",
+    ]
+    if selected:
+        state["evidence"]["clusters"] = [
+            {
+                "cluster": selected["fingerprint"],
+                "count": selected["occurrence_count"],
+                "message": selected["message"],
+                "log_level": selected["log_level"],
+            }
+        ]
+        state["evidence"]["stack_traces"] = [selected["stacktrace"]]
+    state["assessment"]["risk_score"] = selected_impact["risk_score"]
+    state["assessment"]["confidence"] = "high" if selected_recommendation["confidence"] == "HIGH" else "mid"
+    state["assessment"]["rationale"] = [
+        f"Selected Fingerprint: {req.fingerprint}",
+        f"Risk Level: {selected_impact['risk_level']}",
+    ]
+    state["final"]["executive_summary"] = selected_recommendation["cause"]
+    state["final"]["recommended_actions"] = [
+        {"priority": selected_recommendation["confidence"], "action": selected_recommendation["recommendation"], "owner": "service-owner"}
+    ]
+    state["final"]["verification_steps"] = [
+        f"Review logs grouped by {req.fingerprint}",
+        "Apply the recommended fix and monitor the fingerprint count",
+    ]
+    state["final"]["generated_answer"] = selected_recommendation["recommendation"]
+    state["final"]["evidence_bundle"] = {
+        "selected_fingerprint": req.fingerprint,
+        "recommendation": selected_recommendation,
+        "impact": selected_impact,
+    }
+    return AnalyzeResponse(result=state)
 
 
 @app.post("/exceptions")

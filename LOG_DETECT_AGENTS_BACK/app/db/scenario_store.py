@@ -219,7 +219,7 @@ def run_detection_pipeline(service_name: str | None = None) -> dict[str, Any]:
         exception_count = cur.execute("SELECT COUNT(*) FROM exception_registry").fetchone()[0]
     top_impact = max(impacts, key=lambda x: x["risk_score"], default={"risk_score": 0, "risk_level": "Low", "detected": False})
     top_rec = recs[0] if recs else {"cause": "-", "recommendation": "-", "confidence": "LOW"}
-    return {"fingerprints": list(groups.values()), "anomalies": anomalies, "impacts": impacts, "recommendation": top_rec, "summary": {"total_logs": total_logs, "total_fingerprints": len(groups), "known_patterns": known_count, "new_patterns": new_count, "anomalies_detected": len(anomalies), "exception_registered_count": exception_count, "risk_score": top_impact["risk_score"], "risk_level": top_impact["risk_level"], "detection_status": "Detected" if top_impact["detected"] else "Normal"}}
+    return {"fingerprints": list(groups.values()), "anomalies": anomalies, "impacts": impacts, "recommendations": recs, "recommendation": top_rec, "summary": {"total_logs": total_logs, "total_fingerprints": len(groups), "known_patterns": known_count, "new_patterns": new_count, "anomalies_detected": len(anomalies), "exception_registered_count": exception_count, "risk_score": top_impact["risk_score"], "risk_level": top_impact["risk_level"], "detection_status": "Detected" if top_impact["detected"] else "Normal"}}
 
 
 def register_exception(fp: str, reason: str) -> None:

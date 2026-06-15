@@ -186,6 +186,45 @@ export const useLogDetectStore = defineStore('logDetect', () => {
     }
   }
 
+  async function runClusterRecommendation(serviceName: string, fingerprint: string) {
+    executionStatus.value = 'running'
+    error.value = null
+    currentStage.value = 'IncidentCorrelationAgent'
+    agentTimeline.value = stepNames.map((name) => ({
+      name,
+      status: ['IncidentCorrelationAgent', 'ImpactEvaluationAgent', 'KnowledgeBaseRAGAgent', 'RecommendationAgent'].includes(name)
+        ? 'running'
+        : 'skipped'
+    }))
+
+    try {
+      // Request the backend to execute the downstream recommendation slice for the selected fingerprint.
+      const { data } = await agentApi.recommendationForFingerprint({ service_name: serviceName, fingerprint })
+      if (state.value) {
+        state.value = {
+          ...state.value,
+          assessment: data.result.assessment,
+          decisions: data.result.decisions,
+          final: {
+            ...state.value.final,
+            ...data.result.final
+          }
+        }
+      } else {
+        state.value = data.result
+      }
+      markTimelineFromState(data.result)
+      executionStatus.value = data.result.decisions.failures.length > 0 ? 'failed' : 'completed'
+      currentStage.value = 'Completed'
+      lastExecutionAt.value = new Date().toISOString()
+      addToast('info', `Updated recommendations for ${fingerprint}`)
+    } catch (caught) {
+      executionStatus.value = 'failed'
+      error.value = (caught as Error).message
+      addToast('error', `Recommendation update failed: ${error.value}`)
+    }
+  }
+
   return {
     executionStatus,
     currentStage,
@@ -205,6 +244,7 @@ export const useLogDetectStore = defineStore('logDetect', () => {
     recommendationSummary,
     fetchHealth,
     fetchServices,
-    runAnalysis
+    runAnalysis,
+    runClusterRecommendation
   }
 })
