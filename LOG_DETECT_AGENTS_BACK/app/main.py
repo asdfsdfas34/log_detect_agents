@@ -96,7 +96,7 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
     # Run the deterministic scenario pipeline so the demo works without an LLM.
     scenario = run_detection_pipeline(req.service_name)
     result["evidence"]["clusters"] = [
-        {"cluster": item["fingerprint"], "count": item["occurrence_count"]} for item in scenario["fingerprints"]
+        {"cluster": item["fingerprint"], "count": item["occurrence_count"], "message": item["message"], "log_level": item["log_level"]} for item in scenario["fingerprints"]
     ]
     result["evidence"]["anomalies"] = scenario["anomalies"]
     result["evidence"]["stack_traces"] = [item["stacktrace"] for item in scenario["fingerprints"] if item["stacktrace"]]

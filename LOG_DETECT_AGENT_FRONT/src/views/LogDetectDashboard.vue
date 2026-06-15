@@ -81,7 +81,6 @@
         <PatternClusterTable :clusters="store.state.evidence.clusters" />
         <AnomalyTimelineChart :anomalies="store.state.evidence.anomalies" :logs="store.state.evidence.normalized_logs" />
       </div>
-      <SourceCodePanel :stack-traces="store.state.evidence.stack_traces" />
       <RecommendationPanel
         :actions="store.state.final.recommended_actions ?? []"
         :verification="store.state.final.verification_steps ?? []"
@@ -134,7 +133,6 @@ import AppLayout from '@/components/layout/AppLayout.vue'
 import OverviewCard from '@/components/dashboard/OverviewCard.vue'
 import PatternClusterTable from '@/components/dashboard/PatternClusterTable.vue'
 import AnomalyTimelineChart from '@/components/dashboard/AnomalyTimelineChart.vue'
-import SourceCodePanel from '@/components/dashboard/SourceCodePanel.vue'
 import RecommendationPanel from '@/components/dashboard/RecommendationPanel.vue'
 import AgentProgressTimeline from '@/components/dashboard/AgentProgressTimeline.vue'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'

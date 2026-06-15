@@ -34,6 +34,8 @@ export interface Anomaly {
 export interface Cluster {
   cluster: string
   count: number
+  message?: string
+  log_level?: string
 }
 
 export interface FailureRecord {
