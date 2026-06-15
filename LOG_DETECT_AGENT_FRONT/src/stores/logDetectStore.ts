@@ -46,18 +46,30 @@ export const useLogDetectStore = defineStore('logDetect', () => {
   let pollTimer: ReturnType<typeof setInterval> | null = null
   let stream: EventSource | null = null
 
+  const scenarioSummary = computed(() => state.value?.final.evidence_bundle?.summary)
+  const recommendationSummary = computed(() => state.value?.final.evidence_bundle?.recommendation)
+
   const riskClassification = computed(() => {
+    const level = scenarioSummary.value?.risk_level
+    if (level) return level
     const score = state.value?.assessment.risk_score ?? 0
+    if (score >= 90) return 'Critical'
     if (score >= 70) return 'High'
-    if (score >= 30) return 'Medium'
+    if (score >= 40) return 'Medium'
     return 'Low'
   })
 
   const overview = computed(() => ({
-    totalLogs: state.value?.evidence.normalized_logs.length ?? 0,
-    totalAnomalies: state.value?.evidence.anomalies.length ?? 0,
-    uniquePatterns: state.value?.evidence.clusters.length ?? 0,
-    impactScore: state.value?.assessment.risk_score ?? 0
+    totalLogs: scenarioSummary.value?.total_logs ?? state.value?.evidence.normalized_logs.length ?? 0,
+    totalFingerprints: scenarioSummary.value?.total_fingerprints ?? state.value?.evidence.clusters.length ?? 0,
+    knownPatterns: scenarioSummary.value?.known_patterns ?? 0,
+    newPatterns: scenarioSummary.value?.new_patterns ?? 0,
+    anomaliesDetected: scenarioSummary.value?.anomalies_detected ?? state.value?.evidence.anomalies.length ?? 0,
+    exceptionRegisteredCount: scenarioSummary.value?.exception_registered_count ?? 0,
+    riskScore: scenarioSummary.value?.risk_score ?? state.value?.assessment.risk_score ?? 0,
+    riskLevel: scenarioSummary.value?.risk_level ?? riskClassification.value,
+    detectionStatus: scenarioSummary.value?.detection_status ?? 'Not analyzed',
+    impactScore: scenarioSummary.value?.risk_score ?? state.value?.assessment.risk_score ?? 0
   }))
 
   function addToast(level: 'info' | 'error', message: string) {
@@ -190,6 +202,7 @@ export const useLogDetectStore = defineStore('logDetect', () => {
     agentTimeline,
     riskClassification,
     overview,
+    recommendationSummary,
     fetchHealth,
     fetchServices,
     runAnalysis

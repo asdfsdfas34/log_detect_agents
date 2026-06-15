@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 
 from app.config import settings
 from app.db.sqlite_store import fetch_service_names
+from app.db.scenario_store import approve_result, register_exception, run_detection_pipeline
 from app.graph.engine import build_graph
 from app.state import Scope, SharedState, create_initial_state
 
@@ -43,6 +44,23 @@ class AnalyzeResponse(BaseModel):
     result: SharedState
 
 
+class ExceptionRegisterRequest(BaseModel):
+    """Request body for fingerprint ignore registration."""
+
+    fingerprint: str
+    reason: str
+
+
+class ApprovalRequest(BaseModel):
+    """Request body for approved recommendation knowledge capture."""
+
+    fingerprint: str
+    cause: str
+    recommendation: str
+    action: str = "approved"
+    confidence: str = "HIGH"
+
+
 class ServiceListResponse(BaseModel):
     services: list[str]
 
@@ -74,4 +92,34 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
         save_to_chromadb=req.save_to_chromadb,
     )
     result = graph.invoke(initial_state)
+
+    # Run the deterministic scenario pipeline so the demo works without an LLM.
+    scenario = run_detection_pipeline(req.service_name)
+    result["evidence"]["clusters"] = [
+        {"cluster": item["fingerprint"], "count": item["occurrence_count"], "message": item["message"], "log_level": item["log_level"]} for item in scenario["fingerprints"]
+    ]
+    result["evidence"]["anomalies"] = scenario["anomalies"]
+    result["evidence"]["stack_traces"] = [item["stacktrace"] for item in scenario["fingerprints"] if item["stacktrace"]]
+    result["assessment"]["risk_score"] = scenario["summary"]["risk_score"]
+    result["assessment"]["confidence"] = "high" if scenario["summary"]["risk_score"] >= 70 else "mid"
+    result["assessment"]["rationale"] = [f"Risk Level: {scenario['summary']['risk_level']}", f"Detection Status: {scenario['summary']['detection_status']}"]
+    rec = scenario["recommendation"]
+    result["final"]["recommended_actions"] = [{"priority": rec["confidence"], "action": rec["recommendation"], "owner": "service-owner"}]
+    result["final"]["executive_summary"] = rec["cause"]
+    result["final"]["generated_answer"] = rec["recommendation"]
+    result["final"]["evidence_bundle"] = scenario
     return AnalyzeResponse(result=result)
+
+
+@app.post("/exceptions")
+def create_exception(req: ExceptionRegisterRequest) -> dict[str, str]:
+    """Register a fingerprint ignore rule for SC-006."""
+    register_exception(req.fingerprint, req.reason)
+    return {"status": "registered", "fingerprint": req.fingerprint}
+
+
+@app.post("/approvals")
+def approve_recommendation(req: ApprovalRequest) -> dict[str, str]:
+    """Approve a recommendation and create a Knowledge Card for SC-007."""
+    card_id = approve_result(req.fingerprint, req.cause, req.recommendation, req.action, req.confidence)
+    return {"result": "approved", "card_id": card_id}
