@@ -143,8 +143,10 @@
         :actions="store.state.final.recommended_actions ?? []"
         :verification="store.state.final.verification_steps ?? []"
         :generated-answer="store.state.final.generated_answer"
+        :can-moderate="canModerateRecommendation"
+        @approve-save="handleApproveSave"
+        @approve-exception="handleApproveException"
       />
-      <AgentProgressTimeline :steps="store.agentTimeline" />
     </template>
 
     <RecommendationHistoryPanel
@@ -152,6 +154,10 @@
       :loading="store.loadingRecommendations"
       @refresh="handleRefreshRecommendations"
     />
+
+    <aside class="fixed left-4 top-28 z-20 hidden w-56 xl:block">
+      <AgentProgressTimeline :steps="store.agentTimeline" compact />
+    </aside>
 
     <EmptyState
       v-if="!store.state && !store.loading"
@@ -212,7 +218,7 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import OverviewCard from '@/components/dashboard/OverviewCard.vue'
 import PatternClusterTable from '@/components/dashboard/PatternClusterTable.vue'
@@ -230,6 +236,11 @@ const store = useLogDetectStore()
 const serviceName = ref('')
 const saveToChromaDb = ref(false)
 const showServiceLayer = ref(false)
+const canModerateRecommendation = computed(
+  () =>
+    Boolean(store.state?.final.generated_answer) &&
+    Boolean(store.currentRecommendationFingerprint)
+)
 
 async function openServiceLayer() {
   await store.fetchServices()
@@ -257,6 +268,26 @@ function handleSelectCluster(cluster: Cluster) {
 function handleRefreshRecommendations() {
   const trimmed = serviceName.value.trim()
   void store.fetchRecommendations(trimmed || undefined)
+}
+
+function handleApproveSave() {
+  const fingerprint = store.currentRecommendationFingerprint
+  if (!fingerprint) return
+  const approved = window.confirm(
+    `${fingerprint} Recommendation을 Knowledge Card로 저장 승인하시겠습니까?`
+  )
+  if (!approved) return
+  void store.approveCurrentRecommendation()
+}
+
+function handleApproveException() {
+  const fingerprint = store.currentRecommendationFingerprint
+  if (!fingerprint) return
+  const reason = window.prompt(
+    `${fingerprint} 예외처리 사유를 입력하고 승인해주세요.`
+  )
+  if (!reason?.trim()) return
+  void store.registerCurrentException(reason.trim())
 }
 
 onMounted(async () => {

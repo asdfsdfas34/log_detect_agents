@@ -21,6 +21,29 @@ export interface FingerprintRecommendationRequest {
   fingerprint: string
 }
 
+export interface ApprovalRequest {
+  fingerprint: string
+  cause: string
+  recommendation: string
+  action?: string
+  confidence?: string
+}
+
+export interface ApprovalResponse {
+  result: string
+  card_id: string
+}
+
+export interface ExceptionRegisterRequest {
+  fingerprint: string
+  reason: string
+}
+
+export interface ExceptionRegisterResponse {
+  status: string
+  fingerprint: string
+}
+
 export interface NormalizedLog {
   timestamp?: string
   system?: string
@@ -106,7 +129,11 @@ export interface SharedState {
         risk_level: string
         detection_status: string
       }
-      recommendation?: { cause: string; recommendation: string; confidence: string }
+      recommendation?: {
+        cause: string
+        recommendation: string
+        confidence: string
+      }
     } | null
   }
 }

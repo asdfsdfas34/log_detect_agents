@@ -102,6 +102,47 @@ export const useLogDetectStore = defineStore('logDetect', () => {
       0
   }))
 
+  const currentRecommendationFingerprint = computed(() => {
+    const bundle = state.value?.final.evidence_bundle as
+      | Record<string, unknown>
+      | undefined
+    const recommendation = bundle?.recommendation as
+      | Record<string, unknown>
+      | undefined
+
+    if (typeof bundle?.selected_fingerprint === 'string') {
+      return bundle.selected_fingerprint
+    }
+    if (typeof recommendation?.fingerprint === 'string') {
+      return recommendation.fingerprint
+    }
+    return state.value?.evidence.clusters[0]?.cluster ?? null
+  })
+
+  const currentRecommendationCause = computed(() => {
+    const bundle = state.value?.final.evidence_bundle as
+      | Record<string, unknown>
+      | undefined
+    const recommendation = bundle?.recommendation as
+      | Record<string, unknown>
+      | undefined
+    if (typeof recommendation?.cause === 'string') return recommendation.cause
+    return state.value?.final.executive_summary ?? ''
+  })
+
+  const currentRecommendationConfidence = computed(() => {
+    const bundle = state.value?.final.evidence_bundle as
+      | Record<string, unknown>
+      | undefined
+    const recommendation = bundle?.recommendation as
+      | Record<string, unknown>
+      | undefined
+    if (typeof recommendation?.confidence === 'string') {
+      return recommendation.confidence
+    }
+    return state.value?.assessment.confidence?.toUpperCase() ?? 'MEDIUM'
+  })
+
   function addToast(level: 'info' | 'error', message: string) {
     const id = Date.now() + Math.floor(Math.random() * 1000)
     toasts.value.push({ id, level, message })
@@ -288,6 +329,49 @@ export const useLogDetectStore = defineStore('logDetect', () => {
     }
   }
 
+  async function approveCurrentRecommendation() {
+    const fingerprint = currentRecommendationFingerprint.value
+    const recommendation = state.value?.final.generated_answer
+    if (!fingerprint || !recommendation) {
+      addToast('error', '승인할 Recommendation 또는 fingerprint가 없습니다.')
+      return false
+    }
+
+    try {
+      const { data } = await agentApi.approveRecommendation({
+        fingerprint,
+        cause: currentRecommendationCause.value || '-',
+        recommendation,
+        action: 'approved',
+        confidence: currentRecommendationConfidence.value
+      })
+      addToast('info', `Recommendation 저장 승인 완료: ${data.card_id}`)
+      return true
+    } catch (caught) {
+      error.value = (caught as Error).message
+      addToast('error', `Recommendation 저장 실패: ${error.value}`)
+      return false
+    }
+  }
+
+  async function registerCurrentException(reason: string) {
+    const fingerprint = currentRecommendationFingerprint.value
+    if (!fingerprint) {
+      addToast('error', '예외처리할 fingerprint가 없습니다.')
+      return false
+    }
+
+    try {
+      await agentApi.registerException({ fingerprint, reason })
+      addToast('info', `예외처리 승인 완료: ${fingerprint}`)
+      return true
+    } catch (caught) {
+      error.value = (caught as Error).message
+      addToast('error', `예외처리 실패: ${error.value}`)
+      return false
+    }
+  }
+
   return {
     executionStatus,
     currentStage,
@@ -307,9 +391,12 @@ export const useLogDetectStore = defineStore('logDetect', () => {
     riskClassification,
     overview,
     recommendationSummary,
+    currentRecommendationFingerprint,
     fetchHealth,
     fetchServices,
     fetchRecommendations,
+    approveCurrentRecommendation,
+    registerCurrentException,
     runAnalysis,
     runClusterRecommendation
   }
