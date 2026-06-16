@@ -93,6 +93,7 @@ export interface SharedState {
     verification_steps: string[] | null
     additional_data_needed: string[] | null
     generated_answer: string | null
+    saved_recommendation_id?: number | null
     evidence_bundle?: {
       summary?: {
         total_logs: number
@@ -122,6 +123,25 @@ export interface HealthResponse {
 
 export interface ServiceListResponse {
   services: string[]
+}
+
+export interface RecommendationHistoryItem {
+  id: number
+  request_id: string
+  service_name: string
+  goal: string
+  executive_summary: string
+  recommendation: string
+  recommended_actions: RecommendedAction[]
+  verification_steps: string[]
+  evidence_bundle: Record<string, unknown>
+  risk_score: number | null
+  confidence: string | null
+  created_at: string
+}
+
+export interface RecommendationHistoryResponse {
+  recommendations: RecommendationHistoryItem[]
 }
 
 export type ExecutionStatus = 'idle' | 'running' | 'completed' | 'failed'

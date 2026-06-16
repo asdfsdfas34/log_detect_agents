@@ -6,6 +6,7 @@ import type {
   AgentStepStatus,
   AnalyzeRequest,
   ExecutionStatus,
+  RecommendationHistoryItem,
   SharedState
 } from '@/types/agentTypes'
 
@@ -21,7 +22,10 @@ const stepNames = [
   'RecommendationAgent'
 ]
 
-function buildDefaultRequest(serviceName: string, saveToChromaDb: boolean): AnalyzeRequest {
+function buildDefaultRequest(
+  serviceName: string,
+  saveToChromaDb: boolean
+): AnalyzeRequest {
   return {
     service_name: serviceName,
     goal: `${serviceName} service log anomaly investigation`,
@@ -38,16 +42,26 @@ export const useLogDetectStore = defineStore('logDetect', () => {
   const stubMode = ref<string>('unknown')
   const loading = ref(false)
   const loadingServices = ref(false)
+  const loadingRecommendations = ref(false)
   const error = ref<string | null>(null)
   const serviceOptions = ref<string[]>([])
   const state = ref<SharedState | null>(null)
-  const toasts = ref<Array<{ id: number; level: 'info' | 'error'; message: string }>>([])
-  const agentTimeline = ref<AgentStepStatus[]>(stepNames.map((name) => ({ name, status: 'pending' })))
+  const recommendationHistory = ref<RecommendationHistoryItem[]>([])
+  const toasts = ref<
+    Array<{ id: number; level: 'info' | 'error'; message: string }>
+  >([])
+  const agentTimeline = ref<AgentStepStatus[]>(
+    stepNames.map((name) => ({ name, status: 'pending' }))
+  )
   let pollTimer: ReturnType<typeof setInterval> | null = null
   let stream: EventSource | null = null
 
-  const scenarioSummary = computed(() => state.value?.final.evidence_bundle?.summary)
-  const recommendationSummary = computed(() => state.value?.final.evidence_bundle?.recommendation)
+  const scenarioSummary = computed(
+    () => state.value?.final.evidence_bundle?.summary
+  )
+  const recommendationSummary = computed(
+    () => state.value?.final.evidence_bundle?.recommendation
+  )
 
   const riskClassification = computed(() => {
     const level = scenarioSummary.value?.risk_level
@@ -60,16 +74,32 @@ export const useLogDetectStore = defineStore('logDetect', () => {
   })
 
   const overview = computed(() => ({
-    totalLogs: scenarioSummary.value?.total_logs ?? state.value?.evidence.normalized_logs.length ?? 0,
-    totalFingerprints: scenarioSummary.value?.total_fingerprints ?? state.value?.evidence.clusters.length ?? 0,
+    totalLogs:
+      scenarioSummary.value?.total_logs ??
+      state.value?.evidence.normalized_logs.length ??
+      0,
+    totalFingerprints:
+      scenarioSummary.value?.total_fingerprints ??
+      state.value?.evidence.clusters.length ??
+      0,
     knownPatterns: scenarioSummary.value?.known_patterns ?? 0,
     newPatterns: scenarioSummary.value?.new_patterns ?? 0,
-    anomaliesDetected: scenarioSummary.value?.anomalies_detected ?? state.value?.evidence.anomalies.length ?? 0,
-    exceptionRegisteredCount: scenarioSummary.value?.exception_registered_count ?? 0,
-    riskScore: scenarioSummary.value?.risk_score ?? state.value?.assessment.risk_score ?? 0,
+    anomaliesDetected:
+      scenarioSummary.value?.anomalies_detected ??
+      state.value?.evidence.anomalies.length ??
+      0,
+    exceptionRegisteredCount:
+      scenarioSummary.value?.exception_registered_count ?? 0,
+    riskScore:
+      scenarioSummary.value?.risk_score ??
+      state.value?.assessment.risk_score ??
+      0,
     riskLevel: scenarioSummary.value?.risk_level ?? riskClassification.value,
     detectionStatus: scenarioSummary.value?.detection_status ?? 'Not analyzed',
-    impactScore: scenarioSummary.value?.risk_score ?? state.value?.assessment.risk_score ?? 0
+    impactScore:
+      scenarioSummary.value?.risk_score ??
+      state.value?.assessment.risk_score ??
+      0
   }))
 
   function addToast(level: 'info' | 'error', message: string) {
@@ -126,6 +156,21 @@ export const useLogDetectStore = defineStore('logDetect', () => {
     }
   }
 
+  async function fetchRecommendations(serviceName?: string) {
+    loadingRecommendations.value = true
+    try {
+      const { data } = await agentApi.recommendations({
+        service_name: serviceName || undefined,
+        limit: 20
+      })
+      recommendationHistory.value = data.recommendations
+    } catch {
+      addToast('error', '저장된 Recommendation 목록을 불러오지 못했습니다.')
+    } finally {
+      loadingRecommendations.value = false
+    }
+  }
+
   function startPollingHealth() {
     closeStreamAndPolling()
     pollTimer = setInterval(async () => {
@@ -166,16 +211,21 @@ export const useLogDetectStore = defineStore('logDetect', () => {
 
     if (!stream) {
       startPollingHealth()
-      addToast('info', 'SSE unavailable: switched to 5s health polling fallback')
+      addToast(
+        'info',
+        'SSE unavailable: switched to 5s health polling fallback'
+      )
     }
 
     try {
       const { data } = await agentApi.analyze(request)
       state.value = data.result
       markTimelineFromState(data.result)
-      executionStatus.value = data.result.decisions.failures.length > 0 ? 'failed' : 'completed'
+      executionStatus.value =
+        data.result.decisions.failures.length > 0 ? 'failed' : 'completed'
       lastExecutionAt.value = new Date().toISOString()
       await fetchHealth()
+      await fetchRecommendations(serviceName)
     } catch (caught) {
       executionStatus.value = 'failed'
       error.value = (caught as Error).message
@@ -186,20 +236,31 @@ export const useLogDetectStore = defineStore('logDetect', () => {
     }
   }
 
-  async function runClusterRecommendation(serviceName: string, fingerprint: string) {
+  async function runClusterRecommendation(
+    serviceName: string,
+    fingerprint: string
+  ) {
     executionStatus.value = 'running'
     error.value = null
     currentStage.value = 'IncidentCorrelationAgent'
     agentTimeline.value = stepNames.map((name) => ({
       name,
-      status: ['IncidentCorrelationAgent', 'ImpactEvaluationAgent', 'KnowledgeBaseRAGAgent', 'RecommendationAgent'].includes(name)
+      status: [
+        'IncidentCorrelationAgent',
+        'ImpactEvaluationAgent',
+        'KnowledgeBaseRAGAgent',
+        'RecommendationAgent'
+      ].includes(name)
         ? 'running'
         : 'skipped'
     }))
 
     try {
       // Request the backend to execute the downstream recommendation slice for the selected fingerprint.
-      const { data } = await agentApi.recommendationForFingerprint({ service_name: serviceName, fingerprint })
+      const { data } = await agentApi.recommendationForFingerprint({
+        service_name: serviceName,
+        fingerprint
+      })
       if (state.value) {
         state.value = {
           ...state.value,
@@ -214,9 +275,11 @@ export const useLogDetectStore = defineStore('logDetect', () => {
         state.value = data.result
       }
       markTimelineFromState(data.result)
-      executionStatus.value = data.result.decisions.failures.length > 0 ? 'failed' : 'completed'
+      executionStatus.value =
+        data.result.decisions.failures.length > 0 ? 'failed' : 'completed'
       currentStage.value = 'Completed'
       lastExecutionAt.value = new Date().toISOString()
+      await fetchRecommendations(serviceName)
       addToast('info', `Updated recommendations for ${fingerprint}`)
     } catch (caught) {
       executionStatus.value = 'failed'
@@ -234,8 +297,10 @@ export const useLogDetectStore = defineStore('logDetect', () => {
     stubMode,
     loading,
     loadingServices,
+    loadingRecommendations,
     error,
     state,
+    recommendationHistory,
     serviceOptions,
     toasts,
     agentTimeline,
@@ -244,6 +309,7 @@ export const useLogDetectStore = defineStore('logDetect', () => {
     recommendationSummary,
     fetchHealth,
     fetchServices,
+    fetchRecommendations,
     runAnalysis,
     runClusterRecommendation
   }
