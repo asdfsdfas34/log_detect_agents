@@ -6,22 +6,29 @@ import json
 import os
 import sqlite3
 from pathlib import Path
+from dotenv import load_dotenv
 from typing import Any
 
 
 def _resolve_db_path() -> str:
     """Resolve SQLite database path from environment variables."""
 
-    sqlite_path = os.getenv("SQLITE_PATH", "").strip()
-    if sqlite_path:
-        return sqlite_path
+    project_root = Path(__file__).resolve().parent.parent.parent
+    print(project_root)
+    env_file = project_root / ".env.dev"
 
-    # Backward compatibility for existing deployments that only define POSTGRESQL_URL.
-    legacy = os.getenv("POSTGRESQL_URL", "").strip()
-    if legacy:
-        return legacy
+    load_dotenv(env_file)
+    print(env_file)
 
-    return "./data/logs.db"
+
+    db_path = os.getenv("SQLITE_PATH")
+    print(db_path)
+
+
+    if not db_path:
+        raise ValueError("SQLITE_PATH가 설정되어 있지 않습니다.")
+
+    return db_path
 
 
 def fetch_recent_logs(*, service_name: str | None, limit: int = 20) -> list[str]:
