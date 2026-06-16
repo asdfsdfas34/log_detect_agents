@@ -152,7 +152,13 @@
     <RecommendationHistoryPanel
       :items="store.recommendationHistory"
       :loading="store.loadingRecommendations"
+      :knowledge-cards="store.knowledgeCards"
+      :loading-knowledge-cards="store.loadingKnowledgeCards"
+      :exceptions="store.exceptionRegistry"
+      :loading-exceptions="store.loadingExceptions"
       @refresh="handleRefreshRecommendations"
+      @fetch-knowledge-cards="handleFetchKnowledgeCards"
+      @fetch-exceptions="handleFetchExceptions"
     />
 
     <aside class="fixed left-4 top-28 z-20 hidden w-56 xl:block">
@@ -270,6 +276,14 @@ function handleRefreshRecommendations() {
   void store.fetchRecommendations(trimmed || undefined)
 }
 
+function handleFetchKnowledgeCards() {
+  void store.fetchKnowledgeCards()
+}
+
+function handleFetchExceptions() {
+  void store.fetchExceptionRegistry()
+}
+
 function handleApproveSave() {
   const fingerprint = store.currentRecommendationFingerprint
   if (!fingerprint) return
@@ -294,5 +308,7 @@ onMounted(async () => {
   await store.fetchHealth()
   await store.fetchServices()
   await store.fetchRecommendations()
+  await store.fetchKnowledgeCards()
+  await store.fetchExceptionRegistry()
 })
 </script>

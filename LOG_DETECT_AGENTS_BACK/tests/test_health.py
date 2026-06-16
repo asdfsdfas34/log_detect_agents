@@ -45,4 +45,28 @@ def test_list_saved_recommendations(tmp_path: Path, monkeypatch) -> None:
         == "결제 재시도 로직을 점검하세요"
     )
 
+    approval = client.post(
+        "/approvals",
+        json={
+            "fingerprint": "FP-123",
+            "cause": "결제 오류",
+            "recommendation": "결제 재시도 로직을 점검하세요",
+            "confidence": "HIGH",
+        },
+    )
+    assert approval.status_code == 200
+
+    cards = client.get("/knowledge-cards", params={"fingerprint": "FP-123"})
+    assert cards.status_code == 200
+    assert cards.json()["knowledge_cards"][0]["fingerprint"] == "FP-123"
+
+    exception = client.post(
+        "/exceptions", json={"fingerprint": "FP-123", "reason": "approved ignore"}
+    )
+    assert exception.status_code == 200
+
+    exceptions = client.get("/exceptions", params={"fingerprint": "FP-123"})
+    assert exceptions.status_code == 200
+    assert exceptions.json()["exceptions"][0]["reason"] == "approved ignore"
+
     monkeypatch.delenv("SQLITE_PATH", raising=False)

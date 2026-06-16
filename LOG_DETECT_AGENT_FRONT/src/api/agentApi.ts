@@ -6,8 +6,10 @@ import type {
   AnalyzeResponse,
   ExceptionRegisterRequest,
   ExceptionRegisterResponse,
+  ExceptionRegistryResponse,
   FingerprintRecommendationRequest,
   HealthResponse,
+  KnowledgeCardListResponse,
   RecommendationHistoryResponse,
   ServiceListResponse
 } from '@/types/agentTypes'
@@ -43,5 +45,13 @@ export const agentApi = {
   },
   registerException(payload: ExceptionRegisterRequest) {
     return apiClient.post<ExceptionRegisterResponse>('/exceptions', payload)
+  },
+  knowledgeCards(params?: { fingerprint?: string; limit?: number }) {
+    return apiClient.get<KnowledgeCardListResponse>('/knowledge-cards', {
+      params
+    })
+  },
+  exceptions(params?: { fingerprint?: string; limit?: number }) {
+    return apiClient.get<ExceptionRegistryResponse>('/exceptions', { params })
   }
 }

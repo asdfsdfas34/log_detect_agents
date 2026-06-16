@@ -44,6 +44,30 @@ export interface ExceptionRegisterResponse {
   fingerprint: string
 }
 
+export interface KnowledgeCardItem {
+  card_id: string
+  fingerprint: string
+  cause: string
+  recommendation: string
+  action: string
+  confidence: string
+  created_at: string
+}
+
+export interface KnowledgeCardListResponse {
+  knowledge_cards: KnowledgeCardItem[]
+}
+
+export interface ExceptionRegistryItem {
+  fingerprint: string
+  reason: string
+  created_at: string
+}
+
+export interface ExceptionRegistryResponse {
+  exceptions: ExceptionRegistryItem[]
+}
+
 export interface NormalizedLog {
   timestamp?: string
   system?: string

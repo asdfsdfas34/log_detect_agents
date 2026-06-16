@@ -5,7 +5,9 @@ import { connectExecutionStream } from '@/services/streamingService'
 import type {
   AgentStepStatus,
   AnalyzeRequest,
+  ExceptionRegistryItem,
   ExecutionStatus,
+  KnowledgeCardItem,
   RecommendationHistoryItem,
   SharedState
 } from '@/types/agentTypes'
@@ -43,10 +45,14 @@ export const useLogDetectStore = defineStore('logDetect', () => {
   const loading = ref(false)
   const loadingServices = ref(false)
   const loadingRecommendations = ref(false)
+  const loadingKnowledgeCards = ref(false)
+  const loadingExceptions = ref(false)
   const error = ref<string | null>(null)
   const serviceOptions = ref<string[]>([])
   const state = ref<SharedState | null>(null)
   const recommendationHistory = ref<RecommendationHistoryItem[]>([])
+  const knowledgeCards = ref<KnowledgeCardItem[]>([])
+  const exceptionRegistry = ref<ExceptionRegistryItem[]>([])
   const toasts = ref<
     Array<{ id: number; level: 'info' | 'error'; message: string }>
   >([])
@@ -212,6 +218,36 @@ export const useLogDetectStore = defineStore('logDetect', () => {
     }
   }
 
+  async function fetchKnowledgeCards(fingerprint?: string) {
+    loadingKnowledgeCards.value = true
+    try {
+      const { data } = await agentApi.knowledgeCards({
+        fingerprint: fingerprint || undefined,
+        limit: 20
+      })
+      knowledgeCards.value = data.knowledge_cards
+    } catch {
+      addToast('error', 'Knowledge Card 목록을 불러오지 못했습니다.')
+    } finally {
+      loadingKnowledgeCards.value = false
+    }
+  }
+
+  async function fetchExceptionRegistry(fingerprint?: string) {
+    loadingExceptions.value = true
+    try {
+      const { data } = await agentApi.exceptions({
+        fingerprint: fingerprint || undefined,
+        limit: 20
+      })
+      exceptionRegistry.value = data.exceptions
+    } catch {
+      addToast('error', '예외처리 목록을 불러오지 못했습니다.')
+    } finally {
+      loadingExceptions.value = false
+    }
+  }
+
   function startPollingHealth() {
     closeStreamAndPolling()
     pollTimer = setInterval(async () => {
@@ -346,6 +382,7 @@ export const useLogDetectStore = defineStore('logDetect', () => {
         confidence: currentRecommendationConfidence.value
       })
       addToast('info', `Recommendation 저장 승인 완료: ${data.card_id}`)
+      await fetchKnowledgeCards(fingerprint)
       return true
     } catch (caught) {
       error.value = (caught as Error).message
@@ -364,6 +401,7 @@ export const useLogDetectStore = defineStore('logDetect', () => {
     try {
       await agentApi.registerException({ fingerprint, reason })
       addToast('info', `예외처리 승인 완료: ${fingerprint}`)
+      await fetchExceptionRegistry(fingerprint)
       return true
     } catch (caught) {
       error.value = (caught as Error).message
@@ -382,9 +420,13 @@ export const useLogDetectStore = defineStore('logDetect', () => {
     loading,
     loadingServices,
     loadingRecommendations,
+    loadingKnowledgeCards,
+    loadingExceptions,
     error,
     state,
     recommendationHistory,
+    knowledgeCards,
+    exceptionRegistry,
     serviceOptions,
     toasts,
     agentTimeline,
@@ -395,6 +437,8 @@ export const useLogDetectStore = defineStore('logDetect', () => {
     fetchHealth,
     fetchServices,
     fetchRecommendations,
+    fetchKnowledgeCards,
+    fetchExceptionRegistry,
     approveCurrentRecommendation,
     registerCurrentException,
     runAnalysis,

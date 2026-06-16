@@ -13,6 +13,8 @@ from app.db.sqlite_store import (
 )
 from app.db.scenario_store import (
     approve_result,
+    fetch_exception_registry,
+    fetch_knowledge_cards,
     register_exception,
     run_detection_pipeline,
 )
@@ -85,6 +87,14 @@ class ServiceListResponse(BaseModel):
 
 class RecommendationHistoryResponse(BaseModel):
     recommendations: list[dict]
+
+
+class KnowledgeCardListResponse(BaseModel):
+    knowledge_cards: list[dict]
+
+
+class ExceptionRegistryResponse(BaseModel):
+    exceptions: list[dict]
 
 
 @app.get("/health")
@@ -286,6 +296,26 @@ def recommend_for_fingerprint(req: FingerprintRecommendationRequest) -> AnalyzeR
         confidence=state["assessment"]["confidence"],
     )
     return AnalyzeResponse(result=state)
+
+
+@app.get("/exceptions", response_model=ExceptionRegistryResponse)
+def list_exceptions(
+    fingerprint: str | None = None, limit: int = 20
+) -> ExceptionRegistryResponse:
+    """Return registered exception fingerprints, newest first."""
+    return ExceptionRegistryResponse(
+        exceptions=fetch_exception_registry(fingerprint=fingerprint, limit=limit)
+    )
+
+
+@app.get("/knowledge-cards", response_model=KnowledgeCardListResponse)
+def list_knowledge_cards(
+    fingerprint: str | None = None, limit: int = 20
+) -> KnowledgeCardListResponse:
+    """Return approved Knowledge Cards, newest first."""
+    return KnowledgeCardListResponse(
+        knowledge_cards=fetch_knowledge_cards(fingerprint=fingerprint, limit=limit)
+    )
 
 
 @app.post("/exceptions")
