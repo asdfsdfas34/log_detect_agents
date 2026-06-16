@@ -3,14 +3,10 @@
 from uuid import uuid4
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from app.config import settings
-from app.db.sqlite_store import (
-    fetch_latest_recommendation_results,
-    fetch_service_names,
-    save_recommendation_result,
-)
 from app.db.scenario_store import (
     approve_result,
     fetch_exception_registry,
@@ -18,10 +14,13 @@ from app.db.scenario_store import (
     register_exception,
     run_detection_pipeline,
 )
+from app.db.sqlite_store import (
+    fetch_latest_recommendation_results,
+    fetch_service_names,
+    save_recommendation_result,
+)
 from app.graph.engine import build_graph
 from app.state import Scope, SharedState, create_initial_state
-
-from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(title="Failure Prevention AI Backend", version="0.2.0")
 
@@ -97,6 +96,45 @@ class ExceptionRegistryResponse(BaseModel):
     exceptions: list[dict]
 
 
+def build_generated_answer(
+    *,
+    recommendation: dict,
+    message: str = "",
+    stacktrace: str = "",
+    occurrence_count: int | None = None,
+    log_level: str = "",
+    risk_level: str = "",
+    risk_score: int | None = None,
+) -> str:
+    """Build a detailed recommendation answer from the selected log evidence."""
+    lines = [
+        "Log Evidence Analysis",
+        f"- Error Message: {message or '-'}",
+        f"- Level: {log_level or '-'}",
+    ]
+    if occurrence_count is not None:
+        lines.append(f"- Occurrence Count: {occurrence_count}")
+    if risk_score is not None:
+        lines.append(f"- Risk: {risk_level or '-'} ({risk_score})")
+    lines.extend(
+        [
+            f"- Stack Trace: {stacktrace or '-'}",
+            "",
+            "Assessment",
+            f"- Probable Cause: {recommendation.get('cause') or '-'}",
+            (
+                "- Detail: The message and stack trace above should be used to "
+                "confirm the failing component, volatile identifiers, and repeated "
+                "request context before applying the fix."
+            ),
+            "",
+            "Recommended Action",
+            f"- {recommendation.get('recommendation') or '-'}",
+        ]
+    )
+    return "\n".join(lines)
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {
@@ -169,6 +207,35 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
             f"Detection Status: {scenario['summary']['detection_status']}",
         ]
         rec = scenario["recommendation"]
+        rec_fp = rec.get("fingerprint")
+        rec_group = next(
+            (
+                item
+                for item in scenario["fingerprints"]
+                if item["fingerprint"] == rec_fp
+            ),
+            scenario["fingerprints"][0],
+        )
+        rec_impact = next(
+            (
+                item
+                for item in scenario.get("impacts", [])
+                if item["fingerprint"] == rec_group["fingerprint"]
+            ),
+            {
+                "risk_score": scenario["summary"]["risk_score"],
+                "risk_level": scenario["summary"]["risk_level"],
+            },
+        )
+        generated_answer = build_generated_answer(
+            recommendation=rec,
+            message=rec_group["message"],
+            stacktrace=rec_group["stacktrace"],
+            occurrence_count=rec_group["occurrence_count"],
+            log_level=rec_group["log_level"],
+            risk_level=rec_impact["risk_level"],
+            risk_score=rec_impact["risk_score"],
+        )
         result["final"]["recommended_actions"] = [
             {
                 "priority": rec["confidence"],
@@ -177,7 +244,7 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
             }
         ]
         result["final"]["executive_summary"] = rec["cause"]
-        result["final"]["generated_answer"] = rec["recommendation"]
+        result["final"]["generated_answer"] = generated_answer
         result["final"]["evidence_bundle"] = scenario
 
     result["final"]["saved_recommendation_id"] = save_recommendation_result(
@@ -277,7 +344,16 @@ def recommend_for_fingerprint(req: FingerprintRecommendationRequest) -> AnalyzeR
         f"Review logs grouped by {req.fingerprint}",
         "Apply the recommended fix and monitor the fingerprint count",
     ]
-    state["final"]["generated_answer"] = selected_recommendation["recommendation"]
+    generated_answer = build_generated_answer(
+        recommendation=selected_recommendation,
+        message=selected["message"] if selected else "",
+        stacktrace=selected["stacktrace"] if selected else "",
+        occurrence_count=selected["occurrence_count"] if selected else None,
+        log_level=selected["log_level"] if selected else "",
+        risk_level=selected_impact["risk_level"],
+        risk_score=selected_impact["risk_score"],
+    )
+    state["final"]["generated_answer"] = generated_answer
     state["final"]["evidence_bundle"] = {
         "selected_fingerprint": req.fingerprint,
         "recommendation": selected_recommendation,
@@ -288,7 +364,7 @@ def recommend_for_fingerprint(req: FingerprintRecommendationRequest) -> AnalyzeR
         service_name=req.service_name,
         goal=state["goal"],
         executive_summary=selected_recommendation["cause"],
-        recommendation=selected_recommendation["recommendation"],
+        recommendation=generated_answer,
         recommended_actions=state["final"]["recommended_actions"],
         verification_steps=state["final"]["verification_steps"],
         evidence_bundle=state["final"]["evidence_bundle"],

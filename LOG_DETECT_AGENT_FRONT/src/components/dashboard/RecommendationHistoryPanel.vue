@@ -60,7 +60,7 @@
         </thead>
         <tbody class="divide-y divide-slate-100 bg-white">
           <tr
-            v-for="item in items"
+            v-for="item in pagedItems"
             :key="item.id"
             class="align-top hover:bg-slate-50"
           >
@@ -92,6 +92,30 @@
           </tr>
         </tbody>
       </table>
+      <div
+        class="flex flex-wrap items-center justify-between gap-3 border-t border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600"
+      >
+        <span>
+          Page {{ currentPage }} / {{ pageCount }} -
+          {{ items.length }} recommendations
+        </span>
+        <div class="flex items-center gap-2">
+          <button
+            class="rounded border border-slate-300 bg-white px-3 py-1 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
+            :disabled="currentPage === 1"
+            @click="previousPage"
+          >
+            Previous
+          </button>
+          <button
+            class="rounded border border-slate-300 bg-white px-3 py-1 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
+            :disabled="currentPage === pageCount"
+            @click="nextPage"
+          >
+            Next
+          </button>
+        </div>
+      </div>
     </div>
 
     <div class="mt-4 grid gap-4 xl:grid-cols-2">
@@ -117,7 +141,11 @@
           <li
             v-for="card in knowledgeCards"
             :key="card.card_id"
-            class="rounded bg-white p-2 text-xs shadow-sm"
+            class="cursor-pointer rounded bg-white p-2 text-xs shadow-sm hover:bg-blue-50"
+            role="button"
+            tabindex="0"
+            @click="openKnowledgeCard(card)"
+            @keydown.enter="openKnowledgeCard(card)"
           >
             <div class="flex items-center justify-between gap-2">
               <span class="font-mono font-semibold text-blue-700">{{
@@ -160,7 +188,11 @@
           <li
             v-for="item in exceptions"
             :key="item.fingerprint"
-            class="rounded bg-white p-2 text-xs shadow-sm"
+            class="cursor-pointer rounded bg-white p-2 text-xs shadow-sm hover:bg-amber-50"
+            role="button"
+            tabindex="0"
+            @click="openException(item)"
+            @keydown.enter="openException(item)"
           >
             <p class="font-mono font-semibold text-amber-700">
               {{ item.fingerprint }}
@@ -171,17 +203,77 @@
         </ul>
       </div>
     </div>
+
+    <div
+      v-if="detail"
+      class="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4"
+      @click.self="closeDetail"
+    >
+      <div class="w-full max-w-2xl rounded-lg bg-white shadow-xl">
+        <div class="flex items-start justify-between gap-4 border-b border-slate-200 p-4">
+          <div>
+            <p class="text-xs font-semibold uppercase tracking-wide text-slate-500">
+              {{ detail.kind }}
+            </p>
+            <h3 class="mt-1 break-all font-mono text-sm font-semibold text-slate-900">
+              {{ detail.fingerprint }}
+            </h3>
+          </div>
+          <button
+            class="rounded border border-slate-300 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50"
+            @click="closeDetail"
+          >
+            Close
+          </button>
+        </div>
+        <div class="grid gap-3 p-4 text-sm text-slate-700 sm:grid-cols-2">
+          <div>
+            <p class="text-xs font-semibold uppercase text-slate-400">Level</p>
+            <p class="mt-1 font-semibold">{{ detail.log_level || '-' }}</p>
+          </div>
+          <div>
+            <p class="text-xs font-semibold uppercase text-slate-400">Service</p>
+            <p class="mt-1">{{ detail.service_name || '-' }}</p>
+          </div>
+          <div class="sm:col-span-2">
+            <p class="text-xs font-semibold uppercase text-slate-400">Error Message</p>
+            <p class="mt-1 whitespace-pre-wrap rounded border border-slate-200 bg-slate-50 p-3">
+              {{ detail.message || '-' }}
+            </p>
+          </div>
+          <div class="sm:col-span-2">
+            <p class="text-xs font-semibold uppercase text-slate-400">
+              {{ detail.kind === 'Knowledge Card' ? 'Cause' : 'Reason' }}
+            </p>
+            <p class="mt-1 whitespace-pre-wrap">{{ detail.primaryText || '-' }}</p>
+          </div>
+          <div v-if="detail.secondaryText" class="sm:col-span-2">
+            <p class="text-xs font-semibold uppercase text-slate-400">Recommendation</p>
+            <p class="mt-1 whitespace-pre-wrap">{{ detail.secondaryText }}</p>
+          </div>
+          <div>
+            <p class="text-xs font-semibold uppercase text-slate-400">Created</p>
+            <p class="mt-1">{{ detail.created_at || '-' }}</p>
+          </div>
+          <div>
+            <p class="text-xs font-semibold uppercase text-slate-400">Confidence</p>
+            <p class="mt-1">{{ detail.confidence || '-' }}</p>
+          </div>
+        </div>
+      </div>
+    </div>
   </section>
 </template>
 
 <script setup lang="ts">
+import { computed, ref, watch } from 'vue'
 import type {
   ExceptionRegistryItem,
   KnowledgeCardItem,
   RecommendationHistoryItem
 } from '@/types/agentTypes'
 
-defineProps<{
+const props = defineProps<{
   items: RecommendationHistoryItem[]
   loading: boolean
   knowledgeCards: KnowledgeCardItem[]
@@ -195,4 +287,78 @@ defineEmits<{
   fetchKnowledgeCards: []
   fetchExceptions: []
 }>()
+
+interface DetailView {
+  kind: 'Knowledge Card' | 'Exception'
+  fingerprint: string
+  message?: string
+  log_level?: string
+  service_name?: string
+  primaryText?: string
+  secondaryText?: string
+  confidence?: string
+  created_at?: string
+}
+
+const detail = ref<DetailView | null>(null)
+const pageSize = 5
+const currentPage = ref(1)
+
+const pageCount = computed(() =>
+  Math.max(1, Math.ceil(props.items.length / pageSize))
+)
+const pagedItems = computed(() => {
+  const start = (currentPage.value - 1) * pageSize
+  return props.items.slice(start, start + pageSize)
+})
+
+watch(
+  () => props.items.length,
+  () => {
+    if (currentPage.value > pageCount.value) {
+      currentPage.value = pageCount.value
+    }
+    if (currentPage.value < 1) {
+      currentPage.value = 1
+    }
+  }
+)
+
+function previousPage() {
+  currentPage.value = Math.max(1, currentPage.value - 1)
+}
+
+function nextPage() {
+  currentPage.value = Math.min(pageCount.value, currentPage.value + 1)
+}
+
+function openKnowledgeCard(card: KnowledgeCardItem) {
+  detail.value = {
+    kind: 'Knowledge Card',
+    fingerprint: card.fingerprint,
+    message: card.message,
+    log_level: card.log_level,
+    service_name: card.service_name,
+    primaryText: card.cause,
+    secondaryText: card.recommendation,
+    confidence: card.confidence,
+    created_at: card.created_at
+  }
+}
+
+function openException(item: ExceptionRegistryItem) {
+  detail.value = {
+    kind: 'Exception',
+    fingerprint: item.fingerprint,
+    message: item.message,
+    log_level: item.log_level,
+    service_name: item.service_name,
+    primaryText: item.reason,
+    created_at: item.created_at
+  }
+}
+
+function closeDetail() {
+  detail.value = null
+}
 </script>

@@ -52,6 +52,9 @@ export interface KnowledgeCardItem {
   action: string
   confidence: string
   created_at: string
+  message?: string
+  log_level?: string
+  service_name?: string
 }
 
 export interface KnowledgeCardListResponse {
@@ -62,6 +65,9 @@ export interface ExceptionRegistryItem {
   fingerprint: string
   reason: string
   created_at: string
+  message?: string
+  log_level?: string
+  service_name?: string
 }
 
 export interface ExceptionRegistryResponse {
