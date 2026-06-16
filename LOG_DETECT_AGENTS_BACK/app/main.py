@@ -6,8 +6,16 @@ from fastapi import FastAPI
 from pydantic import BaseModel, Field
 
 from app.config import settings
-from app.db.sqlite_store import fetch_service_names
-from app.db.scenario_store import approve_result, register_exception, run_detection_pipeline
+from app.db.sqlite_store import (
+    fetch_latest_recommendation_results,
+    fetch_service_names,
+    save_recommendation_result,
+)
+from app.db.scenario_store import (
+    approve_result,
+    register_exception,
+    run_detection_pipeline,
+)
 from app.graph.engine import build_graph
 from app.state import Scope, SharedState, create_initial_state
 
@@ -15,10 +23,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(title="Failure Prevention AI Backend", version="0.2.0")
 
-origins = [
-    "http://localhost:5173",
-    "http://127.0.0.1:5173"
-]
+origins = ["http://localhost:5173", "http://127.0.0.1:5173"]
 
 app.add_middleware(
     CORSMiddleware,
@@ -33,9 +38,15 @@ class AnalyzeRequest(BaseModel):
     """Analyze API input schema."""
 
     service_name: str = Field(..., min_length=1, description="Target service name")
-    goal: str = Field(default="service log anomaly investigation", description="Analysis goal")
-    scope: Scope | None = Field(default=None, description="Optional detailed analysis scope")
-    save_to_chromadb: bool = Field(default=False, description="Persist final answer to ChromaDB")
+    goal: str = Field(
+        default="service log anomaly investigation", description="Analysis goal"
+    )
+    scope: Scope | None = Field(
+        default=None, description="Optional detailed analysis scope"
+    )
+    save_to_chromadb: bool = Field(
+        default=False, description="Persist final answer to ChromaDB"
+    )
 
 
 class AnalyzeResponse(BaseModel):
@@ -72,14 +83,35 @@ class ServiceListResponse(BaseModel):
     services: list[str]
 
 
+class RecommendationHistoryResponse(BaseModel):
+    recommendations: list[dict]
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
-    return {"status": "ok", "model": settings.openai_model, "stub_mode": str(settings.llm_stub_mode)}
+    return {
+        "status": "ok",
+        "model": settings.openai_model,
+        "stub_mode": str(settings.llm_stub_mode),
+    }
 
 
 @app.get("/services", response_model=ServiceListResponse)
 def list_services() -> ServiceListResponse:
     return ServiceListResponse(services=fetch_service_names())
+
+
+@app.get("/recommendations", response_model=RecommendationHistoryResponse)
+def list_recommendations(
+    service_name: str | None = None, limit: int = 20
+) -> RecommendationHistoryResponse:
+    """Return saved recommendation results, newest first."""
+    service_names = [service_name] if service_name else None
+    return RecommendationHistoryResponse(
+        recommendations=fetch_latest_recommendation_results(
+            service_names=service_names, limit=limit
+        )
+    )
 
 
 @app.post("/analyze", response_model=AnalyzeResponse)
@@ -102,19 +134,54 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
 
     # Run the deterministic scenario pipeline so the demo works without an LLM.
     scenario = run_detection_pipeline(req.service_name)
-    result["evidence"]["clusters"] = [
-        {"cluster": item["fingerprint"], "count": item["occurrence_count"], "message": item["message"], "log_level": item["log_level"]} for item in scenario["fingerprints"]
-    ]
-    result["evidence"]["anomalies"] = scenario["anomalies"]
-    result["evidence"]["stack_traces"] = [item["stacktrace"] for item in scenario["fingerprints"] if item["stacktrace"]]
-    result["assessment"]["risk_score"] = scenario["summary"]["risk_score"]
-    result["assessment"]["confidence"] = "high" if scenario["summary"]["risk_score"] >= 70 else "mid"
-    result["assessment"]["rationale"] = [f"Risk Level: {scenario['summary']['risk_level']}", f"Detection Status: {scenario['summary']['detection_status']}"]
-    rec = scenario["recommendation"]
-    result["final"]["recommended_actions"] = [{"priority": rec["confidence"], "action": rec["recommendation"], "owner": "service-owner"}]
-    result["final"]["executive_summary"] = rec["cause"]
-    result["final"]["generated_answer"] = rec["recommendation"]
-    result["final"]["evidence_bundle"] = scenario
+    if scenario["fingerprints"]:
+        result["evidence"]["clusters"] = [
+            {
+                "cluster": item["fingerprint"],
+                "count": item["occurrence_count"],
+                "message": item["message"],
+                "log_level": item["log_level"],
+            }
+            for item in scenario["fingerprints"]
+        ]
+        result["evidence"]["anomalies"] = scenario["anomalies"]
+        result["evidence"]["stack_traces"] = [
+            item["stacktrace"]
+            for item in scenario["fingerprints"]
+            if item["stacktrace"]
+        ]
+        result["assessment"]["risk_score"] = scenario["summary"]["risk_score"]
+        result["assessment"]["confidence"] = (
+            "high" if scenario["summary"]["risk_score"] >= 70 else "mid"
+        )
+        result["assessment"]["rationale"] = [
+            f"Risk Level: {scenario['summary']['risk_level']}",
+            f"Detection Status: {scenario['summary']['detection_status']}",
+        ]
+        rec = scenario["recommendation"]
+        result["final"]["recommended_actions"] = [
+            {
+                "priority": rec["confidence"],
+                "action": rec["recommendation"],
+                "owner": "service-owner",
+            }
+        ]
+        result["final"]["executive_summary"] = rec["cause"]
+        result["final"]["generated_answer"] = rec["recommendation"]
+        result["final"]["evidence_bundle"] = scenario
+
+    result["final"]["saved_recommendation_id"] = save_recommendation_result(
+        request_id=result["request_id"],
+        service_name=req.service_name,
+        goal=req.goal,
+        executive_summary=result["final"]["executive_summary"] or "",
+        recommendation=result["final"]["generated_answer"] or "",
+        recommended_actions=result["final"]["recommended_actions"],
+        verification_steps=result["final"]["verification_steps"],
+        evidence_bundle=result["final"]["evidence_bundle"] or {},
+        risk_score=result["assessment"]["risk_score"],
+        confidence=result["assessment"]["confidence"],
+    )
     return AnalyzeResponse(result=result)
 
 
@@ -122,19 +189,38 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
 def recommend_for_fingerprint(req: FingerprintRecommendationRequest) -> AnalyzeResponse:
     """Run the Incident Recommendation through RecommendationAgent slice for a selected cluster."""
     scenario = run_detection_pipeline(req.service_name)
-    selected = next((item for item in scenario["fingerprints"] if item["fingerprint"] == req.fingerprint), None)
+    selected = next(
+        (
+            item
+            for item in scenario["fingerprints"]
+            if item["fingerprint"] == req.fingerprint
+        ),
+        None,
+    )
     selected_recommendation = next(
-        (item for item in scenario.get("recommendations", []) if item["fingerprint"] == req.fingerprint),
+        (
+            item
+            for item in scenario.get("recommendations", [])
+            if item["fingerprint"] == req.fingerprint
+        ),
         scenario["recommendation"],
     )
     selected_impact = next(
-        (item for item in scenario.get("impacts", []) if item["fingerprint"] == req.fingerprint),
+        (
+            item
+            for item in scenario.get("impacts", [])
+            if item["fingerprint"] == req.fingerprint
+        ),
         {"risk_score": 0, "risk_level": "Low", "detected": False},
     )
 
     state = create_initial_state(
         goal=f"selected fingerprint recommendation: {req.fingerprint}",
-        scope={"systems": [req.service_name], "time_range": {"from": "", "to": ""}, "filters": {"fingerprint": req.fingerprint}},
+        scope={
+            "systems": [req.service_name],
+            "time_range": {"from": "", "to": ""},
+            "filters": {"fingerprint": req.fingerprint},
+        },
         request_id=uuid4().hex,
     )
     # Mark only the downstream agents requested by cluster selection as executed.
@@ -162,14 +248,20 @@ def recommend_for_fingerprint(req: FingerprintRecommendationRequest) -> AnalyzeR
         ]
         state["evidence"]["stack_traces"] = [selected["stacktrace"]]
     state["assessment"]["risk_score"] = selected_impact["risk_score"]
-    state["assessment"]["confidence"] = "high" if selected_recommendation["confidence"] == "HIGH" else "mid"
+    state["assessment"]["confidence"] = (
+        "high" if selected_recommendation["confidence"] == "HIGH" else "mid"
+    )
     state["assessment"]["rationale"] = [
         f"Selected Fingerprint: {req.fingerprint}",
         f"Risk Level: {selected_impact['risk_level']}",
     ]
     state["final"]["executive_summary"] = selected_recommendation["cause"]
     state["final"]["recommended_actions"] = [
-        {"priority": selected_recommendation["confidence"], "action": selected_recommendation["recommendation"], "owner": "service-owner"}
+        {
+            "priority": selected_recommendation["confidence"],
+            "action": selected_recommendation["recommendation"],
+            "owner": "service-owner",
+        }
     ]
     state["final"]["verification_steps"] = [
         f"Review logs grouped by {req.fingerprint}",
@@ -181,6 +273,18 @@ def recommend_for_fingerprint(req: FingerprintRecommendationRequest) -> AnalyzeR
         "recommendation": selected_recommendation,
         "impact": selected_impact,
     }
+    state["final"]["saved_recommendation_id"] = save_recommendation_result(
+        request_id=state["request_id"],
+        service_name=req.service_name,
+        goal=state["goal"],
+        executive_summary=selected_recommendation["cause"],
+        recommendation=selected_recommendation["recommendation"],
+        recommended_actions=state["final"]["recommended_actions"],
+        verification_steps=state["final"]["verification_steps"],
+        evidence_bundle=state["final"]["evidence_bundle"],
+        risk_score=state["assessment"]["risk_score"],
+        confidence=state["assessment"]["confidence"],
+    )
     return AnalyzeResponse(result=state)
 
 
@@ -194,5 +298,7 @@ def create_exception(req: ExceptionRegisterRequest) -> dict[str, str]:
 @app.post("/approvals")
 def approve_recommendation(req: ApprovalRequest) -> dict[str, str]:
     """Approve a recommendation and create a Knowledge Card for SC-007."""
-    card_id = approve_result(req.fingerprint, req.cause, req.recommendation, req.action, req.confidence)
+    card_id = approve_result(
+        req.fingerprint, req.cause, req.recommendation, req.action, req.confidence
+    )
     return {"result": "approved", "card_id": card_id}

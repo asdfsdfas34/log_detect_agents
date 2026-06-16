@@ -21,6 +21,29 @@ export interface FingerprintRecommendationRequest {
   fingerprint: string
 }
 
+export interface ApprovalRequest {
+  fingerprint: string
+  cause: string
+  recommendation: string
+  action?: string
+  confidence?: string
+}
+
+export interface ApprovalResponse {
+  result: string
+  card_id: string
+}
+
+export interface ExceptionRegisterRequest {
+  fingerprint: string
+  reason: string
+}
+
+export interface ExceptionRegisterResponse {
+  status: string
+  fingerprint: string
+}
+
 export interface NormalizedLog {
   timestamp?: string
   system?: string
@@ -93,6 +116,7 @@ export interface SharedState {
     verification_steps: string[] | null
     additional_data_needed: string[] | null
     generated_answer: string | null
+    saved_recommendation_id?: number | null
     evidence_bundle?: {
       summary?: {
         total_logs: number
@@ -105,7 +129,11 @@ export interface SharedState {
         risk_level: string
         detection_status: string
       }
-      recommendation?: { cause: string; recommendation: string; confidence: string }
+      recommendation?: {
+        cause: string
+        recommendation: string
+        confidence: string
+      }
     } | null
   }
 }
@@ -122,6 +150,25 @@ export interface HealthResponse {
 
 export interface ServiceListResponse {
   services: string[]
+}
+
+export interface RecommendationHistoryItem {
+  id: number
+  request_id: string
+  service_name: string
+  goal: string
+  executive_summary: string
+  recommendation: string
+  recommended_actions: RecommendedAction[]
+  verification_steps: string[]
+  evidence_bundle: Record<string, unknown>
+  risk_score: number | null
+  confidence: string | null
+  created_at: string
+}
+
+export interface RecommendationHistoryResponse {
+  recommendations: RecommendationHistoryItem[]
 }
 
 export type ExecutionStatus = 'idle' | 'running' | 'completed' | 'failed'

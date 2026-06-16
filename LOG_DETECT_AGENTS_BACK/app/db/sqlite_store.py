@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 from pathlib import Path
@@ -56,7 +57,9 @@ def fetch_recent_logs(*, service_name: str | None, limit: int = 20) -> list[str]
         return []
 
 
-def fetch_recent_log_entries(*, service_names: list[str] | None, limit: int = 200) -> list[dict[str, Any]]:
+def fetch_recent_log_entries(
+    *, service_names: list[str] | None, limit: int = 200
+) -> list[dict[str, Any]]:
     """Read recent structured logs from SQLite storage.
 
     Expected table schema:
@@ -144,8 +147,7 @@ def save_log_analysis(*, goal: str, service_name: str, analysis: str) -> None:
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(db_path) as conn:
         cur = conn.cursor()
-        cur.execute(
-            """
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS log_analyses (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 goal TEXT NOT NULL,
@@ -153,8 +155,7 @@ def save_log_analysis(*, goal: str, service_name: str, analysis: str) -> None:
                 analysis TEXT NOT NULL,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
-            """
-        )
+            """)
         cur.execute(
             "INSERT INTO log_analyses(goal, service_name, analysis) VALUES (?, ?, ?)",
             (goal, service_name, analysis),
@@ -162,7 +163,9 @@ def save_log_analysis(*, goal: str, service_name: str, analysis: str) -> None:
         conn.commit()
 
 
-def fetch_latest_log_analyses(*, service_names: list[str] | None, limit: int = 20) -> list[dict[str, str]]:
+def fetch_latest_log_analyses(
+    *, service_names: list[str] | None, limit: int = 20
+) -> list[dict[str, str]]:
     """Load latest persisted analyses for impact evaluation."""
 
     db_path = _resolve_db_path()
@@ -205,7 +208,9 @@ def fetch_latest_log_analyses(*, service_names: list[str] | None, limit: int = 2
     ]
 
 
-def save_impact_evaluation(*, service_name: str, risk_score: int, confidence: str, rationale: str) -> None:
+def save_impact_evaluation(
+    *, service_name: str, risk_score: int, confidence: str, rationale: str
+) -> None:
     """Persist impact evaluation output to SQLite."""
 
     db_path = _resolve_db_path()
@@ -215,8 +220,7 @@ def save_impact_evaluation(*, service_name: str, risk_score: int, confidence: st
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(db_path) as conn:
         cur = conn.cursor()
-        cur.execute(
-            """
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS impact_evaluations (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 service_name TEXT NOT NULL,
@@ -225,8 +229,7 @@ def save_impact_evaluation(*, service_name: str, risk_score: int, confidence: st
                 rationale TEXT NOT NULL,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
-            """
-        )
+            """)
         cur.execute(
             """
             INSERT INTO impact_evaluations(service_name, risk_score, confidence, rationale)
@@ -235,3 +238,121 @@ def save_impact_evaluation(*, service_name: str, risk_score: int, confidence: st
             (service_name, risk_score, confidence, rationale),
         )
         conn.commit()
+
+
+def save_recommendation_result(
+    *,
+    request_id: str,
+    service_name: str,
+    goal: str,
+    executive_summary: str,
+    recommendation: str,
+    recommended_actions: list[dict[str, Any]] | None = None,
+    verification_steps: list[str] | None = None,
+    evidence_bundle: dict[str, Any] | None = None,
+    risk_score: int | None = None,
+    confidence: str | None = None,
+) -> int | None:
+    """Persist generated recommendation output to SQLite and return its row id."""
+
+    db_path = _resolve_db_path()
+    if not db_path:
+        return None
+
+    Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(db_path) as conn:
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS recommendation_results (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                request_id TEXT NOT NULL,
+                service_name TEXT NOT NULL,
+                goal TEXT NOT NULL,
+                executive_summary TEXT NOT NULL,
+                recommendation TEXT NOT NULL,
+                recommended_actions TEXT NOT NULL,
+                verification_steps TEXT NOT NULL,
+                evidence_bundle TEXT NOT NULL,
+                risk_score INTEGER,
+                confidence TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+            """)
+        cur.execute(
+            """
+            INSERT INTO recommendation_results(
+                request_id, service_name, goal, executive_summary, recommendation,
+                recommended_actions, verification_steps, evidence_bundle, risk_score, confidence
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                request_id,
+                service_name,
+                goal,
+                executive_summary,
+                recommendation,
+                json.dumps(recommended_actions or [], ensure_ascii=False),
+                json.dumps(verification_steps or [], ensure_ascii=False),
+                json.dumps(evidence_bundle or {}, ensure_ascii=False),
+                risk_score,
+                confidence,
+            ),
+        )
+        conn.commit()
+        return int(cur.lastrowid)
+
+
+def fetch_latest_recommendation_results(
+    *, service_names: list[str] | None, limit: int = 20
+) -> list[dict[str, Any]]:
+    """Load latest persisted recommendation outputs from SQLite."""
+
+    db_path = _resolve_db_path()
+    if not db_path:
+        return []
+
+    normalized_services = [s for s in (service_names or []) if s]
+    where_sql = ""
+    params: list[Any] = []
+    if normalized_services:
+        placeholders = ",".join("?" for _ in normalized_services)
+        where_sql = f"WHERE service_name IN ({placeholders})"
+        params.extend(normalized_services)
+
+    query = (
+        "SELECT id, request_id, service_name, goal, executive_summary, recommendation, "
+        "recommended_actions, verification_steps, evidence_bundle, risk_score, confidence, created_at "
+        "FROM recommendation_results "
+        f"{where_sql} "
+        "ORDER BY datetime(created_at) DESC, id DESC "
+        "LIMIT ?"
+    )
+    params.append(limit)
+
+    try:
+        with sqlite3.connect(db_path) as conn:
+            cur = conn.cursor()
+            rows = cur.execute(query, params).fetchall()
+    except Exception:
+        return []
+
+    results: list[dict[str, Any]] = []
+    for row in rows:
+        results.append(
+            {
+                "id": int(row[0]),
+                "request_id": str(row[1]),
+                "service_name": str(row[2]),
+                "goal": str(row[3]),
+                "executive_summary": str(row[4]),
+                "recommendation": str(row[5]),
+                "recommended_actions": json.loads(row[6] or "[]"),
+                "verification_steps": json.loads(row[7] or "[]"),
+                "evidence_bundle": json.loads(row[8] or "{}"),
+                "risk_score": row[9],
+                "confidence": row[10],
+                "created_at": str(row[11]),
+            }
+        )
+    return results

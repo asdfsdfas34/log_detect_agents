@@ -50,6 +50,7 @@ class Final(TypedDict):
     additional_data_needed: list[str] | None
     generated_answer: str | None
     evidence_bundle: dict | None
+    saved_recommendation_id: int | None
 
 
 class Orchestration(TypedDict):
@@ -76,7 +77,9 @@ class SharedState(TypedDict):
     rag: dict
 
 
-def create_initial_state(goal: str, scope: Scope, request_id: str, save_to_chromadb: bool = False) -> SharedState:
+def create_initial_state(
+    goal: str, scope: Scope, request_id: str, save_to_chromadb: bool = False
+) -> SharedState:
     """Build a fully-initialized shared state."""
 
     return {
@@ -93,7 +96,12 @@ def create_initial_state(goal: str, scope: Scope, request_id: str, save_to_chrom
             "incident_candidates": [],
             "source_code_evidence": [],
         },
-        "metrics": {"error_rate": None, "latency_p95": None, "rps": None, "anomaly_score": None},
+        "metrics": {
+            "error_rate": None,
+            "latency_p95": None,
+            "rps": None,
+            "anomaly_score": None,
+        },
         "assessment": {"risk_score": None, "confidence": "low", "rationale": []},
         "decisions": {
             "agents_run": [],
@@ -109,6 +117,7 @@ def create_initial_state(goal: str, scope: Scope, request_id: str, save_to_chrom
             "additional_data_needed": None,
             "generated_answer": None,
             "evidence_bundle": None,
+            "saved_recommendation_id": None,
         },
         "orchestration": {
             "next_agent": None,

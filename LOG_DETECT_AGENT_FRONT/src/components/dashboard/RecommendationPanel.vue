@@ -1,18 +1,60 @@
 <template>
   <div class="rounded-xl border bg-white p-4 shadow-sm">
-    <h3 class="mb-3 text-lg font-semibold">Recommendations</h3>
+    <div class="mb-3 flex flex-wrap items-center justify-between gap-3">
+      <div>
+        <h3 class="text-lg font-semibold">Recommendations</h3>
+        <p class="text-xs text-slate-500">
+          저장과 예외처리는 사용자 승인 후 실행됩니다.
+        </p>
+      </div>
+      <div class="flex flex-wrap gap-2">
+        <button
+          class="rounded bg-emerald-600 px-3 py-2 text-sm text-white disabled:cursor-not-allowed disabled:bg-slate-300"
+          :disabled="!canModerate"
+          @click="emit('approveSave')"
+        >
+          저장 승인
+        </button>
+        <button
+          class="rounded bg-amber-600 px-3 py-2 text-sm text-white disabled:cursor-not-allowed disabled:bg-slate-300"
+          :disabled="!canModerate"
+          @click="emit('approveException')"
+        >
+          예외처리 승인
+        </button>
+      </div>
+    </div>
     <div class="space-y-3">
-      <div v-if="generatedAnswer" class="rounded border border-blue-200 bg-blue-50 p-3 text-sm text-slate-800">
-        <p class="mb-1 text-xs font-semibold uppercase text-blue-700">Generated Answer</p>
+      <div
+        v-if="generatedAnswer"
+        class="rounded border border-blue-200 bg-blue-50 p-3 text-sm text-slate-800"
+      >
+        <p class="mb-1 text-xs font-semibold uppercase text-blue-700">
+          Generated Answer
+        </p>
         <p class="whitespace-pre-line">{{ generatedAnswer }}</p>
       </div>
-      <div v-for="item in actions" :key="item.action" class="rounded border p-3">
-        <span class="rounded bg-slate-900 px-2 py-1 text-xs text-white">{{ item.priority }}</span>
+      <div
+        v-for="item in actions"
+        :key="item.action"
+        class="rounded border p-3"
+      >
+        <span class="rounded bg-slate-900 px-2 py-1 text-xs text-white">{{
+          item.priority
+        }}</span>
         <p class="mt-2 text-sm">{{ item.action }}</p>
         <p class="text-xs text-slate-500">Owner: {{ item.owner }}</p>
       </div>
-      <pre class="overflow-x-auto rounded bg-slate-900 p-3 text-xs text-slate-100">{{ verificationText }}</pre>
-      <button class="rounded bg-blue-600 px-3 py-2 text-sm text-white" @click="copyText">Copy to clipboard</button>
+      <pre
+        class="overflow-x-auto rounded bg-slate-900 p-3 text-xs text-slate-100"
+        >{{ verificationText }}</pre
+      >
+      <button
+        class="rounded bg-blue-600 px-3 py-2 text-sm text-white"
+        @click="copyText"
+      >
+        Copy to clipboard
+      </button>
     </div>
   </div>
 </template>
@@ -21,7 +63,17 @@
 import { computed } from 'vue'
 import type { RecommendedAction } from '@/types/agentTypes'
 
-const props = defineProps<{ actions: RecommendedAction[]; verification: string[]; generatedAnswer?: string | null }>()
+const props = defineProps<{
+  actions: RecommendedAction[]
+  verification: string[]
+  generatedAnswer?: string | null
+  canModerate?: boolean
+}>()
+
+const emit = defineEmits<{
+  approveSave: []
+  approveException: []
+}>()
 
 const verificationText = computed(() => props.verification.join('\n'))
 
