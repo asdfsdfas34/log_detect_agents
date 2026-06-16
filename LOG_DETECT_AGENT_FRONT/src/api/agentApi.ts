@@ -1,5 +1,5 @@
 import axios from 'axios'
-import type { AnalyzeRequest, AnalyzeResponse, FingerprintRecommendationRequest, HealthResponse, ServiceListResponse } from '@/types/agentTypes'
+import type { AnalyzeRequest, AnalyzeResponse, FingerprintRecommendationRequest, HealthResponse, RecommendationHistoryResponse, ServiceListResponse } from '@/types/agentTypes'
 
 const apiClient = axios.create({
   baseURL: import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000',
@@ -18,5 +18,8 @@ export const agentApi = {
   },
   services() {
     return apiClient.get<ServiceListResponse>('/services')
+  },
+  recommendations(params?: { service_name?: string; limit?: number }) {
+    return apiClient.get<RecommendationHistoryResponse>('/recommendations', { params })
   }
 }

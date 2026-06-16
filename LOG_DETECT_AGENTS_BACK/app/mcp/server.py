@@ -8,10 +8,12 @@ from typing import Any
 from app.db.chroma_store import find_related_analyses, save_analysis_document
 from app.db.sqlite_store import (
     fetch_latest_log_analyses,
+    fetch_latest_recommendation_results,
     fetch_recent_log_entries,
     fetch_recent_logs,
     save_impact_evaluation,
     save_log_analysis,
+    save_recommendation_result,
 )
 from app.integrations.microsoft_graph import call_microsoft_graph_api
 from app.llm.openai_client import generate_text
@@ -29,6 +31,8 @@ class MCPServer:
             "sqlite.save_log_analysis": self._sqlite_save_log_analysis,
             "sqlite.fetch_latest_log_analyses": self._sqlite_fetch_latest_log_analyses,
             "sqlite.save_impact_evaluation": self._sqlite_save_impact_evaluation,
+            "sqlite.save_recommendation_result": self._sqlite_save_recommendation_result,
+            "sqlite.fetch_latest_recommendation_results": self._sqlite_fetch_latest_recommendation_results,
             "chromadb.save_analysis_document": self._chromadb_save_analysis_document,
             "chromadb.find_related_analyses": self._chromadb_find_related_analyses,
             "openai.generate_text": self._openai_generate_text,
@@ -48,7 +52,9 @@ class MCPServer:
         )
 
     @staticmethod
-    def _sqlite_fetch_recent_log_entries(arguments: dict[str, Any]) -> list[dict[str, Any]]:
+    def _sqlite_fetch_recent_log_entries(
+        arguments: dict[str, Any],
+    ) -> list[dict[str, Any]]:
         service_names = arguments.get("service_names")
         return fetch_recent_log_entries(
             service_names=service_names if isinstance(service_names, list) else None,
@@ -64,7 +70,9 @@ class MCPServer:
         )
 
     @staticmethod
-    def _sqlite_fetch_latest_log_analyses(arguments: dict[str, Any]) -> list[dict[str, str]]:
+    def _sqlite_fetch_latest_log_analyses(
+        arguments: dict[str, Any],
+    ) -> list[dict[str, str]]:
         service_names = arguments.get("service_names")
         return fetch_latest_log_analyses(
             service_names=service_names if isinstance(service_names, list) else None,
@@ -81,6 +89,45 @@ class MCPServer:
         )
 
     @staticmethod
+    def _sqlite_save_recommendation_result(arguments: dict[str, Any]) -> int | None:
+        recommended_actions = arguments.get("recommended_actions")
+        verification_steps = arguments.get("verification_steps")
+        evidence_bundle = arguments.get("evidence_bundle")
+        risk_score = arguments.get("risk_score")
+        return save_recommendation_result(
+            request_id=str(arguments.get("request_id", "")),
+            service_name=str(arguments.get("service_name", "all")),
+            goal=str(arguments.get("goal", "")),
+            executive_summary=str(arguments.get("executive_summary", "")),
+            recommendation=str(arguments.get("recommendation", "")),
+            recommended_actions=(
+                recommended_actions if isinstance(recommended_actions, list) else None
+            ),
+            verification_steps=(
+                verification_steps if isinstance(verification_steps, list) else None
+            ),
+            evidence_bundle=(
+                evidence_bundle if isinstance(evidence_bundle, dict) else None
+            ),
+            risk_score=int(risk_score) if risk_score is not None else None,
+            confidence=(
+                str(arguments.get("confidence"))
+                if arguments.get("confidence") is not None
+                else None
+            ),
+        )
+
+    @staticmethod
+    def _sqlite_fetch_latest_recommendation_results(
+        arguments: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        service_names = arguments.get("service_names")
+        return fetch_latest_recommendation_results(
+            service_names=service_names if isinstance(service_names, list) else None,
+            limit=int(arguments.get("limit", 20)),
+        )
+
+    @staticmethod
     def _chromadb_save_analysis_document(arguments: dict[str, Any]) -> None:
         save_analysis_document(
             doc_id=str(arguments.get("doc_id", "")),
@@ -93,7 +140,6 @@ class MCPServer:
             query=str(arguments.get("query", "")),
             n_results=int(arguments.get("n_results", 3)),
         )
-
 
     @staticmethod
     def _msgraph_request(arguments: dict[str, Any]) -> dict[str, Any]:

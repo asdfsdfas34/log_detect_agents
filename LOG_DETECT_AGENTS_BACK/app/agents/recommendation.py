@@ -20,7 +20,9 @@ class RecommendationAgent:
         source_evidence = state["evidence"].get("source_code_evidence", [])
         known_matches = state["evidence"].get("known_pattern_matches", [])
 
-        needs_data = any("추가 데이터 필요" in item for item in state["decisions"]["assumptions"])
+        needs_data = any(
+            "추가 데이터 필요" in item for item in state["decisions"]["assumptions"]
+        )
 
         actions = [
             {
@@ -43,7 +45,11 @@ class RecommendationAgent:
 
         additional_data = None
         if needs_data:
-            additional_data = ["stack trace 원문", "실패 요청 샘플 payload", "배포 변경 이력"]
+            additional_data = [
+                "stack trace 원문",
+                "실패 요청 샘플 payload",
+                "배포 변경 이력",
+            ]
 
         mcp = get_mcp_client()
         related = state.get("rag", {}).get("related_knowledge", [])
@@ -88,17 +94,49 @@ class RecommendationAgent:
                 "OpenAI 추천 생성에 실패해 기본 권고안을 제공합니다. "
                 f"error={exc}; risk={risk}; anomalies={len(anomalies)}"
             )
-            state["decisions"]["assumptions"].append("OpenAI API 호출 실패로 recommendation fallback을 사용했습니다.")
+            state["decisions"]["assumptions"].append(
+                "OpenAI API 호출 실패로 recommendation fallback을 사용했습니다."
+            )
 
+        executive_summary = (
+            f"총 {len(anomalies)}건 이상 패턴이 탐지되었고 위험도는 {risk}/100 입니다."
+        )
         state["final"] = {
-            "executive_summary": (
-                f"총 {len(anomalies)}건 이상 패턴이 탐지되었고 위험도는 {risk}/100 입니다."
-            ),
+            "executive_summary": executive_summary,
             "recommended_actions": actions,
             "verification_steps": verification,
             "additional_data_needed": additional_data,
             "generated_answer": generated_answer,
             "evidence_bundle": evidence_bundle,
+            "saved_recommendation_id": None,
         }
+
+        target_service = (state["scope"].get("systems") or ["all"])[0]
+        try:
+            saved_id = mcp.call_tool(
+                "sqlite.save_recommendation_result",
+                {
+                    "request_id": state.get("request_id", ""),
+                    "service_name": target_service,
+                    "goal": state.get("goal", ""),
+                    "executive_summary": executive_summary,
+                    "recommendation": generated_answer,
+                    "recommended_actions": actions,
+                    "verification_steps": verification,
+                    "evidence_bundle": evidence_bundle,
+                    "risk_score": risk,
+                    "confidence": state["assessment"].get("confidence"),
+                },
+            )
+            state["final"]["saved_recommendation_id"] = saved_id
+        except Exception as exc:  # noqa: BLE001
+            state["decisions"]["failures"].append(
+                {
+                    "node": self.name,
+                    "error": f"recommendation 저장 실패: {exc}",
+                    "retry_count": 0,
+                }
+            )
+
         state["decisions"]["agents_run"].append(self.name)
         return state
