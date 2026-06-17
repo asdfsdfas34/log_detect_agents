@@ -15,6 +15,7 @@ class Evidence(TypedDict):
     normalized_logs: list[dict]
     suppressed_logs: list[dict]
     known_pattern_matches: list[dict]
+    new_pattern_candidates: list[dict]
     anomalies: list[dict]
     clusters: list[dict]
     stack_traces: list[str]
@@ -90,6 +91,7 @@ def create_initial_state(
             "normalized_logs": [],
             "suppressed_logs": [],
             "known_pattern_matches": [],
+            "new_pattern_candidates": [],
             "anomalies": [],
             "clusters": [],
             "stack_traces": [],

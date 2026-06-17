@@ -256,6 +256,15 @@ def test_detection_pipeline_hides_clusters_similar_to_registered_exception(
 def test_registered_items_include_message_and_level(
     tmp_path: Path, monkeypatch
 ) -> None:
+    saved_documents = []
+
+    def _fake_save_analysis_document(**kwargs):
+        saved_documents.append(kwargs)
+        return True
+
+    monkeypatch.setattr(
+        "app.db.scenario_store.save_analysis_document", _fake_save_analysis_document
+    )
     db_path = tmp_path / "logs.db"
     monkeypatch.setenv("SQLITE_PATH", str(db_path))
     message = "테스트3님 권한이 없습니다. WorkID=552f54af-69e5-4f23-8402-6e9252bdad95"
@@ -283,3 +292,9 @@ def test_registered_items_include_message_and_level(
     assert exceptions[0]["log_level"] == "WARN"
     assert cards[0]["message"] == message
     assert cards[0]["log_level"] == "WARN"
+    assert cards[0]["title"].startswith("auth-service")
+    assert "[Case Card]" in cards[0]["rag_document"]
+    assert cards[0]["metadata"]["schema_version"] == "rag-case-card-v1"
+    assert cards[0]["embedding_status"] == "embedded"
+    assert saved_documents[0]["doc_id"].startswith("knowledge-card:KC-")
+    assert saved_documents[0]["metadata"]["fingerprint"] == fingerprint
