@@ -128,10 +128,12 @@ class MCPServer:
         )
 
     @staticmethod
-    def _chromadb_save_analysis_document(arguments: dict[str, Any]) -> None:
-        save_analysis_document(
+    def _chromadb_save_analysis_document(arguments: dict[str, Any]) -> bool:
+        metadata = arguments.get("metadata")
+        return save_analysis_document(
             doc_id=str(arguments.get("doc_id", "")),
             text=str(arguments.get("text", "")),
+            metadata=metadata if isinstance(metadata, dict) else None,
         )
 
     @staticmethod

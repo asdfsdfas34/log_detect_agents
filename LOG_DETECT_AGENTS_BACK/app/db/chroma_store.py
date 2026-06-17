@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from typing import List
+from typing import Any
 
 try:
     import chromadb
@@ -21,18 +21,24 @@ def _client():
         return None
 
 
-def save_analysis_document(*, doc_id: str, text: str) -> None:
+def save_analysis_document(
+    *, doc_id: str, text: str, metadata: dict[str, Any] | None = None
+) -> bool:
     client = _client()
     if client is None:
-        return
+        return False
     try:
         collection = client.get_or_create_collection(name="incident_analyses")
-        collection.upsert(ids=[doc_id], documents=[text])
+        upsert_kwargs: dict[str, Any] = {"ids": [doc_id], "documents": [text]}
+        if metadata:
+            upsert_kwargs["metadatas"] = [metadata]
+        collection.upsert(**upsert_kwargs)
+        return True
     except Exception:
-        return
+        return False
 
 
-def find_related_analyses(*, query: str, n_results: int = 3) -> List[str]:
+def find_related_analyses(*, query: str, n_results: int = 3) -> list[str]:
     client = _client()
     if client is None:
         return []

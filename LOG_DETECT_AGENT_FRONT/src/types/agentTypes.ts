@@ -55,6 +55,17 @@ export interface KnowledgeCardItem {
   message?: string
   log_level?: string
   service_name?: string
+  title?: string
+  summary?: string
+  symptoms?: string[]
+  evidence_text?: string
+  root_cause?: string
+  remediation_steps?: string[]
+  verification_steps?: string[]
+  prevention_steps?: string[]
+  metadata?: Record<string, unknown>
+  rag_document?: string
+  embedding_status?: string
 }
 
 export interface KnowledgeCardListResponse {
@@ -117,6 +128,7 @@ export interface SharedState {
     clusters: Cluster[]
     stack_traces: string[]
     incident_candidates?: Array<Record<string, unknown>>
+    new_pattern_candidates?: Array<Record<string, unknown>>
   }
   metrics: {
     error_rate: number | null
