@@ -206,46 +206,15 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
             f"Risk Level: {scenario['summary']['risk_level']}",
             f"Detection Status: {scenario['summary']['detection_status']}",
         ]
-        rec = scenario["recommendation"]
-        rec_fp = rec.get("fingerprint")
-        rec_group = next(
-            (
-                item
-                for item in scenario["fingerprints"]
-                if item["fingerprint"] == rec_fp
-            ),
-            scenario["fingerprints"][0],
-        )
-        rec_impact = next(
-            (
-                item
-                for item in scenario.get("impacts", [])
-                if item["fingerprint"] == rec_group["fingerprint"]
-            ),
-            {
-                "risk_score": scenario["summary"]["risk_score"],
-                "risk_level": scenario["summary"]["risk_level"],
-            },
-        )
-        generated_answer = build_generated_answer(
-            recommendation=rec,
-            message=rec_group["message"],
-            stacktrace=rec_group["stacktrace"],
-            occurrence_count=rec_group["occurrence_count"],
-            log_level=rec_group["log_level"],
-            risk_level=rec_impact["risk_level"],
-            risk_score=rec_impact["risk_score"],
-        )
-        result["final"]["recommended_actions"] = [
-            {
-                "priority": rec["confidence"],
-                "action": rec["recommendation"],
-                "owner": "service-owner",
-            }
-        ]
-        result["final"]["executive_summary"] = rec["cause"]
-        result["final"]["generated_answer"] = generated_answer
-        result["final"]["evidence_bundle"] = scenario
+        # Keep RecommendationAgent's LLM+RAG output as the final recommendation.
+        # The deterministic scenario pipeline enriches evidence/assessment only; it
+        # must not overwrite final recommended_actions, verification_steps, or
+        # generated_answer.
+        final_bundle = result["final"].get("evidence_bundle")
+        if isinstance(final_bundle, dict):
+            final_bundle["scenario_detection"] = scenario
+        else:
+            result["final"]["evidence_bundle"] = {"scenario_detection": scenario}
 
     result["final"]["saved_recommendation_id"] = save_recommendation_result(
         request_id=result["request_id"],
