@@ -44,11 +44,18 @@ class KnowledgeBaseRAGAgent:
             "risk_score": state["assessment"].get("risk_score"),
             "generated_answer": final_answer,
         }
+        metadata = {
+            "request_id": state["request_id"],
+            "source": "final_answer",
+            "risk_score": state["assessment"].get("risk_score") or 0,
+            "schema_version": "final-answer-v1",
+        }
         mcp.call_tool(
             "chromadb.save_analysis_document",
             {
                 "doc_id": f"final:{state['request_id']}",
                 "text": json.dumps(payload, ensure_ascii=False),
+                "metadata": metadata,
             },
         )
         state["rag"]["saved_to_chromadb"] = True

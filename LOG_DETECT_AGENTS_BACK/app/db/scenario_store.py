@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import re
 import sqlite3
@@ -10,6 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from app.db.chroma_store import save_analysis_document
 from app.db.sqlite_store import _resolve_db_path
 
 NUMERIC_RE = re.compile(r"\b\d+\b")
@@ -158,9 +160,40 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             recommendation TEXT NOT NULL,
             action TEXT NOT NULL,
             confidence TEXT NOT NULL,
+            title TEXT DEFAULT '',
+            summary TEXT DEFAULT '',
+            symptoms TEXT DEFAULT '[]',
+            evidence_text TEXT DEFAULT '',
+            root_cause TEXT DEFAULT '',
+            remediation_steps TEXT DEFAULT '[]',
+            verification_steps TEXT DEFAULT '[]',
+            prevention_steps TEXT DEFAULT '[]',
+            metadata_json TEXT DEFAULT '{}',
+            rag_document TEXT DEFAULT '',
+            embedding_status TEXT DEFAULT 'pending',
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
         """)
+
+    for column, definition in {
+        "title": "TEXT DEFAULT ''",
+        "summary": "TEXT DEFAULT ''",
+        "symptoms": "TEXT DEFAULT '[]'",
+        "evidence_text": "TEXT DEFAULT ''",
+        "root_cause": "TEXT DEFAULT ''",
+        "remediation_steps": "TEXT DEFAULT '[]'",
+        "verification_steps": "TEXT DEFAULT '[]'",
+        "prevention_steps": "TEXT DEFAULT '[]'",
+        "metadata_json": "TEXT DEFAULT '{}'",
+        "rag_document": "TEXT DEFAULT ''",
+        "embedding_status": "TEXT DEFAULT 'pending'",
+    }.items():
+        knowledge_columns = [
+            row[1]
+            for row in cur.execute("PRAGMA table_info(knowledge_cards)").fetchall()
+        ]
+        if column not in knowledge_columns:
+            cur.execute(f"ALTER TABLE knowledge_cards ADD COLUMN {column} {definition}")
     for column, definition in {
         "message": "TEXT DEFAULT ''",
         "log_level": "TEXT DEFAULT ''",
@@ -443,6 +476,192 @@ def run_detection_pipeline(service_name: str | None = None) -> dict[str, Any]:
     }
 
 
+
+def _json_list(items: list[str]) -> str:
+    return json.dumps(items, ensure_ascii=False)
+
+
+def _json_dict(item: dict[str, Any]) -> str:
+    return json.dumps(item, ensure_ascii=False, sort_keys=True)
+
+
+def _load_json_list(raw: str) -> list[str]:
+    try:
+        value = json.loads(raw or "[]")
+    except json.JSONDecodeError:
+        return []
+    return [str(item) for item in value] if isinstance(value, list) else []
+
+
+def _load_json_dict(raw: str) -> dict[str, Any]:
+    try:
+        value = json.loads(raw or "{}")
+    except json.JSONDecodeError:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _case_card_context(conn: sqlite3.Connection, fingerprint: str) -> dict[str, Any]:
+    row = conn.execute(
+        """
+        SELECT
+            fp.message,
+            fp.log_level,
+            fp.service_name,
+            fp.stacktrace,
+            fp.occurrence_count,
+            fp.first_seen,
+            fp.last_seen,
+            lar.category,
+            lar.sub_category,
+            ar.severity,
+            ie.risk_score,
+            ie.risk_level
+        FROM fingerprints fp
+        LEFT JOIN log_analysis_results lar ON lar.fingerprint = fp.fingerprint
+        LEFT JOIN anomaly_results ar ON ar.fingerprint = fp.fingerprint
+        LEFT JOIN impact_evaluations ie ON ie.fingerprint = fp.fingerprint
+        WHERE fp.fingerprint = ?
+        """,
+        (fingerprint,),
+    ).fetchone()
+    if not row:
+        return {
+            "message": "",
+            "log_level": "",
+            "service_name": "",
+            "stacktrace": "",
+            "occurrence_count": 0,
+            "first_seen": "",
+            "last_seen": "",
+            "category": "Unknown",
+            "sub_category": "Unknown",
+            "severity": "UNKNOWN",
+            "risk_score": 0,
+            "risk_level": "Low",
+            "normalized_message": "",
+        }
+    message = str(row[0] or "")
+    return {
+        "message": message,
+        "log_level": str(row[1] or ""),
+        "service_name": str(row[2] or ""),
+        "stacktrace": str(row[3] or ""),
+        "occurrence_count": int(row[4] or 0),
+        "first_seen": str(row[5] or ""),
+        "last_seen": str(row[6] or ""),
+        "category": str(row[7] or "Unknown"),
+        "sub_category": str(row[8] or "Unknown"),
+        "severity": str(row[9] or "UNKNOWN"),
+        "risk_score": int(row[10] or 0),
+        "risk_level": str(row[11] or "Low"),
+        "normalized_message": normalize_log_text(message),
+    }
+
+
+def build_rag_case_card(
+    *,
+    card_id: str,
+    fingerprint: str,
+    cause: str,
+    recommendation: str,
+    action: str,
+    confidence: str,
+    context: dict[str, Any],
+) -> dict[str, Any]:
+    """Build a sectioned Case Card that can later be migrated into RAG chunks."""
+
+    service_name = str(context.get("service_name") or "unknown-service")
+    category = str(context.get("category") or "Unknown")
+    sub_category = str(context.get("sub_category") or "Unknown")
+    log_level = str(context.get("log_level") or "UNKNOWN")
+    message = str(context.get("message") or "")
+    normalized_message = str(context.get("normalized_message") or "")
+    stacktrace = str(context.get("stacktrace") or "")
+    occurrence_count = int(context.get("occurrence_count") or 0)
+    title = f"{service_name} {sub_category} case ({fingerprint})"
+    summary = f"{service_name}에서 {sub_category} 패턴이 {occurrence_count}회 관측되었습니다."
+    symptoms = [
+        f"{service_name} 서비스에서 {log_level} 로그가 발생했습니다.",
+        f"동일 fingerprint({fingerprint})가 {occurrence_count}회 관측되었습니다.",
+    ]
+    if normalized_message:
+        symptoms.append(f"정규화 메시지: {normalized_message}")
+    evidence_lines = [
+        f"Message: {message or '-'}",
+        f"Normalized Message: {normalized_message or '-'}",
+        f"Stack Trace: {stacktrace or '-'}",
+    ]
+    root_cause = cause or "원인 미상"
+    remediation_steps = [recommendation] if recommendation else []
+    verification_steps = [
+        f"{fingerprint} fingerprint 재발 여부를 확인합니다.",
+        f"{service_name}의 error rate와 동일 로그 발생량이 감소했는지 확인합니다.",
+    ]
+    prevention_steps = [
+        "동일 fingerprint 기반 알림 또는 Known Pattern 등록 여부를 검토합니다.",
+        "조치 후 재발 시 원인/조치/검증 section을 업데이트합니다.",
+    ]
+    metadata = {
+        "card_id": card_id,
+        "fingerprint": fingerprint,
+        "service_name": service_name,
+        "log_level": log_level,
+        "category": category,
+        "sub_category": sub_category,
+        "risk_score": int(context.get("risk_score") or 0),
+        "risk_level": str(context.get("risk_level") or "Low"),
+        "confidence": confidence,
+        "action": action,
+        "source": "approved_recommendation",
+        "schema_version": "rag-case-card-v1",
+        "chunk_ready": True,
+    }
+    rag_document = "\n".join(
+        [
+            "[Case Card]",
+            f"Title: {title}",
+            f"Fingerprint: {fingerprint}",
+            f"Service: {service_name}",
+            f"Category: {category} / {sub_category}",
+            f"Confidence: {confidence}",
+            f"Risk: {metadata['risk_level']} ({metadata['risk_score']})",
+            "",
+            "[Summary]",
+            summary,
+            "",
+            "[Symptoms]",
+            *[f"- {item}" for item in symptoms],
+            "",
+            "[Evidence]",
+            *[f"- {item}" for item in evidence_lines],
+            "",
+            "[Root Cause]",
+            root_cause,
+            "",
+            "[Recommendation]",
+            *[f"- {item}" for item in remediation_steps],
+            "",
+            "[Verification]",
+            *[f"- {item}" for item in verification_steps],
+            "",
+            "[Prevention]",
+            *[f"- {item}" for item in prevention_steps],
+        ]
+    )
+    return {
+        "title": title,
+        "summary": summary,
+        "symptoms": symptoms,
+        "evidence_text": "\n".join(evidence_lines),
+        "root_cause": root_cause,
+        "remediation_steps": remediation_steps,
+        "verification_steps": verification_steps,
+        "prevention_steps": prevention_steps,
+        "metadata": metadata,
+        "rag_document": rag_document,
+    }
+
 def fetch_knowledge_cards(
     *, fingerprint: str | None = None, limit: int = 20
 ) -> list[dict[str, Any]]:
@@ -467,7 +686,18 @@ def fetch_knowledge_cards(
                 kc.created_at,
                 COALESCE(fp.message, ''),
                 COALESCE(fp.log_level, ''),
-                COALESCE(fp.service_name, '')
+                COALESCE(fp.service_name, ''),
+                kc.title,
+                kc.summary,
+                kc.symptoms,
+                kc.evidence_text,
+                kc.root_cause,
+                kc.remediation_steps,
+                kc.verification_steps,
+                kc.prevention_steps,
+                kc.metadata_json,
+                kc.rag_document,
+                kc.embedding_status
             FROM knowledge_cards kc
             LEFT JOIN fingerprints fp ON fp.fingerprint = kc.fingerprint
             {where_sql}
@@ -488,6 +718,17 @@ def fetch_knowledge_cards(
             "message": str(row[7]),
             "log_level": str(row[8]),
             "service_name": str(row[9]),
+            "title": str(row[10]),
+            "summary": str(row[11]),
+            "symptoms": _load_json_list(str(row[12])),
+            "evidence_text": str(row[13]),
+            "root_cause": str(row[14]),
+            "remediation_steps": _load_json_list(str(row[15])),
+            "verification_steps": _load_json_list(str(row[16])),
+            "prevention_steps": _load_json_list(str(row[17])),
+            "metadata": _load_json_dict(str(row[18])),
+            "rag_document": str(row[19]),
+            "embedding_status": str(row[20]),
         }
         for row in rows
     ]
@@ -564,13 +805,55 @@ def register_exception(fp: str, reason: str) -> None:
 def approve_result(
     fp: str, cause: str, recommendation: str, action: str, confidence: str
 ) -> str:
-    """Persist an approved AI/rule result as a reusable Knowledge Card."""
+    """Persist an approved result as a RAG-ready, reusable Knowledge Card."""
+
     card_id = "KC-" + datetime.utcnow().strftime("%H%M%S%f")[:9]
     with sqlite3.connect(_resolve_db_path()) as conn:
         ensure_schema(conn)
+        context = _case_card_context(conn, fp)
+        case_card = build_rag_case_card(
+            card_id=card_id,
+            fingerprint=fp,
+            cause=cause,
+            recommendation=recommendation,
+            action=action,
+            confidence=confidence,
+            context=context,
+        )
+        metadata = case_card["metadata"]
+        embedded = save_analysis_document(
+            doc_id=f"knowledge-card:{card_id}",
+            text=case_card["rag_document"],
+            metadata=metadata,
+        )
+        embedding_status = "embedded" if embedded else "pending"
         conn.execute(
-            "INSERT INTO knowledge_cards(card_id,fingerprint,cause,recommendation,action,confidence) VALUES (?,?,?,?,?,?)",
-            (card_id, fp, cause, recommendation, action, confidence),
+            """
+            INSERT INTO knowledge_cards(
+                card_id, fingerprint, cause, recommendation, action, confidence,
+                title, summary, symptoms, evidence_text, root_cause, remediation_steps,
+                verification_steps, prevention_steps, metadata_json, rag_document, embedding_status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                card_id,
+                fp,
+                cause,
+                recommendation,
+                action,
+                confidence,
+                case_card["title"],
+                case_card["summary"],
+                _json_list(case_card["symptoms"]),
+                case_card["evidence_text"],
+                case_card["root_cause"],
+                _json_list(case_card["remediation_steps"]),
+                _json_list(case_card["verification_steps"]),
+                _json_list(case_card["prevention_steps"]),
+                _json_dict(metadata),
+                case_card["rag_document"],
+                embedding_status,
+            ),
         )
         conn.commit()
     return card_id
