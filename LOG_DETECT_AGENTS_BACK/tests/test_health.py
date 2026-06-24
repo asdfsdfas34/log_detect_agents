@@ -3,6 +3,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from app.db.sqlite_store import save_recommendation_result
+from app.langsmith_tracing import record_agent_event
 from app.main import app
 
 
@@ -101,3 +102,20 @@ def test_delete_saved_recommendation(tmp_path: Path, monkeypatch) -> None:
     assert list_response.json()["recommendations"] == []
 
     monkeypatch.delenv("SQLITE_PATH", raising=False)
+
+
+def test_list_langsmith_runs_returns_local_agent_flow() -> None:
+    record_agent_event(
+        request_id="req-trace",
+        agent="LogAnalysisAgent",
+        status="completed",
+        elapsed_ms=12,
+    )
+
+    client = TestClient(app)
+    response = client.get("/langsmith/runs", params={"limit": 5})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["source"] in {"local", "langsmith"}
+    assert any(run["name"] == "LogAnalysisAgent" for run in payload["runs"])

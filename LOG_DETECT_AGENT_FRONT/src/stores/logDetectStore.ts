@@ -8,6 +8,7 @@ import type {
   ExceptionRegistryItem,
   ExecutionStatus,
   KnowledgeCardItem,
+  LangSmithRunItem,
   RecommendationHistoryItem,
   SharedState
 } from '@/types/agentTypes'
@@ -45,12 +46,20 @@ export const useLogDetectStore = defineStore('logDetect', () => {
   const loadingRecommendations = ref(false)
   const loadingKnowledgeCards = ref(false)
   const loadingExceptions = ref(false)
+  const loadingLangSmithRuns = ref(false)
   const error = ref<string | null>(null)
   const serviceOptions = ref<string[]>([])
   const state = ref<SharedState | null>(null)
   const recommendationHistory = ref<RecommendationHistoryItem[]>([])
   const knowledgeCards = ref<KnowledgeCardItem[]>([])
   const exceptionRegistry = ref<ExceptionRegistryItem[]>([])
+  const langSmithRuns = ref<LangSmithRunItem[]>([])
+  const langSmithStatus = ref<{
+    enabled: boolean
+    project: string
+    source: string
+    error?: string | null
+  }>({ enabled: false, project: 'log-detect-agents', source: 'local' })
   const toasts = ref<
     Array<{ id: number; level: 'info' | 'error'; message: string }>
   >([])
@@ -201,6 +210,24 @@ export const useLogDetectStore = defineStore('logDetect', () => {
     }
   }
 
+  async function fetchLangSmithRuns() {
+    loadingLangSmithRuns.value = true
+    try {
+      const { data } = await agentApi.langSmithRuns({ limit: 30 })
+      langSmithRuns.value = data.runs
+      langSmithStatus.value = {
+        enabled: data.enabled,
+        project: data.project,
+        source: data.source,
+        error: data.error
+      }
+    } catch {
+      addToast('error', 'LangSmith 로그를 불러오지 못했습니다.')
+    } finally {
+      loadingLangSmithRuns.value = false
+    }
+  }
+
   async function fetchRecommendations(serviceName?: string) {
     loadingRecommendations.value = true
     try {
@@ -320,6 +347,7 @@ export const useLogDetectStore = defineStore('logDetect', () => {
       lastExecutionAt.value = new Date().toISOString()
       await fetchHealth()
       await fetchRecommendations(serviceName)
+      await fetchLangSmithRuns()
     } catch (caught) {
       executionStatus.value = 'failed'
       error.value = (caught as Error).message
@@ -373,6 +401,7 @@ export const useLogDetectStore = defineStore('logDetect', () => {
       currentStage.value = 'Completed'
       lastExecutionAt.value = new Date().toISOString()
       await fetchRecommendations(serviceName)
+      await fetchLangSmithRuns()
       addToast('info', `Updated recommendations for ${fingerprint}`)
     } catch (caught) {
       executionStatus.value = 'failed'
@@ -470,11 +499,14 @@ export const useLogDetectStore = defineStore('logDetect', () => {
     loadingRecommendations,
     loadingKnowledgeCards,
     loadingExceptions,
+    loadingLangSmithRuns,
     error,
     state,
     recommendationHistory,
     knowledgeCards,
     exceptionRegistry,
+    langSmithRuns,
+    langSmithStatus,
     serviceOptions,
     toasts,
     agentTimeline,
@@ -484,6 +516,7 @@ export const useLogDetectStore = defineStore('logDetect', () => {
     currentRecommendationFingerprint,
     fetchHealth,
     fetchServices,
+    fetchLangSmithRuns,
     fetchRecommendations,
     deleteSavedRecommendation,
     fetchKnowledgeCards,

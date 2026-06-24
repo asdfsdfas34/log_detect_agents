@@ -10,6 +10,7 @@ import type {
   FingerprintRecommendationRequest,
   HealthResponse,
   KnowledgeCardListResponse,
+  LangSmithRunsResponse,
   RecommendationDeleteResponse,
   RecommendationHistoryResponse,
   RecommendationSaveRequest,
@@ -37,6 +38,9 @@ export const agentApi = {
   },
   services() {
     return apiClient.get<ServiceListResponse>('/services')
+  },
+  langSmithRuns(params?: { limit?: number }) {
+    return apiClient.get<LangSmithRunsResponse>('/langsmith/runs', { params })
   },
   recommendations(params?: { service_name?: string; limit?: number }) {
     return apiClient.get<RecommendationHistoryResponse>('/recommendations', {

@@ -167,6 +167,15 @@
       <AgentProgressTimeline :steps="store.agentTimeline" compact />
     </aside>
 
+    <aside class="fixed right-4 top-28 z-20 hidden w-80 2xl:block">
+      <LangSmithLogPanel
+        :runs="store.langSmithRuns"
+        :loading="store.loadingLangSmithRuns"
+        :status="store.langSmithStatus"
+        @refresh="store.fetchLangSmithRuns"
+      />
+    </aside>
+
     <EmptyState
       v-if="!store.state && !store.loading"
       message="No analysis result yet. Trigger a run to populate the dashboard."
@@ -234,6 +243,7 @@ import AnomalyTimelineChart from '@/components/dashboard/AnomalyTimelineChart.vu
 import RecommendationPanel from '@/components/dashboard/RecommendationPanel.vue'
 import RecommendationHistoryPanel from '@/components/dashboard/RecommendationHistoryPanel.vue'
 import AgentProgressTimeline from '@/components/dashboard/AgentProgressTimeline.vue'
+import LangSmithLogPanel from '@/components/dashboard/LangSmithLogPanel.vue'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
 import ErrorState from '@/components/common/ErrorState.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
@@ -332,5 +342,6 @@ onMounted(async () => {
   await store.fetchRecommendations()
   await store.fetchKnowledgeCards()
   await store.fetchExceptionRegistry()
+  await store.fetchLangSmithRuns()
 })
 </script>
