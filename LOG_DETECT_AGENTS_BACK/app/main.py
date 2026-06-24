@@ -11,10 +11,13 @@ from app.db.scenario_store import (
     approve_result,
     fetch_exception_registry,
     fetch_knowledge_cards,
+    normalize_log_text,
     register_exception,
     run_detection_pipeline,
 )
+from app.db.chroma_store import find_similar_pattern_clusters, save_pattern_cluster
 from app.db.sqlite_store import (
+    delete_recommendation_result,
     fetch_latest_recommendation_results,
     fetch_service_names,
     save_recommendation_result,
@@ -111,6 +114,78 @@ class ExceptionRegistryResponse(BaseModel):
     exceptions: list[dict]
 
 
+def _pattern_cluster_context(
+    *,
+    service_name: str,
+    fingerprint: str,
+    message: str,
+    log_level: str,
+    stacktrace: str = "",
+) -> str:
+    normalized_message = normalize_log_text(message)
+    return "\n".join(
+        [
+            f"service={service_name}",
+            f"fingerprint={fingerprint}",
+            f"log_level={log_level}",
+            f"normalized_message={normalized_message}",
+            f"context={stacktrace or message}",
+        ]
+    )
+
+
+def _enrich_pattern_clusters(
+    *, service_name: str, fingerprints: list[dict], n_results: int = 5
+) -> list[dict]:
+    enriched: list[dict] = []
+    for item in fingerprints:
+        fingerprint = str(item.get("fingerprint", ""))
+        message = str(item.get("message", ""))
+        log_level = str(item.get("log_level", ""))
+        stacktrace = str(item.get("stacktrace", ""))
+        context = _pattern_cluster_context(
+            service_name=service_name,
+            fingerprint=fingerprint,
+            message=message,
+            log_level=log_level,
+            stacktrace=stacktrace,
+        )
+        similar_clusters = [
+            match
+            for match in find_similar_pattern_clusters(
+                query=context, n_results=n_results + 1
+            )
+            if match.get("id") != f"{service_name}:{fingerprint}"
+        ][:n_results]
+        semantic_similarity = (
+            round(float(similar_clusters[0]["similarity"]) * 100)
+            if similar_clusters and similar_clusters[0].get("similarity") is not None
+            else 0
+        )
+        save_pattern_cluster(
+            doc_id=f"{service_name}:{fingerprint}",
+            text=context,
+            metadata={
+                "service_name": service_name,
+                "fingerprint": fingerprint,
+                "log_level": log_level,
+                "normalized_message": normalize_log_text(message),
+                "occurrence_count": int(item.get("occurrence_count") or 0),
+            },
+        )
+        enriched.append(
+            {
+                "cluster": fingerprint,
+                "count": item["occurrence_count"],
+                "message": message,
+                "log_level": log_level,
+                "semantic_similarity": semantic_similarity,
+                "similar_clusters": similar_clusters,
+            }
+        )
+    return enriched
+
+
 def build_generated_answer(
     *,
     recommendation: dict,
@@ -198,15 +273,9 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
     # Run the deterministic scenario pipeline so the demo works without an LLM.
     scenario = run_detection_pipeline(req.service_name)
     if scenario["fingerprints"]:
-        result["evidence"]["clusters"] = [
-            {
-                "cluster": item["fingerprint"],
-                "count": item["occurrence_count"],
-                "message": item["message"],
-                "log_level": item["log_level"],
-            }
-            for item in scenario["fingerprints"]
-        ]
+        result["evidence"]["clusters"] = _enrich_pattern_clusters(
+            service_name=req.service_name, fingerprints=scenario["fingerprints"]
+        )
         result["evidence"]["anomalies"] = scenario["anomalies"]
         result["evidence"]["stack_traces"] = [
             item["stacktrace"]
@@ -251,6 +320,14 @@ def save_recommendation(req: RecommendationSaveRequest) -> dict[str, int | str]:
         confidence=req.confidence,
     )
     return {"status": "saved", "id": saved_id}
+
+
+@app.delete("/recommendations/{recommendation_id}")
+def delete_recommendation(recommendation_id: int) -> dict[str, int | str]:
+    """Delete one saved recommendation history item."""
+    if delete_recommendation_result(recommendation_id=recommendation_id):
+        return {"status": "deleted", "id": recommendation_id}
+    return {"status": "not_found", "id": recommendation_id}
 
 
 @app.post("/recommendations/fingerprint", response_model=AnalyzeResponse)
@@ -305,14 +382,9 @@ def recommend_for_fingerprint(req: FingerprintRecommendationRequest) -> AnalyzeR
         "SourceCodeAnalysisAgent",
     ]
     if selected:
-        state["evidence"]["clusters"] = [
-            {
-                "cluster": selected["fingerprint"],
-                "count": selected["occurrence_count"],
-                "message": selected["message"],
-                "log_level": selected["log_level"],
-            }
-        ]
+        state["evidence"]["clusters"] = _enrich_pattern_clusters(
+            service_name=req.service_name, fingerprints=[selected]
+        )
         state["evidence"]["stack_traces"] = [selected["stacktrace"]]
     state["assessment"]["risk_score"] = selected_impact["risk_score"]
     state["assessment"]["confidence"] = (

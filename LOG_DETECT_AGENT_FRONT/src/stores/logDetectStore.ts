@@ -217,6 +217,25 @@ export const useLogDetectStore = defineStore('logDetect', () => {
     }
   }
 
+  async function deleteSavedRecommendation(recommendationId: number) {
+    try {
+      const { data } = await agentApi.deleteRecommendation(recommendationId)
+      if (data.status !== 'deleted') {
+        addToast('error', `Recommendation 삭제 대상이 없습니다: ${recommendationId}`)
+        return false
+      }
+      recommendationHistory.value = recommendationHistory.value.filter(
+        (item) => item.id !== recommendationId
+      )
+      addToast('info', `Recommendation 삭제 완료: ${recommendationId}`)
+      return true
+    } catch (caught) {
+      error.value = (caught as Error).message
+      addToast('error', `Recommendation 삭제 실패: ${error.value}`)
+      return false
+    }
+  }
+
   async function fetchKnowledgeCards(fingerprint?: string) {
     loadingKnowledgeCards.value = true
     try {
@@ -466,6 +485,7 @@ export const useLogDetectStore = defineStore('logDetect', () => {
     fetchHealth,
     fetchServices,
     fetchRecommendations,
+    deleteSavedRecommendation,
     fetchKnowledgeCards,
     fetchExceptionRegistry,
     saveCurrentRecommendation,

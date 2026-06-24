@@ -10,6 +10,7 @@ import type {
   FingerprintRecommendationRequest,
   HealthResponse,
   KnowledgeCardListResponse,
+  RecommendationDeleteResponse,
   RecommendationHistoryResponse,
   RecommendationSaveRequest,
   RecommendationSaveResponse,
@@ -46,6 +47,11 @@ export const agentApi = {
     return apiClient.post<RecommendationSaveResponse>(
       '/recommendations/save',
       payload
+    )
+  },
+  deleteRecommendation(recommendationId: number) {
+    return apiClient.delete<RecommendationDeleteResponse>(
+      `/recommendations/${recommendationId}`
     )
   },
   approveRecommendation(payload: ApprovalRequest) {

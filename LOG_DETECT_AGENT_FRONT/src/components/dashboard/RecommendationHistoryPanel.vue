@@ -56,6 +56,7 @@
             <th class="px-3 py-2">Risk</th>
             <th class="px-3 py-2">Recommendation</th>
             <th class="px-3 py-2">Created</th>
+            <th class="px-3 py-2 text-right">Action</th>
           </tr>
         </thead>
         <tbody class="divide-y divide-slate-100 bg-white">
@@ -88,6 +89,16 @@
             </td>
             <td class="whitespace-nowrap px-3 py-2 text-xs text-slate-500">
               {{ item.created_at }}
+            </td>
+            <td class="whitespace-nowrap px-3 py-2 text-right">
+              <button
+                class="rounded-full border border-red-200 px-2 py-0.5 text-xs font-semibold text-red-600 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50"
+                :disabled="loading"
+                aria-label="Delete saved recommendation"
+                @click="$emit('deleteRecommendation', item.id)"
+              >
+                ×
+              </button>
             </td>
           </tr>
         </tbody>
@@ -286,6 +297,7 @@ defineEmits<{
   refresh: []
   fetchKnowledgeCards: []
   fetchExceptions: []
+  deleteRecommendation: [recommendationId: number]
 }>()
 
 interface DetailView {

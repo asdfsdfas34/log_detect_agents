@@ -734,6 +734,33 @@ def fetch_knowledge_cards(
     ]
 
 
+def fetch_known_patterns_for_agents(limit: int = 500) -> list[dict[str, str]]:
+    """Return DB-backed known patterns in a shape agents can merge with config rules."""
+    with sqlite3.connect(_resolve_db_path()) as conn:
+        ensure_schema(conn)
+        rows = conn.execute(
+            """
+            SELECT id, fingerprint, category, sub_category, cause, recommendation, confidence
+            FROM known_patterns
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    return [
+        {
+            "id": str(row[0]),
+            "fingerprint": str(row[1] or ""),
+            "category": str(row[2] or ""),
+            "sub_category": str(row[3] or ""),
+            "cause": str(row[4] or ""),
+            "recommendation": str(row[5] or ""),
+            "confidence": str(row[6] or ""),
+        }
+        for row in rows
+    ]
+
+
 def fetch_exception_registry(
     *, fingerprint: str | None = None, limit: int = 20
 ) -> list[dict[str, str]]:

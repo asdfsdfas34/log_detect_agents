@@ -160,6 +160,7 @@
       @refresh="handleRefreshRecommendations"
       @fetch-knowledge-cards="handleFetchKnowledgeCards"
       @fetch-exceptions="handleFetchExceptions"
+      @delete-recommendation="handleDeleteRecommendation"
     />
 
     <aside class="fixed left-4 top-28 z-20 hidden w-56 xl:block">
@@ -283,6 +284,14 @@ function handleFetchKnowledgeCards() {
 
 function handleFetchExceptions() {
   void store.fetchExceptionRegistry()
+}
+
+function handleDeleteRecommendation(recommendationId: number) {
+  const confirmed = window.confirm(
+    `Recommendation #${recommendationId} 항목을 삭제하시겠습니까?`
+  )
+  if (!confirmed) return
+  void store.deleteSavedRecommendation(recommendationId)
 }
 
 function handleSaveCase() {

@@ -63,6 +63,11 @@ export interface ExceptionRegisterResponse {
   fingerprint: string
 }
 
+export interface RecommendationDeleteResponse {
+  status: string
+  id: number
+}
+
 export interface KnowledgeCardItem {
   card_id: string
   fingerprint: string
@@ -124,6 +129,8 @@ export interface Cluster {
   count: number
   message?: string
   log_level?: string
+  semantic_similarity?: number
+  similar_clusters?: Array<Record<string, unknown>>
 }
 
 export interface FailureRecord {
