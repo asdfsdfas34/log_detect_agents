@@ -11,6 +11,8 @@ import type {
   HealthResponse,
   KnowledgeCardListResponse,
   RecommendationHistoryResponse,
+  RecommendationSaveRequest,
+  RecommendationSaveResponse,
   ServiceListResponse
 } from '@/types/agentTypes'
 
@@ -39,6 +41,12 @@ export const agentApi = {
     return apiClient.get<RecommendationHistoryResponse>('/recommendations', {
       params
     })
+  },
+  saveRecommendation(payload: RecommendationSaveRequest) {
+    return apiClient.post<RecommendationSaveResponse>(
+      '/recommendations/save',
+      payload
+    )
   },
   approveRecommendation(payload: ApprovalRequest) {
     return apiClient.post<ApprovalResponse>('/approvals', payload)

@@ -46,15 +46,8 @@ def test_analyze_scenario_pipeline_does_not_overwrite_final(monkeypatch):
             {"fingerprint": "FP-SCENARIO", "risk_score": 90, "risk_level": "Critical"}
         ],
     }
-    saved = {}
-
-    def _save_recommendation_result(**kwargs):
-        saved["kwargs"] = kwargs
-        return 101
-
     monkeypatch.setattr("app.main.build_graph", lambda: FakeGraph())
     monkeypatch.setattr("app.main.run_detection_pipeline", lambda service_name: scenario)
-    monkeypatch.setattr("app.main.save_recommendation_result", _save_recommendation_result)
 
     response = analyze(AnalyzeRequest(service_name="payment-api"))
     result = response.result
@@ -64,5 +57,4 @@ def test_analyze_scenario_pipeline_does_not_overwrite_final(monkeypatch):
     assert result["final"]["verification_steps"] == ["LLM verification"]
     assert result["final"]["evidence_bundle"]["recommendation_source"] == "llm_rag"
     assert "scenario_detection" in result["final"]["evidence_bundle"]
-    assert saved["kwargs"]["recommendation"] == "LLM generated answer"
-    assert saved["kwargs"]["recommended_actions"][0]["action"] == "LLM+RAG action"
+    assert result["final"]["saved_recommendation_id"] is None
