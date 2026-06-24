@@ -68,6 +68,27 @@ export interface RecommendationDeleteResponse {
   id: number
 }
 
+export interface LangSmithRunItem {
+  id: string
+  request_id?: string
+  name: string
+  run_type?: string
+  status: string
+  elapsed_ms?: number | null
+  error?: string
+  start_time?: string
+  project_name?: string
+  source: string
+}
+
+export interface LangSmithRunsResponse {
+  enabled: boolean
+  project: string
+  source: string
+  runs: LangSmithRunItem[]
+  error?: string | null
+}
+
 export interface KnowledgeCardItem {
   card_id: string
   fingerprint: string

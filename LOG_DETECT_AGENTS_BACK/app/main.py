@@ -23,7 +23,10 @@ from app.db.sqlite_store import (
     save_recommendation_result,
 )
 from app.graph.engine import build_graph
+from app.langsmith_tracing import configure_langsmith, fetch_langsmith_runs
 from app.state import Scope, SharedState, create_initial_state
+
+configure_langsmith()
 
 app = FastAPI(title="Failure Prevention AI Backend", version="0.2.0")
 
@@ -112,6 +115,14 @@ class KnowledgeCardListResponse(BaseModel):
 
 class ExceptionRegistryResponse(BaseModel):
     exceptions: list[dict]
+
+
+class LangSmithRunsResponse(BaseModel):
+    enabled: bool
+    project: str
+    source: str
+    runs: list[dict]
+    error: str | None = None
 
 
 def _pattern_cluster_context(
@@ -250,6 +261,13 @@ def list_recommendations(
             service_names=service_names, limit=limit
         )
     )
+
+
+@app.get("/langsmith/runs", response_model=LangSmithRunsResponse)
+def list_langsmith_runs(limit: int = 20) -> LangSmithRunsResponse:
+    """Return recent LangSmith runs or local agent-flow trace events."""
+    payload = fetch_langsmith_runs(limit=limit)
+    return LangSmithRunsResponse(**payload)
 
 
 @app.post("/analyze", response_model=AnalyzeResponse)

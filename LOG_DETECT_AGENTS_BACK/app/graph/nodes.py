@@ -10,6 +10,7 @@ from app.agents.log_collector import LogCollectorAgent
 from app.agents.orchestrator import OrchestratorAgent
 from app.agents.recommendation import RecommendationAgent
 from app.agents.source_code_analysis import SourceCodeAnalysisAgent
+from app.langsmith_tracing import elapsed_ms, record_agent_event, start_timer
 from app.state import SharedState
 
 NodeCallable = Callable[[SharedState], SharedState]
@@ -30,13 +31,29 @@ def _run_with_retry(state: SharedState, node_name: str, fn: NodeCallable) -> Sha
 
     attempts = 0
     while attempts < 2:
+        started_at = start_timer()
+        request_id = str(state.get("request_id", ""))
+        record_agent_event(request_id=request_id, agent=node_name, status="started")
         try:
             output = fn(state)
             if node_name != "OrchestratorAgent":
                 output["orchestration"]["completed_agents"].append(node_name)
+            record_agent_event(
+                request_id=request_id,
+                agent=node_name,
+                status="completed",
+                elapsed_ms=elapsed_ms(started_at),
+            )
             return output
         except Exception as exc:  # noqa: BLE001
             attempts += 1
+            record_agent_event(
+                request_id=request_id,
+                agent=node_name,
+                status="retrying" if attempts < 2 else "failed",
+                elapsed_ms=elapsed_ms(started_at),
+                error=str(exc),
+            )
             if attempts >= 2:
                 state["decisions"]["failures"].append(
                     {
