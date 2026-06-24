@@ -173,6 +173,12 @@
             <p class="mt-1 line-clamp-2 text-slate-500">
               {{ card.recommendation }}
             </p>
+            <p
+              v-if="card.resolution_method"
+              class="mt-1 line-clamp-2 text-emerald-700"
+            >
+              {{ card.resolution_method }}
+            </p>
           </li>
         </ul>
       </div>
@@ -262,6 +268,14 @@
             <p class="text-xs font-semibold uppercase text-slate-400">Recommendation</p>
             <p class="mt-1 whitespace-pre-wrap">{{ detail.secondaryText }}</p>
           </div>
+          <div v-if="detail.resolutionMethod" class="sm:col-span-2">
+            <p class="text-xs font-semibold uppercase text-slate-400">
+              Resolution Method
+            </p>
+            <p class="mt-1 whitespace-pre-wrap rounded border border-emerald-100 bg-emerald-50 p-3">
+              {{ detail.resolutionMethod }}
+            </p>
+          </div>
           <div>
             <p class="text-xs font-semibold uppercase text-slate-400">Created</p>
             <p class="mt-1">{{ detail.created_at || '-' }}</p>
@@ -308,6 +322,7 @@ interface DetailView {
   service_name?: string
   primaryText?: string
   secondaryText?: string
+  resolutionMethod?: string
   confidence?: string
   created_at?: string
 }
@@ -353,6 +368,7 @@ function openKnowledgeCard(card: KnowledgeCardItem) {
     service_name: card.service_name,
     primaryText: card.cause,
     secondaryText: card.recommendation,
+    resolutionMethod: card.resolution_method,
     confidence: card.confidence,
     created_at: card.created_at
   }

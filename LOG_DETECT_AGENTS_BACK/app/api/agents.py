@@ -18,7 +18,6 @@ class RunResponse(BaseModel):
     collected_logs: str | None = None
     log_analysis: str | None = None
     impact_evaluation: str | None = None
-    source_code_analysis: str | None = None
     recommendation: str
 
 
@@ -36,6 +35,5 @@ def run_agents(req: RunRequest) -> RunResponse:
         collected_logs=out.get("collected_logs"),
         log_analysis=out.get("log_analysis"),
         impact_evaluation=out.get("impact_evaluation"),
-        source_code_analysis=out.get("source_code_analysis"),
         recommendation=out.get("recommendation") or "",
     )

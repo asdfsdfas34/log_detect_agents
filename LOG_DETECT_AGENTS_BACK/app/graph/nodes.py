@@ -9,7 +9,6 @@ from app.agents.log_analysis import LogAnalysisAgent
 from app.agents.log_collector import LogCollectorAgent
 from app.agents.orchestrator import OrchestratorAgent
 from app.agents.recommendation import RecommendationAgent
-from app.agents.source_code_analysis import SourceCodeAnalysisAgent
 from app.state import SharedState
 
 NodeCallable = Callable[[SharedState], SharedState]
@@ -20,7 +19,6 @@ log_collector_agent = LogCollectorAgent()
 log_analysis_agent = LogAnalysisAgent()
 anomaly_detection_agent = AnomalyDetectionAgent()
 impact_evaluation_agent = ImpactEvaluationAgent()
-source_code_analysis_agent = SourceCodeAnalysisAgent()
 knowledge_base_rag_agent = KnowledgeBaseRAGAgent()
 recommendation_agent = RecommendationAgent()
 
@@ -69,10 +67,6 @@ def anomaly_detection_node(state: SharedState) -> SharedState:
 
 def evaluate_impact_node(state: SharedState) -> SharedState:
     return _run_with_retry(state, "ImpactEvaluationAgent", impact_evaluation_agent.run)
-
-
-def source_code_analysis_node(state: SharedState) -> SharedState:
-    return _run_with_retry(state, "SourceCodeAnalysisAgent", source_code_analysis_agent.run)
 
 
 def knowledge_base_rag_node(state: SharedState) -> SharedState:

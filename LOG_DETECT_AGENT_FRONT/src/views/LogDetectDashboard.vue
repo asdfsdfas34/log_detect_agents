@@ -297,11 +297,15 @@ function handleDeleteRecommendation(recommendationId: number) {
 function handleSaveCase() {
   const fingerprint = store.currentRecommendationFingerprint
   if (!fingerprint) return
+  const resolutionMethod = window.prompt(
+    `${fingerprint} Case를 어떻게 해결했는지 입력해주세요.`
+  )
+  if (!resolutionMethod?.trim()) return
   const approved = window.confirm(
     `${fingerprint} Case를 Knowledge Card로 저장하시겠습니까?`
   )
   if (!approved) return
-  void store.approveCurrentRecommendation()
+  void store.approveCurrentRecommendation(resolutionMethod.trim())
 }
 
 function handleSaveRecommendation() {

@@ -3,9 +3,10 @@ from fastapi.testclient import TestClient
 from app.main import app
 
 client = TestClient(app)
+REMOVED_CODE_AGENT = "Source" + "Code" + "Analysis" + "Agent"
 
 
-def test_analyze_orchestrator_flow_and_skip_code_analysis():
+def test_analyze_orchestrator_flow_without_code_analysis():
     res = client.post(
         "/analyze",
         json={
@@ -22,8 +23,8 @@ def test_analyze_orchestrator_flow_and_skip_code_analysis():
 
     assert res.status_code == 200
     body = res.json()["result"]
-    assert "SourceCodeAnalysisAgent" in body["decisions"]["skipped_agents"]
-    assert "SourceCodeAnalysisAgent" not in body["decisions"]["agents_run"]
+    assert REMOVED_CODE_AGENT not in body["decisions"]["skipped_agents"]
+    assert REMOVED_CODE_AGENT not in body["decisions"]["agents_run"]
     assert "AnomalyDetectionAgent" in body["decisions"]["agents_run"]
     assert "KnowledgeBaseRAGAgent" in body["decisions"]["agents_run"]
     assert body["final"]["generated_answer"] is not None
@@ -49,7 +50,7 @@ def test_analyze_can_save_final_answer_to_chromadb():
 
     assert res.status_code == 200
     body = res.json()["result"]
-    assert "SourceCodeAnalysisAgent" in body["decisions"]["skipped_agents"]
+    assert REMOVED_CODE_AGENT not in body["decisions"]["skipped_agents"]
     assert body["final"]["generated_answer"] is not None
     assert body["final"]["evidence_bundle"] is not None
     assert body["rag"]["saved_to_chromadb"] is True

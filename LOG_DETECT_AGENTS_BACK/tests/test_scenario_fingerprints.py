@@ -283,7 +283,14 @@ def test_registered_items_include_message_and_level(
     result = run_detection_pipeline()
     fingerprint = result["fingerprints"][0]["fingerprint"]
     register_exception(fingerprint, "approved ignore")
-    approve_result(fingerprint, "permission denied", "check role mapping", "approved", "HIGH")
+    approve_result(
+        fingerprint,
+        "permission denied",
+        "check role mapping",
+        "approved",
+        "HIGH",
+        "Granted the missing role and redeployed the service.",
+    )
 
     exceptions = fetch_exception_registry(fingerprint=fingerprint)
     cards = fetch_knowledge_cards(fingerprint=fingerprint)
@@ -293,7 +300,10 @@ def test_registered_items_include_message_and_level(
     assert cards[0]["message"] == message
     assert cards[0]["log_level"] == "WARN"
     assert cards[0]["title"].startswith("auth-service")
+    assert cards[0]["resolution_method"] == "Granted the missing role and redeployed the service."
     assert "[Case Card]" in cards[0]["rag_document"]
+    assert "[Resolution Method]" in cards[0]["rag_document"]
+    assert "Granted the missing role and redeployed the service." in cards[0]["rag_document"]
     assert cards[0]["metadata"]["schema_version"] == "rag-case-card-v1"
     assert cards[0]["embedding_status"] == "embedded"
     assert saved_documents[0]["doc_id"].startswith("knowledge-card:KC-")

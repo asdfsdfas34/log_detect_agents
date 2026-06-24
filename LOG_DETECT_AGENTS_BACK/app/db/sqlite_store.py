@@ -6,8 +6,9 @@ import json
 import os
 import sqlite3
 from pathlib import Path
-from dotenv import load_dotenv
 from typing import Any
+
+from dotenv import load_dotenv
 
 
 def _resolve_db_path() -> str:
@@ -228,7 +229,7 @@ def save_impact_evaluation(
     with sqlite3.connect(db_path) as conn:
         cur = conn.cursor()
         cur.execute("""
-            CREATE TABLE IF NOT EXISTS impact_evaluations (
+            CREATE TABLE IF NOT EXISTS impact_evaluation_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 service_name TEXT NOT NULL,
                 risk_score INTEGER NOT NULL,
@@ -239,7 +240,7 @@ def save_impact_evaluation(
             """)
         cur.execute(
             """
-            INSERT INTO impact_evaluations(service_name, risk_score, confidence, rationale)
+            INSERT INTO impact_evaluation_history(service_name, risk_score, confidence, rationale)
             VALUES (?, ?, ?, ?)
             """,
             (service_name, risk_score, confidence, rationale),

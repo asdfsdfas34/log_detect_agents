@@ -18,7 +18,6 @@ const stepNames = [
   'LogAnalysisAgent',
   'AnomalyDetectionAgent',
   'ImpactEvaluationAgent',
-  'SourceCodeAnalysisAgent',
   'KnowledgeBaseRAGAgent',
   'RecommendationAgent'
 ]
@@ -341,7 +340,7 @@ export const useLogDetectStore = defineStore('logDetect', () => {
     agentTimeline.value = stepNames.map((name) => ({
       name,
       status: [
-              'ImpactEvaluationAgent',
+        'ImpactEvaluationAgent',
         'KnowledgeBaseRAGAgent',
         'RecommendationAgent'
       ].includes(name)
@@ -413,7 +412,7 @@ export const useLogDetectStore = defineStore('logDetect', () => {
     }
   }
 
-  async function approveCurrentRecommendation() {
+  async function approveCurrentRecommendation(resolutionMethod: string) {
     const fingerprint = currentRecommendationFingerprint.value
     const recommendation = state.value?.final.generated_answer
     if (!fingerprint || !recommendation) {
@@ -426,6 +425,7 @@ export const useLogDetectStore = defineStore('logDetect', () => {
         fingerprint,
         cause: currentRecommendationCause.value || '-',
         recommendation,
+        resolution_method: resolutionMethod,
         action: 'approved',
         confidence: currentRecommendationConfidence.value
       })

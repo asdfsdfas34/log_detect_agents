@@ -160,6 +160,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             recommendation TEXT NOT NULL,
             action TEXT NOT NULL,
             confidence TEXT NOT NULL,
+            resolution_method TEXT DEFAULT '',
             title TEXT DEFAULT '',
             summary TEXT DEFAULT '',
             symptoms TEXT DEFAULT '[]',
@@ -176,6 +177,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         """)
 
     for column, definition in {
+        "resolution_method": "TEXT DEFAULT ''",
         "title": "TEXT DEFAULT ''",
         "summary": "TEXT DEFAULT ''",
         "symptoms": "TEXT DEFAULT '[]'",
@@ -568,6 +570,7 @@ def build_rag_case_card(
     action: str,
     confidence: str,
     context: dict[str, Any],
+    resolution_method: str = "",
 ) -> dict[str, Any]:
     """Build a sectioned Case Card that can later be migrated into RAG chunks."""
 
@@ -593,6 +596,7 @@ def build_rag_case_card(
         f"Stack Trace: {stacktrace or '-'}",
     ]
     root_cause = cause or "원인 미상"
+    resolution_method = resolution_method.strip()
     remediation_steps = [recommendation] if recommendation else []
     verification_steps = [
         f"{fingerprint} fingerprint 재발 여부를 확인합니다.",
@@ -613,6 +617,7 @@ def build_rag_case_card(
         "risk_level": str(context.get("risk_level") or "Low"),
         "confidence": confidence,
         "action": action,
+        "has_resolution_method": bool(resolution_method),
         "source": "approved_recommendation",
         "schema_version": "rag-case-card-v1",
         "chunk_ready": True,
@@ -642,6 +647,9 @@ def build_rag_case_card(
             "[Recommendation]",
             *[f"- {item}" for item in remediation_steps],
             "",
+            "[Resolution Method]",
+            resolution_method or "-",
+            "",
             "[Verification]",
             *[f"- {item}" for item in verification_steps],
             "",
@@ -655,6 +663,7 @@ def build_rag_case_card(
         "symptoms": symptoms,
         "evidence_text": "\n".join(evidence_lines),
         "root_cause": root_cause,
+        "resolution_method": resolution_method,
         "remediation_steps": remediation_steps,
         "verification_steps": verification_steps,
         "prevention_steps": prevention_steps,
@@ -683,6 +692,7 @@ def fetch_knowledge_cards(
                 kc.recommendation,
                 kc.action,
                 kc.confidence,
+                kc.resolution_method,
                 kc.created_at,
                 COALESCE(fp.message, ''),
                 COALESCE(fp.log_level, ''),
@@ -714,21 +724,22 @@ def fetch_knowledge_cards(
             "recommendation": str(row[3]),
             "action": str(row[4]),
             "confidence": str(row[5]),
-            "created_at": str(row[6]),
-            "message": str(row[7]),
-            "log_level": str(row[8]),
-            "service_name": str(row[9]),
-            "title": str(row[10]),
-            "summary": str(row[11]),
-            "symptoms": _load_json_list(str(row[12])),
-            "evidence_text": str(row[13]),
-            "root_cause": str(row[14]),
-            "remediation_steps": _load_json_list(str(row[15])),
-            "verification_steps": _load_json_list(str(row[16])),
-            "prevention_steps": _load_json_list(str(row[17])),
-            "metadata": _load_json_dict(str(row[18])),
-            "rag_document": str(row[19]),
-            "embedding_status": str(row[20]),
+            "resolution_method": str(row[6]),
+            "created_at": str(row[7]),
+            "message": str(row[8]),
+            "log_level": str(row[9]),
+            "service_name": str(row[10]),
+            "title": str(row[11]),
+            "summary": str(row[12]),
+            "symptoms": _load_json_list(str(row[13])),
+            "evidence_text": str(row[14]),
+            "root_cause": str(row[15]),
+            "remediation_steps": _load_json_list(str(row[16])),
+            "verification_steps": _load_json_list(str(row[17])),
+            "prevention_steps": _load_json_list(str(row[18])),
+            "metadata": _load_json_dict(str(row[19])),
+            "rag_document": str(row[20]),
+            "embedding_status": str(row[21]),
         }
         for row in rows
     ]
@@ -830,7 +841,12 @@ def register_exception(fp: str, reason: str) -> None:
 
 
 def approve_result(
-    fp: str, cause: str, recommendation: str, action: str, confidence: str
+    fp: str,
+    cause: str,
+    recommendation: str,
+    action: str,
+    confidence: str,
+    resolution_method: str = "",
 ) -> str:
     """Persist an approved result as a RAG-ready, reusable Knowledge Card."""
 
@@ -845,6 +861,7 @@ def approve_result(
             recommendation=recommendation,
             action=action,
             confidence=confidence,
+            resolution_method=resolution_method,
             context=context,
         )
         metadata = case_card["metadata"]
@@ -858,9 +875,10 @@ def approve_result(
             """
             INSERT INTO knowledge_cards(
                 card_id, fingerprint, cause, recommendation, action, confidence,
+                resolution_method,
                 title, summary, symptoms, evidence_text, root_cause, remediation_steps,
                 verification_steps, prevention_steps, metadata_json, rag_document, embedding_status
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 card_id,
@@ -869,6 +887,7 @@ def approve_result(
                 recommendation,
                 action,
                 confidence,
+                case_card["resolution_method"],
                 case_card["title"],
                 case_card["summary"],
                 _json_list(case_card["symptoms"]),

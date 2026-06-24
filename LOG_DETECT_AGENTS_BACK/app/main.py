@@ -6,7 +6,9 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from app.agents.recommendation import RecommendationAgent
 from app.config import settings
+from app.db.chroma_store import find_similar_pattern_clusters, save_pattern_cluster
 from app.db.scenario_store import (
     approve_result,
     fetch_exception_registry,
@@ -15,7 +17,6 @@ from app.db.scenario_store import (
     register_exception,
     run_detection_pipeline,
 )
-from app.db.chroma_store import find_similar_pattern_clusters, save_pattern_cluster
 from app.db.sqlite_store import (
     delete_recommendation_result,
     fetch_latest_recommendation_results,
@@ -72,6 +73,9 @@ class ApprovalRequest(BaseModel):
     fingerprint: str
     cause: str
     recommendation: str
+    resolution_method: str = Field(
+        default="", description="How the user actually resolved this case"
+    )
     action: str = "approved"
     confidence: str = "HIGH"
 
@@ -372,20 +376,52 @@ def recommend_for_fingerprint(req: FingerprintRecommendationRequest) -> AnalyzeR
     state["decisions"]["agents_run"] = [
         "ImpactEvaluationAgent",
         "KnowledgeBaseRAGAgent",
-        "RecommendationAgent",
     ]
     state["decisions"]["skipped_agents"] = [
         "OrchestratorAgent",
         "LogCollectorAgent",
         "LogAnalysisAgent",
         "AnomalyDetectionAgent",
-        "SourceCodeAnalysisAgent",
     ]
     if selected:
         state["evidence"]["clusters"] = _enrich_pattern_clusters(
             service_name=req.service_name, fingerprints=[selected]
         )
         state["evidence"]["stack_traces"] = [selected["stacktrace"]]
+        state["evidence"]["normalized_logs"] = [
+            {
+                "system": req.service_name,
+                "level": selected.get("log_level", ""),
+                "message": selected.get("message", ""),
+                "stack_trace": selected.get("stacktrace", ""),
+            }
+        ]
+        state["evidence"]["anomalies"] = [
+            item
+            for item in scenario.get("anomalies", [])
+            if item.get("pattern") == req.fingerprint
+        ]
+    state["evidence"]["known_pattern_matches"] = [
+        {
+            "fingerprint": req.fingerprint,
+            "cause": selected_recommendation.get("cause", ""),
+            "recommendation": selected_recommendation.get("recommendation", ""),
+            "confidence": selected_recommendation.get("confidence", ""),
+            "sub_category": selected_recommendation.get("sub_category", ""),
+        }
+    ]
+    state["evidence"]["incident_candidates"] = [
+        {
+            "fingerprint": req.fingerprint,
+            "root_cause_hint": selected_recommendation.get("cause", ""),
+            "recommended_action_hint": selected_recommendation.get("recommendation", ""),
+            "impact": selected_impact,
+            "selected_log": selected or {},
+        }
+    ]
+    state["rag"]["related_knowledge"] = fetch_knowledge_cards(
+        fingerprint=req.fingerprint, limit=5
+    )
     state["assessment"]["risk_score"] = selected_impact["risk_score"]
     state["assessment"]["confidence"] = (
         "high" if selected_recommendation["confidence"] == "HIGH" else "mid"
@@ -393,35 +429,9 @@ def recommend_for_fingerprint(req: FingerprintRecommendationRequest) -> AnalyzeR
     state["assessment"]["rationale"] = [
         f"Selected Fingerprint: {req.fingerprint}",
         f"Risk Level: {selected_impact['risk_level']}",
+        f"Rule/knowledge recommendation hint: {selected_recommendation.get('recommendation', '-')}",
     ]
-    state["final"]["executive_summary"] = selected_recommendation["cause"]
-    state["final"]["recommended_actions"] = [
-        {
-            "priority": selected_recommendation["confidence"],
-            "action": selected_recommendation["recommendation"],
-            "owner": "service-owner",
-        }
-    ]
-    state["final"]["verification_steps"] = [
-        f"Review logs grouped by {req.fingerprint}",
-        "Apply the recommended fix and monitor the fingerprint count",
-    ]
-    generated_answer = build_generated_answer(
-        recommendation=selected_recommendation,
-        message=selected["message"] if selected else "",
-        stacktrace=selected["stacktrace"] if selected else "",
-        occurrence_count=selected["occurrence_count"] if selected else None,
-        log_level=selected["log_level"] if selected else "",
-        risk_level=selected_impact["risk_level"],
-        risk_score=selected_impact["risk_score"],
-    )
-    state["final"]["generated_answer"] = generated_answer
-    state["final"]["evidence_bundle"] = {
-        "selected_fingerprint": req.fingerprint,
-        "recommendation": selected_recommendation,
-        "impact": selected_impact,
-    }
-    state["final"]["saved_recommendation_id"] = None
+    state = RecommendationAgent().run(state)
     return AnalyzeResponse(result=state)
 
 
@@ -456,6 +466,11 @@ def create_exception(req: ExceptionRegisterRequest) -> dict[str, str]:
 def approve_recommendation(req: ApprovalRequest) -> dict[str, str]:
     """Approve a recommendation and create a Knowledge Card for SC-007."""
     card_id = approve_result(
-        req.fingerprint, req.cause, req.recommendation, req.action, req.confidence
+        req.fingerprint,
+        req.cause,
+        req.recommendation,
+        req.action,
+        req.confidence,
+        req.resolution_method,
     )
     return {"result": "approved", "card_id": card_id}

@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import List
 
-from langgraph.graph import StateGraph, END
+from langgraph.graph import END, StateGraph
 
 from app.agents.prompts import (
     IMPACT_EVALUATION_SYSTEM,
@@ -17,7 +16,7 @@ from app.llm.openai_client import generate_text
 from app.state import AgentState
 
 
-def _combine_logs(user_msg: str, logs: List[str]) -> str:
+def _combine_logs(user_msg: str, logs: list[str]) -> str:
     if not logs:
         return user_msg
     return f"{user_msg}\n\n[RECENT_LOGS]\n" + "\n".join(logs)
@@ -71,12 +70,6 @@ def _impact_evaluation(state: AgentState) -> AgentState:
     return state
 
 
-def _source_code_analysis(state: AgentState) -> AgentState:
-    state["source_code_analysis"] = "SKIPPED: source_code_analysis step disabled by workflow policy."
-    state["next"] = "recommendation"
-    return state
-
-
 def _recommendation(state: AgentState) -> AgentState:
     analysis = state.get("log_analysis") or ""
     impact = state.get("impact_evaluation") or ""
@@ -119,7 +112,6 @@ def build_graph():
     g.add_node("log_collector", _log_collector)
     g.add_node("log_analysis", _log_analysis)
     g.add_node("impact_evaluation", _impact_evaluation)
-    g.add_node("source_code_analysis", _source_code_analysis)
     g.add_node("recommendation", _recommendation)
 
     g.set_entry_point("log_collector")
@@ -136,11 +128,6 @@ def build_graph():
     )
     g.add_conditional_edges(
         "impact_evaluation",
-        _route,
-        {"recommendation": "recommendation", "end": END},
-    )
-    g.add_conditional_edges(
-        "source_code_analysis",
         _route,
         {"recommendation": "recommendation", "end": END},
     )

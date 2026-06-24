@@ -50,6 +50,24 @@
           item.priority
         }}</span>
         <p class="mt-2 text-sm">{{ item.action }}</p>
+        <dl class="mt-2 space-y-1 text-xs text-slate-600">
+          <div v-if="item.reason">
+            <dt class="inline font-semibold text-slate-700">근거: </dt>
+            <dd class="inline">{{ item.reason }}</dd>
+          </div>
+          <div v-if="item.target">
+            <dt class="inline font-semibold text-slate-700">대상: </dt>
+            <dd class="inline">{{ item.target }}</dd>
+          </div>
+          <div v-if="item.expected_effect">
+            <dt class="inline font-semibold text-slate-700">기대 효과: </dt>
+            <dd class="inline">{{ item.expected_effect }}</dd>
+          </div>
+          <div v-if="item.risk">
+            <dt class="inline font-semibold text-slate-700">주의점: </dt>
+            <dd class="inline">{{ item.risk }}</dd>
+          </div>
+        </dl>
         <p class="text-xs text-slate-500">Owner: {{ item.owner }}</p>
       </div>
       <pre

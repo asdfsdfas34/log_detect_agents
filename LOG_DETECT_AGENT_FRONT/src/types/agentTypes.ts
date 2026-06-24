@@ -44,6 +44,7 @@ export interface ApprovalRequest {
   fingerprint: string
   cause: string
   recommendation: string
+  resolution_method?: string
   action?: string
   confidence?: string
 }
@@ -75,6 +76,7 @@ export interface KnowledgeCardItem {
   recommendation: string
   action: string
   confidence: string
+  resolution_method?: string
   created_at: string
   message?: string
   log_level?: string
@@ -143,6 +145,11 @@ export interface RecommendedAction {
   priority: string
   action: string
   owner: string
+  reason?: string
+  target?: string
+  expected_effect?: string
+  risk?: string
+  evidence?: string[]
 }
 
 export interface SharedState {
