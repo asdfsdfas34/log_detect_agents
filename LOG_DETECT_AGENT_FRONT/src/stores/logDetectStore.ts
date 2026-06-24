@@ -17,7 +17,6 @@ const stepNames = [
   'LogCollectorAgent',
   'LogAnalysisAgent',
   'AnomalyDetectionAgent',
-  'IncidentCorrelationAgent',
   'ImpactEvaluationAgent',
   'SourceCodeAnalysisAgent',
   'KnowledgeBaseRAGAgent',
@@ -319,12 +318,11 @@ export const useLogDetectStore = defineStore('logDetect', () => {
   ) {
     executionStatus.value = 'running'
     error.value = null
-    currentStage.value = 'IncidentCorrelationAgent'
+    currentStage.value = 'ImpactEvaluationAgent'
     agentTimeline.value = stepNames.map((name) => ({
       name,
       status: [
-        'IncidentCorrelationAgent',
-        'ImpactEvaluationAgent',
+              'ImpactEvaluationAgent',
         'KnowledgeBaseRAGAgent',
         'RecommendationAgent'
       ].includes(name)
@@ -362,6 +360,37 @@ export const useLogDetectStore = defineStore('logDetect', () => {
       executionStatus.value = 'failed'
       error.value = (caught as Error).message
       addToast('error', `Recommendation update failed: ${error.value}`)
+    }
+  }
+
+  async function saveCurrentRecommendation(serviceName: string) {
+    const recommendation = state.value?.final.generated_answer
+    if (!state.value || !recommendation) {
+      addToast('error', '저장할 Recommendation이 없습니다.')
+      return false
+    }
+
+    try {
+      const { data } = await agentApi.saveRecommendation({
+        request_id: state.value.request_id,
+        service_name: serviceName,
+        goal: state.value.goal,
+        executive_summary: state.value.final.executive_summary ?? '',
+        recommendation,
+        recommended_actions: state.value.final.recommended_actions ?? [],
+        verification_steps: state.value.final.verification_steps ?? [],
+        evidence_bundle: state.value.final.evidence_bundle ?? {},
+        risk_score: state.value.assessment.risk_score,
+        confidence: state.value.assessment.confidence
+      })
+      state.value.final.saved_recommendation_id = data.id
+      addToast('info', `Recommendation 저장 완료: ${data.id}`)
+      await fetchRecommendations(serviceName)
+      return true
+    } catch (caught) {
+      error.value = (caught as Error).message
+      addToast('error', `Recommendation 저장 실패: ${error.value}`)
+      return false
     }
   }
 
@@ -439,6 +468,7 @@ export const useLogDetectStore = defineStore('logDetect', () => {
     fetchRecommendations,
     fetchKnowledgeCards,
     fetchExceptionRegistry,
+    saveCurrentRecommendation,
     approveCurrentRecommendation,
     registerCurrentException,
     runAnalysis,

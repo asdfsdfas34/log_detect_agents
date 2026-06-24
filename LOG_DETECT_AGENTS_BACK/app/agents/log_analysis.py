@@ -10,6 +10,7 @@ from typing import Any
 
 from app.mcp import get_mcp_client
 from app.state import SharedState
+from app.suppression_config import get_suppression_config
 
 _TOKEN_PATTERN = re.compile(r"[a-z0-9_./:-]+")
 _NORMALIZATION_RULES = [
@@ -31,60 +32,11 @@ class LogAnalysisAgent:
 
     name = "LogAnalysisAgent"
 
-    _known_pattern_registry = [
-        {
-            "pattern_id": "KP-HEALTH-CHECK-001",
-            "pattern": "health check",
-            "patterns": ["health check", "healthcheck"],
-            "classification": "harmless",
-            "suppression": True,
-            "level_scope": ["INFO", "WARN"],
-        },
-        {
-            "pattern_id": "KP-READINESS-PROBE-001",
-            "pattern": "readiness probe",
-            "patterns": ["readiness probe", "readiness", "liveness probe"],
-            "classification": "harmless",
-            "suppression": True,
-            "level_scope": ["INFO", "WARN"],
-        },
-        {
-            "pattern_id": "KP-BROKEN-PIPE-001",
-            "pattern": "broken pipe",
-            "patterns": ["broken pipe", "brokenpipeerror", "client closed connection"],
-            "classification": "false_positive",
-            "suppression": True,
-            "level_scope": ["INFO", "WARN", "ERROR"],
-            "stack_tokens": ["brokenpipeerror"],
-        },
-        {
-            "pattern_id": "KP-CONNECTION-RESET-001",
-            "pattern": "connection reset by peer",
-            "patterns": ["connection reset by peer", "connectionreseterror"],
-            "classification": "false_positive",
-            "suppression": True,
-            "level_scope": ["INFO", "WARN", "ERROR"],
-            "stack_tokens": ["connectionreseterror"],
-        },
-        {
-            "pattern_id": "KP-OOM-001",
-            "pattern": "out of memory",
-            "patterns": ["out of memory", "oom", "memoryerror", "java.lang.outofmemoryerror"],
-            "classification": "critical",
-            "suppression": False,
-            "level_scope": ["ERROR", "CRITICAL"],
-            "stack_tokens": ["memoryerror", "outofmemoryerror"],
-        },
-        {
-            "pattern_id": "KP-DEADLOCK-001",
-            "pattern": "deadlock",
-            "patterns": ["deadlock", "dead lock", "database is locked"],
-            "classification": "critical",
-            "suppression": False,
-            "level_scope": ["ERROR", "CRITICAL", "WARN"],
-            "stack_tokens": ["deadlock"],
-        },
-    ]
+    @staticmethod
+    def _known_pattern_registry() -> list[dict[str, Any]]:
+        """Return known suppression patterns from config."""
+
+        return get_suppression_config()["known_patterns"]
 
     def run(self, state: SharedState) -> SharedState:
         logs = state["evidence"]["normalized_logs"]
@@ -230,7 +182,7 @@ class LogAnalysisAgent:
         best_reasons: list[str] = []
         stack_lower = stack_trace.lower()
 
-        for entry in cls._known_pattern_registry:
+        for entry in cls._known_pattern_registry():
             score = 0.0
             reasons: list[str] = []
             patterns = entry.get("patterns", [entry["pattern"]])

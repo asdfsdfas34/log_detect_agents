@@ -73,6 +73,21 @@ class ApprovalRequest(BaseModel):
     confidence: str = "HIGH"
 
 
+class RecommendationSaveRequest(BaseModel):
+    """Request body for explicit recommendation history persistence."""
+
+    request_id: str = ""
+    service_name: str
+    goal: str = ""
+    executive_summary: str = ""
+    recommendation: str
+    recommended_actions: list[dict] = Field(default_factory=list)
+    verification_steps: list[str] = Field(default_factory=list)
+    evidence_bundle: dict = Field(default_factory=dict)
+    risk_score: int | None = None
+    confidence: str | None = None
+
+
 class FingerprintRecommendationRequest(BaseModel):
     """Request body for rerunning downstream recommendation agents for one fingerprint."""
 
@@ -216,24 +231,31 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
         else:
             result["final"]["evidence_bundle"] = {"scenario_detection": scenario}
 
-    result["final"]["saved_recommendation_id"] = save_recommendation_result(
-        request_id=result["request_id"],
+    result["final"]["saved_recommendation_id"] = None
+    return AnalyzeResponse(result=result)
+
+
+@app.post("/recommendations/save")
+def save_recommendation(req: RecommendationSaveRequest) -> dict[str, int | str]:
+    """Persist a generated recommendation only after explicit user action."""
+    saved_id = save_recommendation_result(
+        request_id=req.request_id,
         service_name=req.service_name,
         goal=req.goal,
-        executive_summary=result["final"]["executive_summary"] or "",
-        recommendation=result["final"]["generated_answer"] or "",
-        recommended_actions=result["final"]["recommended_actions"],
-        verification_steps=result["final"]["verification_steps"],
-        evidence_bundle=result["final"]["evidence_bundle"] or {},
-        risk_score=result["assessment"]["risk_score"],
-        confidence=result["assessment"]["confidence"],
+        executive_summary=req.executive_summary,
+        recommendation=req.recommendation,
+        recommended_actions=req.recommended_actions,
+        verification_steps=req.verification_steps,
+        evidence_bundle=req.evidence_bundle,
+        risk_score=req.risk_score,
+        confidence=req.confidence,
     )
-    return AnalyzeResponse(result=result)
+    return {"status": "saved", "id": saved_id}
 
 
 @app.post("/recommendations/fingerprint", response_model=AnalyzeResponse)
 def recommend_for_fingerprint(req: FingerprintRecommendationRequest) -> AnalyzeResponse:
-    """Run the Incident Recommendation through RecommendationAgent slice for a selected cluster."""
+    """Build a recommendation preview for one selected fingerprint without persisting it."""
     scenario = run_detection_pipeline(req.service_name)
     selected = next(
         (
@@ -271,7 +293,6 @@ def recommend_for_fingerprint(req: FingerprintRecommendationRequest) -> AnalyzeR
     )
     # Mark only the downstream agents requested by cluster selection as executed.
     state["decisions"]["agents_run"] = [
-        "IncidentCorrelationAgent",
         "ImpactEvaluationAgent",
         "KnowledgeBaseRAGAgent",
         "RecommendationAgent",
@@ -328,18 +349,7 @@ def recommend_for_fingerprint(req: FingerprintRecommendationRequest) -> AnalyzeR
         "recommendation": selected_recommendation,
         "impact": selected_impact,
     }
-    state["final"]["saved_recommendation_id"] = save_recommendation_result(
-        request_id=state["request_id"],
-        service_name=req.service_name,
-        goal=state["goal"],
-        executive_summary=selected_recommendation["cause"],
-        recommendation=generated_answer,
-        recommended_actions=state["final"]["recommended_actions"],
-        verification_steps=state["final"]["verification_steps"],
-        evidence_bundle=state["final"]["evidence_bundle"],
-        risk_score=state["assessment"]["risk_score"],
-        confidence=state["assessment"]["confidence"],
-    )
+    state["final"]["saved_recommendation_id"] = None
     return AnalyzeResponse(result=state)
 
 

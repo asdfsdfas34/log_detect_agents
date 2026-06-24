@@ -22,7 +22,6 @@ class RecommendationAgent:
         anomalies = state["evidence"]["anomalies"]
         impact_text = "\n".join(state["assessment"]["rationale"])
         metrics = state["metrics"]
-        incidents = state["evidence"].get("incident_candidates", [])
         source_evidence = state["evidence"].get("source_code_evidence", [])
         known_matches = state["evidence"].get("known_pattern_matches", [])
 
@@ -37,7 +36,6 @@ class RecommendationAgent:
             "core_logs": [item.get("message") for item in anomalies[:5]],
             "anomaly_score": state["metrics"].get("anomaly_score"),
             "risk_score": risk,
-            "incident_candidates": incidents[:3],
             "source_code_evidence": source_evidence[:5],
             "known_pattern_summary": {
                 "total_matches": len(known_matches),
@@ -99,32 +97,8 @@ class RecommendationAgent:
             "saved_recommendation_id": None,
         }
 
-        target_service = (state["scope"].get("systems") or ["all"])[0]
-        try:
-            saved_id = mcp.call_tool(
-                "sqlite.save_recommendation_result",
-                {
-                    "request_id": state.get("request_id", ""),
-                    "service_name": target_service,
-                    "goal": state.get("goal", ""),
-                    "executive_summary": executive_summary,
-                    "recommendation": generated_answer,
-                    "recommended_actions": actions,
-                    "verification_steps": verification,
-                    "evidence_bundle": evidence_bundle,
-                    "risk_score": risk,
-                    "confidence": state["assessment"].get("confidence"),
-                },
-            )
-            state["final"]["saved_recommendation_id"] = saved_id
-        except Exception as exc:  # noqa: BLE001
-            state["decisions"]["failures"].append(
-                {
-                    "node": self.name,
-                    "error": f"recommendation 저장 실패: {exc}",
-                    "retry_count": 0,
-                }
-            )
+        # Recommendation generation is intentionally side-effect free;
+        # persistence is handled only by explicit user save actions.
 
         state["decisions"]["agents_run"].append(self.name)
         return state
