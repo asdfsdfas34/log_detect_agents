@@ -2,6 +2,7 @@
 
 from app.mcp import get_mcp_client
 from app.state import SharedState
+from app.suppression_config import get_suppression_config
 
 
 class ImpactEvaluationAgent:
@@ -35,7 +36,11 @@ class ImpactEvaluationAgent:
             text = item.get("analysis", "").lower()
             history_risk_signals += sum(text.count(token) for token in ["critical", "장애", "timeout", "error"])
 
-        suppression_credit = min(20, suppressed_count * 2)
+        impact_suppression = get_suppression_config()["impact_evaluation"]
+        suppression_credit = min(
+            impact_suppression["max_suppression_credit"],
+            suppressed_count * impact_suppression["credit_per_suppressed_log"],
+        )
         risk_score = min(100, max(0, high_count * 25 + mid_count * 12 + history_risk_signals - suppression_credit))
 
         confidence = "low"
