@@ -10,7 +10,11 @@ import type {
   FingerprintRecommendationRequest,
   HealthResponse,
   KnowledgeCardListResponse,
+  LangSmithRunsResponse,
+  RecommendationDeleteResponse,
   RecommendationHistoryResponse,
+  RecommendationSaveRequest,
+  RecommendationSaveResponse,
   ServiceListResponse
 } from '@/types/agentTypes'
 
@@ -35,10 +39,24 @@ export const agentApi = {
   services() {
     return apiClient.get<ServiceListResponse>('/services')
   },
+  langSmithRuns(params?: { limit?: number }) {
+    return apiClient.get<LangSmithRunsResponse>('/langsmith/runs', { params })
+  },
   recommendations(params?: { service_name?: string; limit?: number }) {
     return apiClient.get<RecommendationHistoryResponse>('/recommendations', {
       params
     })
+  },
+  saveRecommendation(payload: RecommendationSaveRequest) {
+    return apiClient.post<RecommendationSaveResponse>(
+      '/recommendations/save',
+      payload
+    )
+  },
+  deleteRecommendation(recommendationId: number) {
+    return apiClient.delete<RecommendationDeleteResponse>(
+      `/recommendations/${recommendationId}`
+    )
   },
   approveRecommendation(payload: ApprovalRequest) {
     return apiClient.post<ApprovalResponse>('/approvals', payload)

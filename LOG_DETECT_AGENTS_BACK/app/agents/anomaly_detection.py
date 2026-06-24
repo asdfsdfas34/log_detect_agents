@@ -3,6 +3,7 @@
 from collections import Counter
 
 from app.state import SharedState
+from app.suppression_config import get_suppression_config
 
 
 class AnomalyDetectionAgent:
@@ -13,13 +14,14 @@ class AnomalyDetectionAgent:
     def run(self, state: SharedState) -> SharedState:
         logs = state["evidence"]["normalized_logs"]
         suppressed_logs = state["evidence"].get("suppressed_logs", [])
+        key_fields = get_suppression_config()["anomaly_detection"]["suppressed_key_fields"]
         suppressed_keys = {
-            (str(item.get("timestamp")), str(item.get("system")), str(item.get("message"))) for item in suppressed_logs
+            tuple(str(item.get(field)) for field in key_fields) for item in suppressed_logs
         }
         filtered_logs = [
             log
             for log in logs
-            if (str(log.get("timestamp")), str(log.get("system")), str(log.get("message"))) not in suppressed_keys
+            if tuple(str(log.get(field)) for field in key_fields) not in suppressed_keys
         ]
 
         if not filtered_logs:

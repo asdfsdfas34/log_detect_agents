@@ -144,8 +144,9 @@
         :verification="store.state.final.verification_steps ?? []"
         :generated-answer="store.state.final.generated_answer"
         :can-moderate="canModerateRecommendation"
-        @approve-save="handleApproveSave"
-        @approve-exception="handleApproveException"
+        @save-case="handleSaveCase"
+        @save-recommendation="handleSaveRecommendation"
+        @save-exception="handleSaveException"
       />
     </template>
 
@@ -159,10 +160,20 @@
       @refresh="handleRefreshRecommendations"
       @fetch-knowledge-cards="handleFetchKnowledgeCards"
       @fetch-exceptions="handleFetchExceptions"
+      @delete-recommendation="handleDeleteRecommendation"
     />
 
     <aside class="fixed left-4 top-28 z-20 hidden w-56 xl:block">
       <AgentProgressTimeline :steps="store.agentTimeline" compact />
+    </aside>
+
+    <aside class="fixed right-4 top-28 z-20 hidden w-80 2xl:block">
+      <LangSmithLogPanel
+        :runs="store.langSmithRuns"
+        :loading="store.loadingLangSmithRuns"
+        :status="store.langSmithStatus"
+        @refresh="store.fetchLangSmithRuns"
+      />
     </aside>
 
     <EmptyState
@@ -232,6 +243,7 @@ import AnomalyTimelineChart from '@/components/dashboard/AnomalyTimelineChart.vu
 import RecommendationPanel from '@/components/dashboard/RecommendationPanel.vue'
 import RecommendationHistoryPanel from '@/components/dashboard/RecommendationHistoryPanel.vue'
 import AgentProgressTimeline from '@/components/dashboard/AgentProgressTimeline.vue'
+import LangSmithLogPanel from '@/components/dashboard/LangSmithLogPanel.vue'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
 import ErrorState from '@/components/common/ErrorState.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
@@ -284,21 +296,37 @@ function handleFetchExceptions() {
   void store.fetchExceptionRegistry()
 }
 
-function handleApproveSave() {
+function handleDeleteRecommendation(recommendationId: number) {
+  const confirmed = window.confirm(
+    `Recommendation #${recommendationId} 항목을 삭제하시겠습니까?`
+  )
+  if (!confirmed) return
+  void store.deleteSavedRecommendation(recommendationId)
+}
+
+function handleSaveCase() {
   const fingerprint = store.currentRecommendationFingerprint
   if (!fingerprint) return
   const approved = window.confirm(
-    `${fingerprint} Recommendation을 Knowledge Card로 저장 승인하시겠습니까?`
+    `${fingerprint} Case를 Knowledge Card로 저장하시겠습니까?`
   )
   if (!approved) return
   void store.approveCurrentRecommendation()
 }
 
-function handleApproveException() {
+function handleSaveRecommendation() {
+  const trimmed = serviceName.value.trim()
+  if (!trimmed) return
+  const approved = window.confirm('현재 Recommendation을 저장하시겠습니까?')
+  if (!approved) return
+  void store.saveCurrentRecommendation(trimmed)
+}
+
+function handleSaveException() {
   const fingerprint = store.currentRecommendationFingerprint
   if (!fingerprint) return
   const reason = window.prompt(
-    `${fingerprint} 예외처리 사유를 입력하고 승인해주세요.`
+    `${fingerprint} 예외처리 저장 사유를 입력해주세요.`
   )
   if (!reason?.trim()) return
   void store.registerCurrentException(reason.trim())
@@ -310,5 +338,6 @@ onMounted(async () => {
   await store.fetchRecommendations()
   await store.fetchKnowledgeCards()
   await store.fetchExceptionRegistry()
+  await store.fetchLangSmithRuns()
 })
 </script>

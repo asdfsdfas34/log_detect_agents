@@ -4,23 +4,30 @@
       <div>
         <h3 class="text-lg font-semibold">Recommendations</h3>
         <p class="text-xs text-slate-500">
-          저장과 예외처리는 사용자 승인 후 실행됩니다.
+          Case, Recommendation, 예외처리는 각각 사용자 버튼 클릭 후 저장됩니다.
         </p>
       </div>
       <div class="flex flex-wrap gap-2">
         <button
           class="rounded bg-emerald-600 px-3 py-2 text-sm text-white disabled:cursor-not-allowed disabled:bg-slate-300"
           :disabled="!canModerate"
-          @click="emit('approveSave')"
+          @click="emit('saveCase')"
         >
-          저장 승인
+          Case 저장
+        </button>
+        <button
+          class="rounded bg-blue-600 px-3 py-2 text-sm text-white disabled:cursor-not-allowed disabled:bg-slate-300"
+          :disabled="!canModerate"
+          @click="emit('saveRecommendation')"
+        >
+          Recommend 저장
         </button>
         <button
           class="rounded bg-amber-600 px-3 py-2 text-sm text-white disabled:cursor-not-allowed disabled:bg-slate-300"
           :disabled="!canModerate"
-          @click="emit('approveException')"
+          @click="emit('saveException')"
         >
-          예외처리 승인
+          예외처리 저장
         </button>
       </div>
     </div>
@@ -71,8 +78,9 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
-  approveSave: []
-  approveException: []
+  saveCase: []
+  saveRecommendation: []
+  saveException: []
 }>()
 
 const verificationText = computed(() => props.verification.join('\n'))

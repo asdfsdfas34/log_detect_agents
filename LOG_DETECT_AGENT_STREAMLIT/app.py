@@ -13,7 +13,6 @@ STEP_NAMES = [
     "LogCollectorAgent",
     "LogAnalysisAgent",
     "AnomalyDetectionAgent",
-    "IncidentCorrelationAgent",
     "ImpactEvaluationAgent",
     "SourceCodeAnalysisAgent",
     "KnowledgeBaseRAGAgent",

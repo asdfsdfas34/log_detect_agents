@@ -15,8 +15,6 @@ class FakeMCPClient:
             if isinstance(self.openai_response, Exception):
                 raise self.openai_response
             return self.openai_response
-        if tool_name == "sqlite.save_recommendation_result":
-            return 77
         raise AssertionError(f"unexpected tool: {tool_name}")
 
 
@@ -83,8 +81,8 @@ def test_recommendation_agent_uses_structured_llm_actions(monkeypatch):
     ]
     assert "에러 재현 시나리오 기반 핫픽스" not in result["final"]["generated_answer"]
     assert result["final"]["evidence_bundle"]["recommendation_source"] == "llm_rag"
-    saved_call = [call for call in fake.calls if call[0] == "sqlite.save_recommendation_result"][0]
-    assert saved_call[1]["recommended_actions"] == result["final"]["recommended_actions"]
+    assert not any(call[0] == "sqlite.save_recommendation_result" for call in fake.calls)
+    assert result["final"]["saved_recommendation_id"] is None
 
 
 def test_recommendation_agent_falls_back_when_structured_json_invalid(monkeypatch):

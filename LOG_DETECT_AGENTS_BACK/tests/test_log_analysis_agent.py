@@ -1,6 +1,8 @@
+import sqlite3
 from pathlib import Path
 
 from app.agents.log_analysis import LogAnalysisAgent
+from app.db.scenario_store import ensure_schema
 from app.state import create_initial_state
 
 
@@ -58,5 +60,57 @@ def test_log_analysis_uses_deterministic_known_pattern_matching_without_llm(
         "Known Pattern Registry deterministic check" in item
         for item in result["decisions"]["assumptions"]
     )
+
+    monkeypatch.delenv("SQLITE_PATH", raising=False)
+
+
+def test_log_analysis_merges_db_known_patterns(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "logs.db"
+    monkeypatch.setenv("SQLITE_PATH", str(db_path))
+
+    message = "Payment request failed: timeout after 5000ms for user=12345"
+    normalized = LogAnalysisAgent._normalize_message(message)
+    fingerprint = LogAnalysisAgent._fingerprint(normalized)
+
+    with sqlite3.connect(db_path) as conn:
+        ensure_schema(conn)
+        conn.execute(
+            """
+            INSERT INTO known_patterns(
+                fingerprint, category, sub_category, cause, recommendation, confidence
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                fingerprint,
+                "Timeout",
+                "Payment Timeout",
+                "payment provider latency",
+                "increase provider timeout budget",
+                "HIGH",
+            ),
+        )
+        conn.commit()
+
+    state = create_initial_state(
+        goal="payment timeout investigation",
+        scope={"systems": ["payment-api"], "time_range": {}, "filters": {}},
+        request_id="req-db-known-pattern",
+    )
+    state["evidence"]["normalized_logs"] = [
+        {
+            "timestamp": "2026-06-17T10:00:01",
+            "system": "payment-api",
+            "level": "ERROR",
+            "message": message,
+            "stack_trace": "PaymentClient.call -> TimeoutError",
+        }
+    ]
+
+    result = LogAnalysisAgent().run(state)
+
+    assert result["evidence"]["known_pattern_matches"][0]["source"] == "db"
+    assert result["evidence"]["known_pattern_matches"][0]["pattern"] == "Payment Timeout"
+    assert "db_fingerprint" in result["evidence"]["known_pattern_matches"][0]["matched_by"]
+    assert result["evidence"]["new_pattern_candidates"] == []
 
     monkeypatch.delenv("SQLITE_PATH", raising=False)

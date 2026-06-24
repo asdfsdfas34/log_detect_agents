@@ -11,7 +11,6 @@ class OrchestratorAgent:
         "LogCollectorAgent",
         "LogAnalysisAgent",
         "AnomalyDetectionAgent",
-        "IncidentCorrelationAgent",
         "ImpactEvaluationAgent",
         "SourceCodeAnalysisAgent",
         "KnowledgeBaseRAGAgent",

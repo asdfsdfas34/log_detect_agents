@@ -26,6 +26,10 @@ class Settings:
     chromadb_path: str
     log_level: str
     llm_stub_mode: bool
+    langsmith_tracing: bool
+    langsmith_project: str
+    langsmith_api_key: str
+    langsmith_endpoint: str
 
 
 settings = Settings(
@@ -35,4 +39,9 @@ settings = Settings(
     chromadb_path=os.getenv("CHROMADB_PATH", "./.chroma"),
     log_level=os.getenv("LOG_LEVEL", "INFO"),
     llm_stub_mode=os.getenv("LLM_STUB_MODE", "true").lower() != "false",
+    langsmith_tracing=os.getenv("LANGSMITH_TRACING", os.getenv("LANGCHAIN_TRACING_V2", "false")).lower()
+    in {"1", "true", "yes", "on"},
+    langsmith_project=os.getenv("LANGSMITH_PROJECT", os.getenv("LANGCHAIN_PROJECT", "log-detect-agents")),
+    langsmith_api_key=os.getenv("LANGSMITH_API_KEY", os.getenv("LANGCHAIN_API_KEY", "")),
+    langsmith_endpoint=os.getenv("LANGSMITH_ENDPOINT", os.getenv("LANGCHAIN_ENDPOINT", "https://api.smith.langchain.com")),
 )

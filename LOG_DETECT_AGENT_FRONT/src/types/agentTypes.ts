@@ -21,6 +21,25 @@ export interface FingerprintRecommendationRequest {
   fingerprint: string
 }
 
+
+export interface RecommendationSaveRequest {
+  request_id?: string
+  service_name: string
+  goal?: string
+  executive_summary?: string
+  recommendation: string
+  recommended_actions?: RecommendedAction[]
+  verification_steps?: string[]
+  evidence_bundle?: Record<string, unknown>
+  risk_score?: number | null
+  confidence?: string | null
+}
+
+export interface RecommendationSaveResponse {
+  status: string
+  id: number
+}
+
 export interface ApprovalRequest {
   fingerprint: string
   cause: string
@@ -42,6 +61,32 @@ export interface ExceptionRegisterRequest {
 export interface ExceptionRegisterResponse {
   status: string
   fingerprint: string
+}
+
+export interface RecommendationDeleteResponse {
+  status: string
+  id: number
+}
+
+export interface LangSmithRunItem {
+  id: string
+  request_id?: string
+  name: string
+  run_type?: string
+  status: string
+  elapsed_ms?: number | null
+  error?: string
+  start_time?: string
+  project_name?: string
+  source: string
+}
+
+export interface LangSmithRunsResponse {
+  enabled: boolean
+  project: string
+  source: string
+  runs: LangSmithRunItem[]
+  error?: string | null
 }
 
 export interface KnowledgeCardItem {
@@ -105,6 +150,8 @@ export interface Cluster {
   count: number
   message?: string
   log_level?: string
+  semantic_similarity?: number
+  similar_clusters?: Array<Record<string, unknown>>
 }
 
 export interface FailureRecord {
@@ -120,6 +167,7 @@ export interface RecommendedAction {
 }
 
 export interface SharedState {
+  request_id: string
   goal: string
   scope: Scope
   evidence: {
