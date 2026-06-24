@@ -7,7 +7,6 @@ from app.graph.nodes import (
     anomaly_detection_node,
     collect_logs_node,
     evaluate_impact_node,
-    incident_correlation_node,
     knowledge_base_rag_node,
     orchestrator_node,
     recommend_node,
@@ -25,7 +24,6 @@ def build_graph():
     graph.add_node("log_collector", collect_logs_node)
     graph.add_node("log_analysis", analyze_logs_node)
     graph.add_node("anomaly_detection", anomaly_detection_node)
-    graph.add_node("incident_correlation", incident_correlation_node)
     graph.add_node("impact_evaluation", evaluate_impact_node)
     graph.add_node("source_code_analysis", source_code_analysis_node)
     graph.add_node("knowledge_base_rag", knowledge_base_rag_node)
@@ -39,7 +37,6 @@ def build_graph():
             "LogCollectorAgent": "log_collector",
             "LogAnalysisAgent": "log_analysis",
             "AnomalyDetectionAgent": "anomaly_detection",
-            "IncidentCorrelationAgent": "incident_correlation",
             "ImpactEvaluationAgent": "impact_evaluation",
             "SourceCodeAnalysisAgent": "source_code_analysis",
             "KnowledgeBaseRAGAgent": "knowledge_base_rag",
@@ -52,7 +49,6 @@ def build_graph():
         "log_collector",
         "log_analysis",
         "anomaly_detection",
-        "incident_correlation",
         "impact_evaluation",
         "source_code_analysis",
         "knowledge_base_rag",

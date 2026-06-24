@@ -25,7 +25,6 @@ def test_analyze_orchestrator_flow_and_skip_code_analysis():
     assert "SourceCodeAnalysisAgent" in body["decisions"]["skipped_agents"]
     assert "SourceCodeAnalysisAgent" not in body["decisions"]["agents_run"]
     assert "AnomalyDetectionAgent" in body["decisions"]["agents_run"]
-    assert "IncidentCorrelationAgent" in body["decisions"]["agents_run"]
     assert "KnowledgeBaseRAGAgent" in body["decisions"]["agents_run"]
     assert body["final"]["generated_answer"] is not None
     assert body["final"]["evidence_bundle"] is not None
