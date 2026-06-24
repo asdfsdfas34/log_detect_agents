@@ -34,7 +34,17 @@
               </span>
             </td>
             <td class="py-2">{{ item.count }}</td>
-            <td class="py-2">{{ similarity(item.count) }}%</td>
+            <td class="py-2">
+              <div class="font-semibold text-slate-700">
+                {{ similarity(item) }}%
+              </div>
+              <div
+                v-if="item.similar_clusters?.length"
+                class="text-xs text-slate-400"
+              >
+                {{ item.similar_clusters.length }} semantic matches
+              </div>
+            </td>
           </tr>
         </tbody>
       </table>
@@ -50,10 +60,9 @@ const props = defineProps<{ clusters: Cluster[] }>()
 const emit = defineEmits<{ selectCluster: [cluster: Cluster] }>()
 
 const sortedClusters = computed(() => [...props.clusters].sort((a, b) => b.count - a.count))
-const total = computed(() => props.clusters.reduce((sum, item) => sum + item.count, 0) || 1)
 
-function similarity(count: number): number {
-  return Math.round((count / total.value) * 100)
+function similarity(item: Cluster): number {
+  return item.semantic_similarity ?? 0
 }
 
 // Highlight error-level fingerprints so operators can scan critical patterns quickly.

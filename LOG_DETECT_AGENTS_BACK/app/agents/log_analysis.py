@@ -8,8 +8,10 @@ from collections import Counter
 from difflib import SequenceMatcher
 from typing import Any
 
+from app.db.scenario_store import fetch_known_patterns_for_agents
 from app.mcp import get_mcp_client
 from app.state import SharedState
+from app.suppression_config import get_suppression_config
 
 _TOKEN_PATTERN = re.compile(r"[a-z0-9_./:-]+")
 _NORMALIZATION_RULES = [
@@ -31,60 +33,43 @@ class LogAnalysisAgent:
 
     name = "LogAnalysisAgent"
 
-    _known_pattern_registry = [
-        {
-            "pattern_id": "KP-HEALTH-CHECK-001",
-            "pattern": "health check",
-            "patterns": ["health check", "healthcheck"],
-            "classification": "harmless",
-            "suppression": True,
-            "level_scope": ["INFO", "WARN"],
-        },
-        {
-            "pattern_id": "KP-READINESS-PROBE-001",
-            "pattern": "readiness probe",
-            "patterns": ["readiness probe", "readiness", "liveness probe"],
-            "classification": "harmless",
-            "suppression": True,
-            "level_scope": ["INFO", "WARN"],
-        },
-        {
-            "pattern_id": "KP-BROKEN-PIPE-001",
-            "pattern": "broken pipe",
-            "patterns": ["broken pipe", "brokenpipeerror", "client closed connection"],
-            "classification": "false_positive",
-            "suppression": True,
-            "level_scope": ["INFO", "WARN", "ERROR"],
-            "stack_tokens": ["brokenpipeerror"],
-        },
-        {
-            "pattern_id": "KP-CONNECTION-RESET-001",
-            "pattern": "connection reset by peer",
-            "patterns": ["connection reset by peer", "connectionreseterror"],
-            "classification": "false_positive",
-            "suppression": True,
-            "level_scope": ["INFO", "WARN", "ERROR"],
-            "stack_tokens": ["connectionreseterror"],
-        },
-        {
-            "pattern_id": "KP-OOM-001",
-            "pattern": "out of memory",
-            "patterns": ["out of memory", "oom", "memoryerror", "java.lang.outofmemoryerror"],
-            "classification": "critical",
-            "suppression": False,
-            "level_scope": ["ERROR", "CRITICAL"],
-            "stack_tokens": ["memoryerror", "outofmemoryerror"],
-        },
-        {
-            "pattern_id": "KP-DEADLOCK-001",
-            "pattern": "deadlock",
-            "patterns": ["deadlock", "dead lock", "database is locked"],
-            "classification": "critical",
-            "suppression": False,
-            "level_scope": ["ERROR", "CRITICAL", "WARN"],
-            "stack_tokens": ["deadlock"],
-        },
-    ]
+    @classmethod
+    def _known_pattern_registry(cls) -> list[dict[str, Any]]:
+        """Return known patterns from config and DB sources."""
+
+        return [
+            *get_suppression_config()["known_patterns"],
+            *cls._db_known_pattern_registry(),
+        ]
+
+    @staticmethod
+    def _db_known_pattern_registry() -> list[dict[str, Any]]:
+        """Adapt DB known_patterns rows to the deterministic matcher schema."""
+
+        entries = []
+        for row in fetch_known_patterns_for_agents():
+            sub_category = row["sub_category"]
+            fingerprint = row["fingerprint"]
+            patterns = [
+                value
+                for value in [sub_category, row["cause"], row["recommendation"]]
+                if value
+            ]
+            entries.append(
+                {
+                    "pattern_id": f"DB-KP-{row['id']}",
+                    "pattern": sub_category or fingerprint,
+                    "patterns": patterns or [fingerprint],
+                    "classification": row["category"] or "known_pattern",
+                    "suppression": False,
+                    "level_scope": [],
+                    "stack_tokens": [],
+                    "fingerprint": fingerprint,
+                    "source": "db",
+                    "db_confidence": row["confidence"],
+                }
+            )
+        return entries
 
     def run(self, state: SharedState) -> SharedState:
         logs = state["evidence"]["normalized_logs"]
@@ -97,6 +82,7 @@ class LogAnalysisAgent:
         normalized_frequencies = Counter(
             self._normalize_message(str(log.get("message", ""))) for log in logs
         )
+        known_pattern_registry = self._known_pattern_registry()
 
         for log in logs:
             message = str(log.get("message", ""))
@@ -111,6 +97,8 @@ class LogAnalysisAgent:
                 level=level,
                 stack_trace=stack_trace,
                 frequency=normalized_frequencies[normalized_message],
+                fingerprint=fingerprint,
+                registry=known_pattern_registry,
             )
 
             if match:
@@ -124,6 +112,7 @@ class LogAnalysisAgent:
                         "confidence": match["confidence"],
                         "matched_by": match["matched_by"],
                         "suppression": match["suppression"],
+                        "source": match.get("source", "config"),
                         "fingerprint": fingerprint,
                         "message_template": normalized_message,
                         "message": message,
@@ -223,6 +212,8 @@ class LogAnalysisAgent:
         level: str,
         stack_trace: str,
         frequency: int,
+        fingerprint: str,
+        registry: list[dict[str, Any]],
     ) -> dict[str, Any] | None:
         del message
         best_match: dict[str, Any] | None = None
@@ -230,11 +221,15 @@ class LogAnalysisAgent:
         best_reasons: list[str] = []
         stack_lower = stack_trace.lower()
 
-        for entry in cls._known_pattern_registry:
+        for entry in registry:
             score = 0.0
             reasons: list[str] = []
             patterns = entry.get("patterns", [entry["pattern"]])
             normalized_patterns = [cls._normalize_message(str(pattern)) for pattern in patterns]
+
+            if entry.get("fingerprint") and entry.get("fingerprint") == fingerprint:
+                score += 0.95
+                reasons.append("db_fingerprint")
 
             if any(pattern in normalized_message for pattern in normalized_patterns):
                 score += 0.45
@@ -292,6 +287,7 @@ class LogAnalysisAgent:
             "match_result": match_result,
             "confidence": confidence,
             "matched_by": best_reasons,
+            "source": best_match.get("source", "config"),
         }
 
     @staticmethod

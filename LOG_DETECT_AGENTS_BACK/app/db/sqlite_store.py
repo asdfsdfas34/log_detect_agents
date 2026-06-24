@@ -363,3 +363,23 @@ def fetch_latest_recommendation_results(
             }
         )
     return results
+
+
+def delete_recommendation_result(*, recommendation_id: int) -> bool:
+    """Delete one persisted recommendation output from SQLite."""
+
+    db_path = _resolve_db_path()
+    if not db_path:
+        return False
+
+    try:
+        with sqlite3.connect(db_path) as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "DELETE FROM recommendation_results WHERE id = ?",
+                (recommendation_id,),
+            )
+            conn.commit()
+            return cur.rowcount > 0
+    except Exception:
+        return False

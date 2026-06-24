@@ -11,10 +11,13 @@ from app.db.scenario_store import (
     approve_result,
     fetch_exception_registry,
     fetch_knowledge_cards,
+    normalize_log_text,
     register_exception,
     run_detection_pipeline,
 )
+from app.db.chroma_store import find_similar_pattern_clusters, save_pattern_cluster
 from app.db.sqlite_store import (
+    delete_recommendation_result,
     fetch_latest_recommendation_results,
     fetch_service_names,
     save_recommendation_result,
@@ -73,6 +76,21 @@ class ApprovalRequest(BaseModel):
     confidence: str = "HIGH"
 
 
+class RecommendationSaveRequest(BaseModel):
+    """Request body for explicit recommendation history persistence."""
+
+    request_id: str = ""
+    service_name: str
+    goal: str = ""
+    executive_summary: str = ""
+    recommendation: str
+    recommended_actions: list[dict] = Field(default_factory=list)
+    verification_steps: list[str] = Field(default_factory=list)
+    evidence_bundle: dict = Field(default_factory=dict)
+    risk_score: int | None = None
+    confidence: str | None = None
+
+
 class FingerprintRecommendationRequest(BaseModel):
     """Request body for rerunning downstream recommendation agents for one fingerprint."""
 
@@ -94,6 +112,78 @@ class KnowledgeCardListResponse(BaseModel):
 
 class ExceptionRegistryResponse(BaseModel):
     exceptions: list[dict]
+
+
+def _pattern_cluster_context(
+    *,
+    service_name: str,
+    fingerprint: str,
+    message: str,
+    log_level: str,
+    stacktrace: str = "",
+) -> str:
+    normalized_message = normalize_log_text(message)
+    return "\n".join(
+        [
+            f"service={service_name}",
+            f"fingerprint={fingerprint}",
+            f"log_level={log_level}",
+            f"normalized_message={normalized_message}",
+            f"context={stacktrace or message}",
+        ]
+    )
+
+
+def _enrich_pattern_clusters(
+    *, service_name: str, fingerprints: list[dict], n_results: int = 5
+) -> list[dict]:
+    enriched: list[dict] = []
+    for item in fingerprints:
+        fingerprint = str(item.get("fingerprint", ""))
+        message = str(item.get("message", ""))
+        log_level = str(item.get("log_level", ""))
+        stacktrace = str(item.get("stacktrace", ""))
+        context = _pattern_cluster_context(
+            service_name=service_name,
+            fingerprint=fingerprint,
+            message=message,
+            log_level=log_level,
+            stacktrace=stacktrace,
+        )
+        similar_clusters = [
+            match
+            for match in find_similar_pattern_clusters(
+                query=context, n_results=n_results + 1
+            )
+            if match.get("id") != f"{service_name}:{fingerprint}"
+        ][:n_results]
+        semantic_similarity = (
+            round(float(similar_clusters[0]["similarity"]) * 100)
+            if similar_clusters and similar_clusters[0].get("similarity") is not None
+            else 0
+        )
+        save_pattern_cluster(
+            doc_id=f"{service_name}:{fingerprint}",
+            text=context,
+            metadata={
+                "service_name": service_name,
+                "fingerprint": fingerprint,
+                "log_level": log_level,
+                "normalized_message": normalize_log_text(message),
+                "occurrence_count": int(item.get("occurrence_count") or 0),
+            },
+        )
+        enriched.append(
+            {
+                "cluster": fingerprint,
+                "count": item["occurrence_count"],
+                "message": message,
+                "log_level": log_level,
+                "semantic_similarity": semantic_similarity,
+                "similar_clusters": similar_clusters,
+            }
+        )
+    return enriched
 
 
 def build_generated_answer(
@@ -183,15 +273,9 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
     # Run the deterministic scenario pipeline so the demo works without an LLM.
     scenario = run_detection_pipeline(req.service_name)
     if scenario["fingerprints"]:
-        result["evidence"]["clusters"] = [
-            {
-                "cluster": item["fingerprint"],
-                "count": item["occurrence_count"],
-                "message": item["message"],
-                "log_level": item["log_level"],
-            }
-            for item in scenario["fingerprints"]
-        ]
+        result["evidence"]["clusters"] = _enrich_pattern_clusters(
+            service_name=req.service_name, fingerprints=scenario["fingerprints"]
+        )
         result["evidence"]["anomalies"] = scenario["anomalies"]
         result["evidence"]["stack_traces"] = [
             item["stacktrace"]
@@ -216,24 +300,39 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
         else:
             result["final"]["evidence_bundle"] = {"scenario_detection": scenario}
 
-    result["final"]["saved_recommendation_id"] = save_recommendation_result(
-        request_id=result["request_id"],
+    result["final"]["saved_recommendation_id"] = None
+    return AnalyzeResponse(result=result)
+
+
+@app.post("/recommendations/save")
+def save_recommendation(req: RecommendationSaveRequest) -> dict[str, int | str]:
+    """Persist a generated recommendation only after explicit user action."""
+    saved_id = save_recommendation_result(
+        request_id=req.request_id,
         service_name=req.service_name,
         goal=req.goal,
-        executive_summary=result["final"]["executive_summary"] or "",
-        recommendation=result["final"]["generated_answer"] or "",
-        recommended_actions=result["final"]["recommended_actions"],
-        verification_steps=result["final"]["verification_steps"],
-        evidence_bundle=result["final"]["evidence_bundle"] or {},
-        risk_score=result["assessment"]["risk_score"],
-        confidence=result["assessment"]["confidence"],
+        executive_summary=req.executive_summary,
+        recommendation=req.recommendation,
+        recommended_actions=req.recommended_actions,
+        verification_steps=req.verification_steps,
+        evidence_bundle=req.evidence_bundle,
+        risk_score=req.risk_score,
+        confidence=req.confidence,
     )
-    return AnalyzeResponse(result=result)
+    return {"status": "saved", "id": saved_id}
+
+
+@app.delete("/recommendations/{recommendation_id}")
+def delete_recommendation(recommendation_id: int) -> dict[str, int | str]:
+    """Delete one saved recommendation history item."""
+    if delete_recommendation_result(recommendation_id=recommendation_id):
+        return {"status": "deleted", "id": recommendation_id}
+    return {"status": "not_found", "id": recommendation_id}
 
 
 @app.post("/recommendations/fingerprint", response_model=AnalyzeResponse)
 def recommend_for_fingerprint(req: FingerprintRecommendationRequest) -> AnalyzeResponse:
-    """Run the Incident Recommendation through RecommendationAgent slice for a selected cluster."""
+    """Build a recommendation preview for one selected fingerprint without persisting it."""
     scenario = run_detection_pipeline(req.service_name)
     selected = next(
         (
@@ -271,7 +370,6 @@ def recommend_for_fingerprint(req: FingerprintRecommendationRequest) -> AnalyzeR
     )
     # Mark only the downstream agents requested by cluster selection as executed.
     state["decisions"]["agents_run"] = [
-        "IncidentCorrelationAgent",
         "ImpactEvaluationAgent",
         "KnowledgeBaseRAGAgent",
         "RecommendationAgent",
@@ -284,14 +382,9 @@ def recommend_for_fingerprint(req: FingerprintRecommendationRequest) -> AnalyzeR
         "SourceCodeAnalysisAgent",
     ]
     if selected:
-        state["evidence"]["clusters"] = [
-            {
-                "cluster": selected["fingerprint"],
-                "count": selected["occurrence_count"],
-                "message": selected["message"],
-                "log_level": selected["log_level"],
-            }
-        ]
+        state["evidence"]["clusters"] = _enrich_pattern_clusters(
+            service_name=req.service_name, fingerprints=[selected]
+        )
         state["evidence"]["stack_traces"] = [selected["stacktrace"]]
     state["assessment"]["risk_score"] = selected_impact["risk_score"]
     state["assessment"]["confidence"] = (
@@ -328,18 +421,7 @@ def recommend_for_fingerprint(req: FingerprintRecommendationRequest) -> AnalyzeR
         "recommendation": selected_recommendation,
         "impact": selected_impact,
     }
-    state["final"]["saved_recommendation_id"] = save_recommendation_result(
-        request_id=state["request_id"],
-        service_name=req.service_name,
-        goal=state["goal"],
-        executive_summary=selected_recommendation["cause"],
-        recommendation=generated_answer,
-        recommended_actions=state["final"]["recommended_actions"],
-        verification_steps=state["final"]["verification_steps"],
-        evidence_bundle=state["final"]["evidence_bundle"],
-        risk_score=state["assessment"]["risk_score"],
-        confidence=state["assessment"]["confidence"],
-    )
+    state["final"]["saved_recommendation_id"] = None
     return AnalyzeResponse(result=state)
 
 

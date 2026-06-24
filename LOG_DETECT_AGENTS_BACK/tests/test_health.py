@@ -70,3 +70,34 @@ def test_list_saved_recommendations(tmp_path: Path, monkeypatch) -> None:
     assert exceptions.json()["exceptions"][0]["reason"] == "approved ignore"
 
     monkeypatch.delenv("SQLITE_PATH", raising=False)
+
+
+def test_delete_saved_recommendation(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "logs.db"
+    monkeypatch.setenv("SQLITE_PATH", str(db_path))
+    saved_id = save_recommendation_result(
+        request_id="req-delete",
+        service_name="checkout-api",
+        goal="delete lookup",
+        executive_summary="결제 오류",
+        recommendation="삭제 대상 Recommendation",
+        recommended_actions=[],
+        verification_steps=[],
+        evidence_bundle={},
+        risk_score=50,
+        confidence="mid",
+    )
+
+    client = TestClient(app)
+    response = client.delete(f"/recommendations/{saved_id}")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "deleted", "id": saved_id}
+
+    list_response = client.get(
+        "/recommendations", params={"service_name": "checkout-api", "limit": 5}
+    )
+    assert list_response.status_code == 200
+    assert list_response.json()["recommendations"] == []
+
+    monkeypatch.delenv("SQLITE_PATH", raising=False)
