@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from app.agents.knowledge_base_rag import KnowledgeBaseRAGAgent
 from app.agents.recommendation import RecommendationAgent
 from app.config import settings
 from app.db.chroma_store import find_similar_pattern_clusters, save_pattern_cluster
@@ -292,8 +293,9 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
     )
     result = graph.invoke(initial_state)
 
-    # Run the deterministic scenario pipeline so the demo works without an LLM.
-    scenario = run_detection_pipeline(req.service_name)
+    # Run deterministic scenario analysis before the final LLM recommendation so
+    # the expensive answer generation uses the freshest fingerprint evidence.
+    scenario = run_detection_pipeline(req.service_name, days_back=1)
     if scenario["fingerprints"]:
         result["evidence"]["clusters"] = _enrich_pattern_clusters(
             service_name=req.service_name, fingerprints=scenario["fingerprints"]
@@ -311,18 +313,25 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
         result["assessment"]["rationale"] = [
             f"Risk Level: {scenario['summary']['risk_level']}",
             f"Detection Status: {scenario['summary']['detection_status']}",
+            "Recent window: 1 day",
         ]
-        # Keep RecommendationAgent's LLM+RAG output as the final recommendation.
-        # The deterministic scenario pipeline enriches evidence/assessment only; it
-        # must not overwrite final recommended_actions, verification_steps, or
-        # generated_answer.
-        final_bundle = result["final"].get("evidence_bundle")
-        if isinstance(final_bundle, dict):
-            final_bundle["scenario_detection"] = scenario
-        else:
-            result["final"]["evidence_bundle"] = {"scenario_detection": scenario}
+        result["evidence"]["known_pattern_matches"] = scenario.get(
+            "recommendations", []
+        )[:5]
+        result["evidence"]["incident_candidates"] = [
+            {
+                "fingerprint": scenario["recommendation"].get("fingerprint"),
+                "root_cause_hint": scenario["recommendation"].get("cause", ""),
+                "recommended_action_hint": scenario["recommendation"].get(
+                    "recommendation", ""
+                ),
+                "summary": scenario["summary"],
+            }
+        ]
 
-    result["final"]["saved_recommendation_id"] = None
+    result = KnowledgeBaseRAGAgent().run(result)
+    result = RecommendationAgent().run(result)
+    result = KnowledgeBaseRAGAgent().persist_final_answer(result)
     return AnalyzeResponse(result=result)
 
 
@@ -355,7 +364,7 @@ def delete_recommendation(recommendation_id: int) -> dict[str, int | str]:
 @app.post("/recommendations/fingerprint", response_model=AnalyzeResponse)
 def recommend_for_fingerprint(req: FingerprintRecommendationRequest) -> AnalyzeResponse:
     """Build a recommendation preview for one selected fingerprint without persisting it."""
-    scenario = run_detection_pipeline(req.service_name)
+    scenario = run_detection_pipeline(req.service_name, days_back=1)
     selected = next(
         (
             item

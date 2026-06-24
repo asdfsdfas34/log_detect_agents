@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import math
 import re
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -43,6 +44,7 @@ SERVICE_CRITICALITY = {
 }
 CRITICALITY_SCORE = {"HIGH": 30, "MEDIUM": 15, "LOW": 5}
 LEVEL_SCORE = {"ERROR": 50, "WARN": 20, "INFO": 5}
+_PIPELINE_CACHE: dict[tuple[str | None, int | None, int, str], dict[str, Any]] = {}
 
 
 def normalize_log_text(value: str) -> str:
@@ -281,15 +283,56 @@ def recommendation_for(
     return {"cause": cause, "recommendation": action, "confidence": "MEDIUM"}
 
 
-def run_detection_pipeline(service_name: str | None = None) -> dict[str, Any]:
+def _pipeline_signature(
+    conn: sqlite3.Connection, service_name: str | None, cutoff: str | None
+) -> tuple[int, str]:
+    where_parts = []
+    params: list[Any] = []
+    if service_name:
+        where_parts.append("service_name=?")
+        params.append(service_name)
+    if cutoff:
+        where_parts.append("created_at>=?")
+        params.append(cutoff)
+    where_sql = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
+    row = conn.execute(
+        f"SELECT COUNT(*), COALESCE(MAX(created_at), '') FROM service_logs {where_sql}",
+        params,
+    ).fetchone()
+    return int(row[0] or 0), str(row[1] or "")
+
+
+def run_detection_pipeline(
+    service_name: str | None = None, *, days_back: int | None = None
+) -> dict[str, Any]:
     """Run SC-001~SC-005 over stored logs and return dashboard-ready summary data."""
     db_path = _resolve_db_path()
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(db_path) as conn:
         ensure_schema(conn)
         cur = conn.cursor()
-        where = "WHERE service_name=?" if service_name else ""
-        params = (service_name,) if service_name else ()
+        cutoff = (
+            (datetime.utcnow() - timedelta(days=days_back)).isoformat(timespec="seconds")
+            if days_back is not None
+            else None
+        )
+        signature_count, signature_max_created = _pipeline_signature(
+            conn, service_name, cutoff
+        )
+        cache_key = (service_name, days_back, signature_count, signature_max_created)
+        cached = _PIPELINE_CACHE.get(cache_key)
+        if cached is not None:
+            return copy.deepcopy(cached)
+
+        where_parts = []
+        params: list[Any] = []
+        if service_name:
+            where_parts.append("service_name=?")
+            params.append(service_name)
+        if cutoff:
+            where_parts.append("created_at>=?")
+            params.append(cutoff)
+        where = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
         rows = cur.execute(
             f"SELECT service_name, level, message, COALESCE(stack_trace,''), created_at FROM service_logs {where}",
             params,
@@ -458,7 +501,7 @@ def run_detection_pipeline(service_name: str | None = None) -> dict[str, Any]:
         if visible_recs
         else {"cause": "-", "recommendation": "-", "confidence": "LOW"}
     )
-    return {
+    result = {
         "fingerprints": visible_groups,
         "anomalies": anomalies,
         "impacts": visible_impacts,
@@ -476,6 +519,8 @@ def run_detection_pipeline(service_name: str | None = None) -> dict[str, Any]:
             "detection_status": "Detected" if top_impact["detected"] else "Normal",
         },
     }
+    _PIPELINE_CACHE[cache_key] = copy.deepcopy(result)
+    return result
 
 
 

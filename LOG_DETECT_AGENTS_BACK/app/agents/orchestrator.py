@@ -12,8 +12,6 @@ class OrchestratorAgent:
         "LogAnalysisAgent",
         "AnomalyDetectionAgent",
         "ImpactEvaluationAgent",
-        "KnowledgeBaseRAGAgent",
-        "RecommendationAgent",
     ]
 
     def run(self, state: SharedState) -> SharedState:

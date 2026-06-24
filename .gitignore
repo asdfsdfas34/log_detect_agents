@@ -5,3 +5,12 @@ dist
 .env.*
 __pycache__/
 *.pyc
+*.bin
+*.db
+*.db
+*.db
+/LOG_DETECT_AGENTS_BACK/data
+*.xlsx
+*.sqlite3
+*.db
+*.db

@@ -7,9 +7,7 @@ from app.graph.nodes import (
     anomaly_detection_node,
     collect_logs_node,
     evaluate_impact_node,
-    knowledge_base_rag_node,
     orchestrator_node,
-    recommend_node,
 )
 from app.graph.routing import route_from_orchestrator
 from app.state import SharedState
@@ -24,8 +22,6 @@ def build_graph():
     graph.add_node("log_analysis", analyze_logs_node)
     graph.add_node("anomaly_detection", anomaly_detection_node)
     graph.add_node("impact_evaluation", evaluate_impact_node)
-    graph.add_node("knowledge_base_rag", knowledge_base_rag_node)
-    graph.add_node("recommendation", recommend_node)
 
     graph.add_edge(START, "orchestrator")
     graph.add_conditional_edges(
@@ -36,8 +32,6 @@ def build_graph():
             "LogAnalysisAgent": "log_analysis",
             "AnomalyDetectionAgent": "anomaly_detection",
             "ImpactEvaluationAgent": "impact_evaluation",
-            "KnowledgeBaseRAGAgent": "knowledge_base_rag",
-            "RecommendationAgent": "recommendation",
             "END": END,
         },
     )
@@ -47,8 +41,6 @@ def build_graph():
         "log_analysis",
         "anomaly_detection",
         "impact_evaluation",
-        "knowledge_base_rag",
-        "recommendation",
     ]:
         graph.add_edge(worker, "orchestrator")
 

@@ -8,8 +8,6 @@ from app.agents.knowledge_base_rag import KnowledgeBaseRAGAgent
 from app.agents.log_analysis import LogAnalysisAgent
 from app.agents.log_collector import LogCollectorAgent
 from app.agents.orchestrator import OrchestratorAgent
-from app.agents.recommendation import RecommendationAgent
-from app.agents.source_code_analysis import SourceCodeAnalysisAgent
 from app.langsmith_tracing import elapsed_ms, record_agent_event, start_timer
 from app.state import SharedState
 
@@ -22,7 +20,6 @@ log_analysis_agent = LogAnalysisAgent()
 anomaly_detection_agent = AnomalyDetectionAgent()
 impact_evaluation_agent = ImpactEvaluationAgent()
 knowledge_base_rag_agent = KnowledgeBaseRAGAgent()
-recommendation_agent = RecommendationAgent()
 
 
 def _run_with_retry(state: SharedState, node_name: str, fn: NodeCallable) -> SharedState:
@@ -89,8 +86,3 @@ def evaluate_impact_node(state: SharedState) -> SharedState:
 
 def knowledge_base_rag_node(state: SharedState) -> SharedState:
     return _run_with_retry(state, "KnowledgeBaseRAGAgent", knowledge_base_rag_agent.run)
-
-
-def recommend_node(state: SharedState) -> SharedState:
-    state = _run_with_retry(state, "RecommendationAgent", recommendation_agent.run)
-    return knowledge_base_rag_agent.persist_final_answer(state)
