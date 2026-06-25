@@ -9,6 +9,8 @@ import type {
   ExceptionRegistryResponse,
   FingerprintRecommendationRequest,
   HealthResponse,
+  KnownPatternSaveRequest,
+  KnownPatternSaveResponse,
   KnowledgeCardListResponse,
   LangSmithRunsResponse,
   RecommendationDeleteResponse,
@@ -63,6 +65,9 @@ export const agentApi = {
   },
   registerException(payload: ExceptionRegisterRequest) {
     return apiClient.post<ExceptionRegisterResponse>('/exceptions', payload)
+  },
+  saveKnownPattern(payload: KnownPatternSaveRequest) {
+    return apiClient.post<KnownPatternSaveResponse>('/known-patterns', payload)
   },
   knowledgeCards(params?: { fingerprint?: string; limit?: number }) {
     return apiClient.get<KnowledgeCardListResponse>('/knowledge-cards', {

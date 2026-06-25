@@ -64,6 +64,21 @@ export interface ExceptionRegisterResponse {
   fingerprint: string
 }
 
+export interface KnownPatternSaveRequest {
+  fingerprint: string
+  category?: string
+  sub_category?: string
+  cause: string
+  recommendation: string
+  confidence?: string
+}
+
+export interface KnownPatternSaveResponse {
+  status: string
+  id: number
+  fingerprint: string
+}
+
 export interface RecommendationDeleteResponse {
   status: string
   id: number
@@ -152,8 +167,25 @@ export interface Cluster {
   count: number
   message?: string
   log_level?: string
+  stacktrace?: string
+  pattern_status?: string
+  match_source?: string
+  similar_fingerprint?: string
+  similarity_score?: number | null
   semantic_similarity?: number
   similar_clusters?: Array<Record<string, unknown>>
+}
+
+export interface ScenarioSummary {
+  total_logs: number
+  total_fingerprints: number
+  known_patterns: number
+  new_patterns: number
+  anomalies_detected: number
+  exception_registered_count: number
+  risk_score: number
+  risk_level: string
+  detection_status: string
 }
 
 export interface FailureRecord {
@@ -184,6 +216,8 @@ export interface SharedState {
     stack_traces: string[]
     incident_candidates?: Array<Record<string, unknown>>
     new_pattern_candidates?: Array<Record<string, unknown>>
+    summary?: ScenarioSummary
+    recommendation?: Record<string, unknown>
   }
   metrics: {
     error_rate: number | null
@@ -215,17 +249,7 @@ export interface SharedState {
     generated_answer: string | null
     saved_recommendation_id?: number | null
     evidence_bundle?: {
-      summary?: {
-        total_logs: number
-        total_fingerprints: number
-        known_patterns: number
-        new_patterns: number
-        anomalies_detected: number
-        exception_registered_count: number
-        risk_score: number
-        risk_level: string
-        detection_status: string
-      }
+      summary?: ScenarioSummary
       recommendation?: {
         cause: string
         recommendation: string

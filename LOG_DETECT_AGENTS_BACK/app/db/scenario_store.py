@@ -11,23 +11,47 @@ import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
-from app.db.chroma_store import save_analysis_document
+from app.db.chroma_store import (
+    find_similar_analysis_documents,
+    find_similar_pattern_clusters,
+    save_analysis_document,
+    save_pattern_cluster,
+)
 from app.db.sqlite_store import _resolve_db_path
 
 NUMERIC_RE = re.compile(r"\b\d+\b")
+EXCEL_NEWLINE_RE = re.compile(r"_x000D_", re.IGNORECASE)
+EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
+URL_RE = re.compile(r"https?://[^\s]+", re.IGNORECASE)
+DATE_TIME_RE = re.compile(
+    r"\b\d{4}[-/.]\d{1,2}[-/.]\d{1,2}(?:[ T]\d{1,2}:\d{2}:\d{2}(?:\.\d+)?)?\b"
+)
+KOREAN_TIME_RE = re.compile(r"\b(?:오전|오후)\s+\d{1,2}:\d{2}:\d{2}\b")
+HEX_ERROR_RE = re.compile(r"\b0x[0-9a-fA-F]+\b")
 UUID_RE = re.compile(
     r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
     r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"
 )
+HASH_LIKE_RE = re.compile(r"\b(?=[A-Fa-f0-9]*\d)[A-Fa-f0-9]{16,}\b")
+COMPILER_GENERATED_MEMBER_RE = re.compile(r"\b([<>A-Za-z_][\w<>]+)__\d+\b")
+CS_LINE_RE = re.compile(r"(:줄\s*)\d+")
+ANONYMOUS_LINE_RE = re.compile(r"(<anonymous>:)\d+:\d+")
+WINDOWS_PATH_RE = re.compile(r"\b[A-Za-z]:\\[^\s\r\n]+")
 JSON_STRING_VALUE_RE = re.compile(r'(:\s*)"([^"\\]*(?:\\.[^"\\]*)*)"')
 JSON_LITERAL_VALUE_RE = re.compile(
     r"(:\s*)(-?\d+(?:\.\d+)?|true|false|null)(?=\s*[,}])",
     re.IGNORECASE,
 )
+QUOTED_VOLATILE_RE = re.compile(r'"(?=[^"]*\d)[A-Za-z0-9_.:/\\-]{2,}"')
 ASSIGNED_VALUE_RE = re.compile(
     r"(\b[A-Za-z_][\w.-]*\s*[:=]\s*)(\"[^\"]*\"|'[^']*'|[^\s,;}\]]+)"
 )
+SEMANTIC_VALUE_RE = re.compile(
+    r"\b(JobName|functionName)\s*:\s*([^\r\n]+)", re.IGNORECASE
+)
+URL_FIELD_RE = re.compile(r"\b(AbsoluteUri)\s*:\s*([^\s\r\n]+)", re.IGNORECASE)
 IDENTIFIER_KEY_VALUE_RE = re.compile(
     r"(\b[A-Za-z_][\w.-]*(?:ID|Id|Status|Code|No|Number|Seq|Date|Time|Token|Key|"
     r"GUID|UUID)\b\s+)(?![:=])([^\s,;}\]]+)",
@@ -36,6 +60,18 @@ KOREAN_HONORIFIC_NUMBER_RE = re.compile(r"(?<=\S)\d+(?=님)")
 LEADING_LIST_MARKER_RE = re.compile(r"^\s*\d+\s*[.)]\s*")
 LEADING_COMPONENT_DOT_RE = re.compile(r"^\s*\.(?=[A-Za-z_])")
 WHITESPACE_RE = re.compile(r"\s+")
+PROTECTED_TOKENS = [
+    "__PROTECTED_ALPHA__",
+    "__PROTECTED_BRAVO__",
+    "__PROTECTED_CHARLIE__",
+    "__PROTECTED_DELTA__",
+    "__PROTECTED_ECHO__",
+    "__PROTECTED_FOXTROT__",
+    "__PROTECTED_GOLF__",
+    "__PROTECTED_HOTEL__",
+    "__PROTECTED_INDIA__",
+    "__PROTECTED_JULIET__",
+]
 
 SERVICE_CRITICALITY = {
     "login-service": "HIGH",
@@ -45,16 +81,87 @@ SERVICE_CRITICALITY = {
 CRITICALITY_SCORE = {"HIGH": 30, "MEDIUM": 15, "LOW": 5}
 LEVEL_SCORE = {"ERROR": 50, "WARN": 20, "INFO": 5}
 _PIPELINE_CACHE: dict[tuple[str | None, int | None, int, str], dict[str, Any]] = {}
+KNOWN_SIMILARITY_THRESHOLD = 0.88
+
+
+def _protect_semantic_values(text: str) -> tuple[str, dict[str, str]]:
+    protected: dict[str, str] = {}
+
+    def replace(match: re.Match[str]) -> str:
+        if len(protected) >= len(PROTECTED_TOKENS):
+            return match.group(0)
+        token = PROTECTED_TOKENS[len(protected)]
+        protected[token] = f"{match.group(1)}: {match.group(2).strip()}"
+        return token
+
+    return SEMANTIC_VALUE_RE.sub(replace, text), protected
+
+
+def _protect_url_fields(text: str, protected: dict[str, str]) -> str:
+    def replace(match: re.Match[str]) -> str:
+        if len(protected) >= len(PROTECTED_TOKENS):
+            return match.group(0)
+        token = PROTECTED_TOKENS[len(protected)]
+        protected[token] = f"{match.group(1)}: {match.group(2).strip()}"
+        return token
+
+    return URL_FIELD_RE.sub(replace, text)
+
+
+def _restore_semantic_values(text: str, protected: dict[str, str]) -> str:
+    for token, value in protected.items():
+        text = text.replace(token, value)
+    return text
+
+
+def _normalize_url(match: re.Match[str]) -> str:
+    raw = match.group(0).rstrip(".,)")
+    suffix = match.group(0)[len(raw):]
+    try:
+        parsed = urlsplit(raw)
+    except ValueError:
+        return "URL" + suffix
+    path_parts = [
+        "*"
+        if UUID_RE.fullmatch(part)
+        or part.isdigit()
+        or HASH_LIKE_RE.fullmatch(part)
+        else part
+        for part in parsed.path.split("/")
+    ]
+    query = "&".join(f"{key}=*" for key, _ in parse_qsl(parsed.query, keep_blank_values=True))
+    normalized = urlunsplit(("URL", parsed.netloc, "/".join(path_parts), query, ""))
+    return normalized + suffix
+
+
+def _normalize_windows_path(match: re.Match[str]) -> str:
+    path = match.group(0)
+    filename = path.rsplit("\\", 1)[-1]
+    return f"PATH\\{filename}"
 
 
 def normalize_log_text(value: str) -> str:
     """Replace volatile values so equal log templates share one fingerprint."""
     text = value or ""
+    text = EXCEL_NEWLINE_RE.sub(" ", text)
+    text, protected = _protect_semantic_values(text)
+    text = URL_RE.sub(_normalize_url, text)
+    text = _protect_url_fields(text, protected)
+    text = WINDOWS_PATH_RE.sub(_normalize_windows_path, text)
+    text = DATE_TIME_RE.sub("*", text)
+    text = KOREAN_TIME_RE.sub("*", text)
+    text = EMAIL_RE.sub("*", text)
+    text = HEX_ERROR_RE.sub("*", text)
+    text = HASH_LIKE_RE.sub("*", text)
+    text = COMPILER_GENERATED_MEMBER_RE.sub(r"\1__*", text)
+    text = CS_LINE_RE.sub(r"\1*", text)
+    text = ANONYMOUS_LINE_RE.sub(r"\1*:*", text)
     text = LEADING_LIST_MARKER_RE.sub("", text)
     text = LEADING_COMPONENT_DOT_RE.sub("", text)
     text = UUID_RE.sub("*", text)
     text = JSON_STRING_VALUE_RE.sub(r'\1"*"', text)
     text = JSON_LITERAL_VALUE_RE.sub(r"\1*", text)
+    text = QUOTED_VOLATILE_RE.sub('"*"', text)
     text = ASSIGNED_VALUE_RE.sub(r"\1*", text)
     text = re.sub(
         r"(\b[A-Za-z_][\w.-]*(?:ID|Id|Status|Code|No|Number|Seq|Date|Time|Token|Key|"
@@ -68,11 +175,14 @@ def normalize_log_text(value: str) -> str:
     text = re.sub(r"\*\s*,\s*", "* ", text)
     text = re.sub(r"\s*:\s*", ": ", text)
     text = re.sub(r"\s*=\s*", " = ", text)
+    text = _restore_semantic_values(text, protected)
     return WHITESPACE_RE.sub(" ", text).strip()
 
 
 def normalize_stacktrace(value: str) -> str:
     """Normalize stack traces with the same volatile-token rules used for messages."""
+    if str(value).strip().lower() == "nan":
+        return ""
     return normalize_log_text(value)
 
 
@@ -129,6 +239,10 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             sub_category TEXT NOT NULL,
             is_known_pattern INTEGER NOT NULL,
             is_new_pattern INTEGER NOT NULL,
+            pattern_status TEXT NOT NULL DEFAULT 'new_pattern',
+            match_source TEXT DEFAULT '',
+            similar_fingerprint TEXT DEFAULT '',
+            similarity_score REAL,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
         CREATE TABLE IF NOT EXISTS anomaly_results (
@@ -178,6 +292,18 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         );
         """)
 
+    for column, definition in {
+        "pattern_status": "TEXT NOT NULL DEFAULT 'new_pattern'",
+        "match_source": "TEXT DEFAULT ''",
+        "similar_fingerprint": "TEXT DEFAULT ''",
+        "similarity_score": "REAL",
+    }.items():
+        analysis_columns = [
+            row[1]
+            for row in cur.execute("PRAGMA table_info(log_analysis_results)").fetchall()
+        ]
+        if column not in analysis_columns:
+            cur.execute(f"ALTER TABLE log_analysis_results ADD COLUMN {column} {definition}")
     for column, definition in {
         "resolution_method": "TEXT DEFAULT ''",
         "title": "TEXT DEFAULT ''",
@@ -244,6 +370,118 @@ def risk_level(score: int) -> str:
     if score >= 40:
         return "Medium"
     return "Low"
+
+
+def _pattern_cluster_context(item: dict[str, Any]) -> str:
+    return "\n".join(
+        [
+            f"service={item.get('service_name', '')}",
+            f"fingerprint={item.get('fingerprint', '')}",
+            f"log_level={item.get('log_level', '')}",
+            f"normalized_message={item.get('normalized_message', '')}",
+            f"context={item.get('stacktrace') or item.get('message') or ''}",
+        ]
+    )
+
+
+def _top_similarity(matches: list[dict[str, Any]]) -> dict[str, Any] | None:
+    scored = [m for m in matches if m.get("similarity") is not None]
+    if not scored:
+        return None
+    return max(scored, key=lambda item: float(item.get("similarity") or 0))
+
+
+def _exact_known_match(conn: sqlite3.Connection, fp: str) -> tuple[bool, str]:
+    if conn.execute(
+        "SELECT 1 FROM knowledge_cards WHERE fingerprint=? LIMIT 1", (fp,)
+    ).fetchone():
+        return True, "knowledge_cards"
+    if conn.execute(
+        "SELECT 1 FROM known_patterns WHERE fingerprint=? LIMIT 1", (fp,)
+    ).fetchone():
+        return True, "known_patterns"
+    return False, ""
+
+
+def _pattern_status(
+    *,
+    conn: sqlite3.Connection,
+    item: dict[str, Any],
+    existing_fingerprints: set[str],
+) -> dict[str, Any]:
+    fp = str(item["fingerprint"])
+    known_exact, match_source = _exact_known_match(conn, fp)
+    if known_exact:
+        return {
+            "pattern_status": "known_exact",
+            "match_source": match_source,
+            "similar_fingerprint": "",
+            "similarity_score": None,
+        }
+
+    context = _pattern_cluster_context(item)
+    approved_match = _top_similarity(
+        [
+            match
+            for match in find_similar_analysis_documents(query=context)
+            if (match.get("metadata") or {}).get("source")
+            in {"approved_recommendation", "known_pattern"}
+            or str(match.get("id") or "").startswith("knowledge-card:")
+            or str(match.get("id") or "").startswith("known-pattern:")
+        ]
+    )
+    observed_match = _top_similarity(
+        [
+            match
+            for match in find_similar_pattern_clusters(query=context)
+            if match.get("id") != f"{item.get('service_name')}:{fp}"
+        ]
+    )
+    best_match = _top_similarity([m for m in [approved_match, observed_match] if m])
+    if best_match and float(best_match.get("similarity") or 0) >= KNOWN_SIMILARITY_THRESHOLD:
+        metadata = best_match.get("metadata") or {}
+        similar_fp = str(metadata.get("fingerprint") or best_match.get("id") or "")
+        source = (
+            "incident_analyses"
+            if best_match is approved_match
+            else "pattern_clusters"
+        )
+        return {
+            "pattern_status": "known_similar",
+            "match_source": source,
+            "similar_fingerprint": similar_fp,
+            "similarity_score": float(best_match.get("similarity") or 0),
+        }
+
+    if fp in existing_fingerprints:
+        return {
+            "pattern_status": "observed_existing",
+            "match_source": "fingerprints",
+            "similar_fingerprint": "",
+            "similarity_score": None,
+        }
+
+    return {
+        "pattern_status": "new_pattern",
+        "match_source": "",
+        "similar_fingerprint": "",
+        "similarity_score": None,
+    }
+
+
+def _upsert_pattern_cluster(item: dict[str, Any]) -> None:
+    save_pattern_cluster(
+        doc_id=f"{item.get('service_name')}:{item.get('fingerprint')}",
+        text=_pattern_cluster_context(item),
+        metadata={
+            "service_name": str(item.get("service_name") or ""),
+            "fingerprint": str(item.get("fingerprint") or ""),
+            "log_level": str(item.get("log_level") or ""),
+            "normalized_message": str(item.get("normalized_message") or ""),
+            "occurrence_count": int(item.get("occurrence_count") or 0),
+            "pattern_status": str(item.get("pattern_status") or ""),
+        },
+    )
 
 
 def recommendation_for(
@@ -337,6 +575,10 @@ def run_detection_pipeline(
             f"SELECT service_name, level, message, COALESCE(stack_trace,''), created_at FROM service_logs {where}",
             params,
         ).fetchall()
+        existing_fingerprints = {
+            str(row[0])
+            for row in cur.execute("SELECT fingerprint FROM fingerprints").fetchall()
+        }
         groups: dict[str, dict[str, Any]] = {}
         for svc, level, msg, stack, created in rows:
             normalized_message = normalize_log_text(msg)
@@ -359,6 +601,15 @@ def run_detection_pipeline(
             item["first_seen"] = min(item["first_seen"], created)
             item["last_seen"] = max(item["last_seen"], created)
         for g in groups.values():
+            g.update(
+                _pattern_status(
+                    conn=conn,
+                    item=g,
+                    existing_fingerprints=existing_fingerprints,
+                )
+            )
+        for g in groups.values():
+            _upsert_pattern_cluster(g)
             cur.execute(
                 "REPLACE INTO fingerprints VALUES (:fingerprint,:occurrence_count,:log_level,:message,:stacktrace,:service_name,:first_seen,:last_seen)",
                 g,
@@ -398,16 +649,26 @@ def run_detection_pipeline(
                 g["log_level"],
             ) in ignored_signatures
             cat, sub = classify(g["message"], g["stacktrace"])
-            known = (
-                cur.execute(
-                    "SELECT 1 FROM known_patterns WHERE fingerprint=? OR sub_category=? LIMIT 1",
-                    (fp, sub),
-                ).fetchone()
-                is not None
-            )
+            known = g["pattern_status"] in {"known_exact", "known_similar"}
             cur.execute(
-                "REPLACE INTO log_analysis_results(fingerprint,category,sub_category,is_known_pattern,is_new_pattern) VALUES (?,?,?,?,?)",
-                (fp, cat, sub, int(known), int(not known)),
+                """
+                REPLACE INTO log_analysis_results(
+                    fingerprint, category, sub_category, is_known_pattern,
+                    is_new_pattern, pattern_status, match_source,
+                    similar_fingerprint, similarity_score
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    fp,
+                    cat,
+                    sub,
+                    int(known),
+                    int(g["pattern_status"] == "new_pattern"),
+                    g["pattern_status"],
+                    g["match_source"],
+                    g["similar_fingerprint"],
+                    g["similarity_score"],
+                ),
             )
             baseline = max(
                 1,
@@ -416,7 +677,7 @@ def run_detection_pipeline(
                 ),
             )
             spike_ratio = round((g["occurrence_count"] / baseline) * 100, 1)
-            anomaly = (not known) or spike_ratio >= 200
+            anomaly = g["pattern_status"] == "new_pattern" or spike_ratio >= 200
             if is_ignored:
                 anomaly = False
             severity = "HIGH" if spike_ratio >= 200 or not known else "LOW"
@@ -464,16 +725,19 @@ def run_detection_pipeline(
                 }
             )
             r = recommendation_for(conn, fp, sub)
-            r.update({"fingerprint": fp, "sub_category": sub})
+            r.update(
+                {
+                    "fingerprint": fp,
+                    "sub_category": sub,
+                    "pattern_status": g["pattern_status"],
+                    "match_source": g["match_source"],
+                    "similar_fingerprint": g["similar_fingerprint"],
+                    "similarity_score": g["similarity_score"],
+                }
+            )
             recs.append(r)
         conn.commit()
         total_logs = len(rows)
-        known_count = cur.execute(
-            "SELECT COUNT(*) FROM log_analysis_results WHERE is_known_pattern=1"
-        ).fetchone()[0]
-        new_count = cur.execute(
-            "SELECT COUNT(*) FROM log_analysis_results WHERE is_new_pattern=1"
-        ).fetchone()[0]
         exception_count = cur.execute(
             "SELECT COUNT(*) FROM exception_registry"
         ).fetchone()[0]
@@ -491,6 +755,14 @@ def run_detection_pipeline(
         impact for impact in impacts if impact["fingerprint"] not in ignored_fingerprints
     ]
     visible_recs = [rec for rec in recs if rec["fingerprint"] not in ignored_fingerprints]
+    known_count = sum(
+        1
+        for group in visible_groups
+        if group["pattern_status"] in {"known_exact", "known_similar"}
+    )
+    new_count = sum(
+        1 for group in visible_groups if group["pattern_status"] == "new_pattern"
+    )
     top_impact = max(
         visible_impacts,
         key=lambda x: x["risk_score"],
@@ -815,6 +1087,80 @@ def fetch_known_patterns_for_agents(limit: int = 500) -> list[dict[str, str]]:
         }
         for row in rows
     ]
+
+
+def save_known_pattern(
+    *,
+    fingerprint: str,
+    category: str,
+    sub_category: str,
+    cause: str,
+    recommendation: str,
+    confidence: str = "HIGH",
+) -> int:
+    """Persist a human-selected known pattern."""
+
+    with sqlite3.connect(_resolve_db_path()) as conn:
+        ensure_schema(conn)
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO known_patterns(
+                fingerprint, category, sub_category, cause, recommendation, confidence
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                fingerprint,
+                category,
+                sub_category,
+                cause,
+                recommendation,
+                confidence,
+            ),
+        )
+        conn.commit()
+        pattern_id = int(cur.lastrowid)
+        row = conn.execute(
+            """
+            SELECT message, stacktrace, service_name, log_level
+            FROM fingerprints
+            WHERE fingerprint = ?
+            """,
+            (fingerprint,),
+        ).fetchone()
+
+    message = str(row[0] or "") if row else ""
+    stacktrace = str(row[1] or "") if row else ""
+    service_name = str(row[2] or "") if row else ""
+    log_level = str(row[3] or "") if row else ""
+    document = "\n".join(
+        [
+            "[Known Pattern]",
+            f"Fingerprint: {fingerprint}",
+            f"Service: {service_name or '-'}",
+            f"Log Level: {log_level or '-'}",
+            f"Category: {category} / {sub_category}",
+            f"Cause: {cause}",
+            f"Recommendation: {recommendation}",
+            "",
+            "[Evidence]",
+            f"Message: {message or '-'}",
+            f"Stack Trace: {stacktrace or '-'}",
+        ]
+    )
+    save_analysis_document(
+        doc_id=f"known-pattern:{pattern_id}",
+        text=document,
+        metadata={
+            "source": "known_pattern",
+            "fingerprint": fingerprint,
+            "category": category,
+            "sub_category": sub_category,
+            "confidence": confidence,
+            "schema_version": "known-pattern-v1",
+        },
+    )
+    return pattern_id
 
 
 def fetch_exception_registry(

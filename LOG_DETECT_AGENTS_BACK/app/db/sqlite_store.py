@@ -11,25 +11,28 @@ from typing import Any
 from dotenv import load_dotenv
 
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+
+
 def _resolve_db_path() -> str:
     """Resolve SQLite database path from environment variables."""
 
-    project_root = Path(__file__).resolve().parent.parent.parent
-    print(project_root)
-    env_file = project_root / ".env.dev"
+    env_file = PROJECT_ROOT / ".env.dev"
 
     load_dotenv(env_file)
-    print(env_file)
 
 
     db_path = os.getenv("SQLITE_PATH")
-    print(db_path)
 
 
     if not db_path:
         raise ValueError("SQLITE_PATH가 설정되어 있지 않습니다.")
 
-    return db_path
+    path = Path(db_path)
+    if not path.is_absolute():
+        path = PROJECT_ROOT / path
+
+    return str(path)
 
 
 def fetch_recent_logs(*, service_name: str | None, limit: int = 20) -> list[str]:

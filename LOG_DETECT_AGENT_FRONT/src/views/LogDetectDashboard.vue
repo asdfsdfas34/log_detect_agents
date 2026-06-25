@@ -129,16 +129,15 @@
     <ErrorState v-else-if="store.error" :message="store.error" />
 
     <template v-if="store.state">
-      <div class="grid gap-6 xl:grid-cols-2">
-        <PatternClusterTable
-          :clusters="store.state.evidence.clusters"
-          @select-cluster="handleSelectCluster"
-        />
-        <AnomalyTimelineChart
-          :anomalies="store.state.evidence.anomalies"
-          :logs="store.state.evidence.normalized_logs"
-        />
-      </div>
+      <AnomalyTimelineChart
+        :anomalies="store.state.evidence.anomalies"
+        :logs="store.state.evidence.normalized_logs"
+      />
+      <PatternClusterTable
+        :clusters="store.state.evidence.clusters"
+        @save-known-pattern="handleSaveKnownPattern"
+        @request-recommendation="handleRequestRecommendation"
+      />
       <RecommendationPanel
         :actions="store.state.final.recommended_actions ?? []"
         :verification="store.state.final.verification_steps ?? []"
@@ -277,10 +276,39 @@ function handleRunAnalysis() {
   void store.runAnalysis(trimmed, saveToChromaDb.value)
 }
 
-function handleSelectCluster(cluster: Cluster) {
+function handleRequestRecommendation(cluster: Cluster) {
   const trimmed = serviceName.value.trim()
   if (!trimmed) return
+  const approved = window.confirm(
+    `${cluster.cluster} 패턴에 대한 Recommendation을 생성하시겠습니까?`
+  )
+  if (!approved) return
   void store.runClusterRecommendation(trimmed, cluster.cluster)
+}
+
+async function handleSaveKnownPattern(cluster: Cluster) {
+  const cause = window.prompt(
+    `${cluster.cluster} Known Pattern 원인을 입력해주세요.`,
+    cluster.message ?? ''
+  )
+  if (!cause?.trim()) return
+  const recommendation = window.prompt(
+    `${cluster.cluster} Known Pattern Recommendation을 입력해주세요.`
+  )
+  if (!recommendation?.trim()) return
+  const approved = window.confirm(
+    `${cluster.cluster} 패턴을 Known Pattern으로 저장하시겠습니까?`
+  )
+  if (!approved) return
+  const saved = await store.saveKnownPattern(
+    cluster.cluster,
+    cause.trim(),
+    recommendation.trim()
+  )
+  if (saved) {
+    cluster.pattern_status = 'known_exact'
+    cluster.match_source = 'known_patterns'
+  }
 }
 
 function handleRefreshRecommendations() {

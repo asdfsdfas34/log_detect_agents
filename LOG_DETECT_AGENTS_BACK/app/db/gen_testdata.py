@@ -1,130 +1,103 @@
+import os
 import sqlite3
 from pathlib import Path
 
 import pandas as pd
 from dotenv import load_dotenv
-import os
 
 
-def get_db_path():
-    """
-    .env.dev 에서 SQLITE_PATH 읽기
-    """
-    
-    project_root = Path(__file__).resolve().parent.parent.parent
-    print(project_root)
-    env_file = project_root / ".env.dev"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
-    load_dotenv(env_file)
 
-    db_path = os.getenv("SQLITE_PATH")
-    print(db_path)
+def get_db_path() -> str:
+    """Read SQLITE_PATH from .env.dev and resolve it from the backend root."""
 
-    if not db_path:
-        raise ValueError("SQLITE_PATH가 설정되어 있지 않습니다.")
-
-    return db_path
+    return _resolve_db_path()
 
 
 def _resolve_db_path() -> str:
     """Resolve SQLite database path from environment variables."""
 
-    project_root = Path(__file__).resolve().parent.parent.parent
-    print(project_root)
-    env_file = project_root / ".env.dev"
-
-    load_dotenv(env_file)
-    print(env_file)
-
+    load_dotenv(PROJECT_ROOT / ".env.dev")
 
     db_path = os.getenv("SQLITE_PATH")
-    print(db_path)
-
-
     if not db_path:
-        raise ValueError("SQLITE_PATH가 설정되어 있지 않습니다.")
+        raise ValueError("SQLITE_PATH is not configured.")
 
-    return db_path
+    path = Path(db_path)
+    if not path.is_absolute():
+        path = PROJECT_ROOT / path
 
-def import_excel_to_sqlite(excel_file: str):
-    """
-    Excel → SQLite 저장
-    """
+    return str(path)
+
+
+def _resolve_excel_path(excel_file: str) -> str:
+    """Resolve Excel paths from cwd first, then from this script directory."""
+
+    path = Path(excel_file)
+    if path.is_absolute():
+        return str(path)
+
+    cwd_candidate = Path.cwd() / path
+    if cwd_candidate.exists():
+        return str(cwd_candidate)
+
+    return str(Path(__file__).resolve().parent / path)
+
+
+def import_excel_to_sqlite(excel_file: str) -> None:
+    """Import Excel rows into the service_logs SQLite table."""
 
     db_path = _resolve_db_path()
-    if not db_path:
-        return []
+    excel_path = _resolve_excel_path(excel_file)
 
-    query = (
-        "SELECT DISTINCT service_name FROM service_logs "
-        "WHERE COALESCE(TRIM(service_name), '') != '' "
-        "ORDER BY service_name ASC "
-        "LIMIT ?"
-    )
+    df = pd.read_excel(excel_path)
 
-    try:
-        with sqlite3.connect(db_path) as conn:
-            cur = conn.cursor()
-            cur.execute(query, (100,))
-            rows = cur.fetchall()
-    except Exception:
-        return []
+    required_columns = [
+        "service_name",
+        "level",
+        "message",
+        "created_at",
+        "stack_trace",
+    ]
 
-    return [print(row) for row in rows]
+    missing = [c for c in required_columns if c not in df.columns]
+    if missing:
+        raise ValueError(f"Required columns are missing: {missing}")
 
-    # df = pd.read_excel(excel_file)
+    rows = [
+        (
+            str(row["service_name"]),
+            str(row["level"]),
+            str(row["message"]),
+            str(row["created_at"]),
+            str(row["stack_trace"]),
+        )
+        for _, row in df.iterrows()
+    ]
 
-    # required_columns = [
-    #     "service_name",
-    #     "level",
-    #     "message",
-    #     "created_at",
-    #     "stack_trace",
-    # ]
+    Path(db_path).parent.mkdir(parents=True, exist_ok=True)
 
-    # missing = [c for c in required_columns if c not in df.columns]
+    with sqlite3.connect(db_path) as conn:
+        cur = conn.cursor()
+        cur.executemany(
+            """
+            INSERT INTO service_logs
+            (
+                service_name,
+                level,
+                message,
+                created_at,
+                stack_trace
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
+        conn.commit()
 
-    # if missing:
-    #     raise ValueError(
-    #         f"엑셀에 필수 컬럼이 없습니다. 누락 컬럼: {missing}"
-    #     )
-
-    # with sqlite3.connect(db_path) as conn:
-
-    #     cur = conn.cursor()
-
-    #     insert_sql = """
-    #     INSERT INTO service_logs
-    #     (
-    #         service_name,
-    #         level,
-    #         message,
-    #         created_at,
-    #         stack_trace
-    #     )
-    #     VALUES (?, ?, ?, ?, ?)
-    #     """
-
-    #     rows = [
-    #         (
-    #             str(row["service_name"]),
-    #             str(row["level"]),
-    #             str(row["message"]),
-    #             str(row["created_at"]),
-    #             str(row["stack_trace"])
-    #         )
-    #         for _, row in df.iterrows()
-    #     ]
-
-    #     cur.executemany(insert_sql, rows)
-
-    #     conn.commit()
-
-    # print(f"{len(rows)}건 저장 완료")
+    print(f"Imported {len(rows)} rows into {db_path}")
 
 
 if __name__ == "__main__":
-
-    import_excel_to_sqlite(
-        "./lll.xlsx"
-    )
+    import_excel_to_sqlite("./log_raw_edit.xlsx")

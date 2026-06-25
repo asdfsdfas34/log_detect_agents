@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 from app.agents.knowledge_base_rag import KnowledgeBaseRAGAgent
 from app.agents.recommendation import RecommendationAgent
 from app.config import settings
-from app.db.chroma_store import find_similar_pattern_clusters, save_pattern_cluster
+from app.db.chroma_store import find_similar_pattern_clusters
 from app.db.scenario_store import (
     approve_result,
     fetch_exception_registry,
@@ -17,6 +17,7 @@ from app.db.scenario_store import (
     normalize_log_text,
     register_exception,
     run_detection_pipeline,
+    save_known_pattern,
 )
 from app.db.sqlite_store import (
     delete_recommendation_result,
@@ -69,6 +70,17 @@ class ExceptionRegisterRequest(BaseModel):
 
     fingerprint: str
     reason: str
+
+
+class KnownPatternSaveRequest(BaseModel):
+    """Request body for human-selected known pattern registration."""
+
+    fingerprint: str
+    category: str = "Manual"
+    sub_category: str = "Known Pattern"
+    cause: str
+    recommendation: str
+    confidence: str = "HIGH"
 
 
 class ApprovalRequest(BaseModel):
@@ -178,23 +190,17 @@ def _enrich_pattern_clusters(
             if similar_clusters and similar_clusters[0].get("similarity") is not None
             else 0
         )
-        save_pattern_cluster(
-            doc_id=f"{service_name}:{fingerprint}",
-            text=context,
-            metadata={
-                "service_name": service_name,
-                "fingerprint": fingerprint,
-                "log_level": log_level,
-                "normalized_message": normalize_log_text(message),
-                "occurrence_count": int(item.get("occurrence_count") or 0),
-            },
-        )
         enriched.append(
             {
                 "cluster": fingerprint,
                 "count": item["occurrence_count"],
                 "message": message,
                 "log_level": log_level,
+                "stacktrace": stacktrace,
+                "pattern_status": item.get("pattern_status", ""),
+                "match_source": item.get("match_source", ""),
+                "similar_fingerprint": item.get("similar_fingerprint", ""),
+                "similarity_score": item.get("similarity_score"),
                 "semantic_similarity": semantic_similarity,
                 "similar_clusters": similar_clusters,
             }
@@ -295,7 +301,11 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
 
     # Run deterministic scenario analysis before the final LLM recommendation so
     # the expensive answer generation uses the freshest fingerprint evidence.
-    scenario = run_detection_pipeline(req.service_name, days_back=1)
+    scenario = run_detection_pipeline(
+        req.service_name, days_back=settings.log_lookback_days
+    )
+    result["evidence"]["summary"] = scenario["summary"]
+    result["evidence"]["recommendation"] = scenario["recommendation"]
     if scenario["fingerprints"]:
         result["evidence"]["clusters"] = _enrich_pattern_clusters(
             service_name=req.service_name, fingerprints=scenario["fingerprints"]
@@ -313,7 +323,7 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
         result["assessment"]["rationale"] = [
             f"Risk Level: {scenario['summary']['risk_level']}",
             f"Detection Status: {scenario['summary']['detection_status']}",
-            "Recent window: 1 day",
+            f"Recent window: {settings.log_lookback_days} days",
         ]
         result["evidence"]["known_pattern_matches"] = scenario.get(
             "recommendations", []
@@ -364,7 +374,9 @@ def delete_recommendation(recommendation_id: int) -> dict[str, int | str]:
 @app.post("/recommendations/fingerprint", response_model=AnalyzeResponse)
 def recommend_for_fingerprint(req: FingerprintRecommendationRequest) -> AnalyzeResponse:
     """Build a recommendation preview for one selected fingerprint without persisting it."""
-    scenario = run_detection_pipeline(req.service_name, days_back=1)
+    scenario = run_detection_pipeline(
+        req.service_name, days_back=settings.log_lookback_days
+    )
     selected = next(
         (
             item
@@ -446,6 +458,8 @@ def recommend_for_fingerprint(req: FingerprintRecommendationRequest) -> AnalyzeR
             "selected_log": selected or {},
         }
     ]
+    state["evidence"]["summary"] = scenario["summary"]
+    state["evidence"]["recommendation"] = selected_recommendation
     state["rag"]["related_knowledge"] = fetch_knowledge_cards(
         fingerprint=req.fingerprint, limit=5
     )
@@ -487,6 +501,20 @@ def create_exception(req: ExceptionRegisterRequest) -> dict[str, str]:
     """Register a fingerprint ignore rule for SC-006."""
     register_exception(req.fingerprint, req.reason)
     return {"status": "registered", "fingerprint": req.fingerprint}
+
+
+@app.post("/known-patterns")
+def create_known_pattern(req: KnownPatternSaveRequest) -> dict[str, int | str]:
+    """Register a human-selected known pattern."""
+    pattern_id = save_known_pattern(
+        fingerprint=req.fingerprint,
+        category=req.category,
+        sub_category=req.sub_category,
+        cause=req.cause,
+        recommendation=req.recommendation,
+        confidence=req.confidence,
+    )
+    return {"status": "saved", "id": pattern_id, "fingerprint": req.fingerprint}
 
 
 @app.post("/approvals")

@@ -78,6 +78,57 @@ def test_fingerprint_normalizes_korean_user_suffix_numbers() -> None:
     )
 
 
+def test_fingerprint_preserves_domain_names_while_normalizing_runtime_values() -> None:
+    first = (
+        "ServerScriptWorkerStat_x000D_"
+        "Worker #0 (pid=56989 port=63894)_x000D_"
+        "StartTime=2026-05-31 오전 4:15:02_x000D_"
+        "PrivateMemorySize=63.98 MB_x000D_"
+        "TimeAvg=0.05(1208), TimeMin=0, TimeMax=6"
+    )
+    second = (
+        "ServerScriptWorkerStat_x000D_"
+        "Worker #0 (pid=69962 port=85800)_x000D_"
+        "StartTime=2026-05-31 오전 4:15:02_x000D_"
+        "PrivateMemorySize=64.12 MB_x000D_"
+        "TimeAvg=0.07(1268), TimeMin=0, TimeMax=8"
+    )
+
+    assert normalize_log_text(first) == normalize_log_text(second)
+    assert "pid" in normalize_log_text(first)
+    assert "_x000D_" not in normalize_log_text(first)
+
+    message = (
+        "Start StaticPageInterface. "
+        "functionConfigId : a2be9631-cf0e-4cdf-b132-7167dadd44d3,\n"
+        " functionName : select_CurrentLineStepUserID"
+    )
+    normalized = normalize_log_text(message)
+
+    assert "functionConfigId *" in normalized
+    assert "functionName: select_CurrentLineStepUserID" in normalized
+
+
+def test_fingerprint_normalizes_urls_paths_and_quoted_runtime_values() -> None:
+    first = (
+        'AbsoluteUri : http://test.com/test_appl/Main/View/123?token=abc '
+        'Cannot convert "S970" into NUM '
+        r"파일 E:\Test\30_Component\Test.Appl.Biz\LineBiz.cs:줄 94"
+    )
+    second = (
+        'AbsoluteUri : http://test.com/test_appl/Main/View/456?token=def '
+        'Cannot convert "S971" into NUM '
+        r"파일 E:\Test\30_Component\Test.Appl.Biz\LineBiz.cs:줄 211"
+    )
+
+    normalized = normalize_log_text(first)
+
+    assert normalize_log_text(first) == normalize_log_text(second)
+    assert "AbsoluteUri: URL://test.com/test_appl/Main/View/*?token=*" in normalized
+    assert 'Cannot convert "*"' in normalized
+    assert "PATH\\LineBiz.cs" in normalized
+
+
 def test_detection_pipeline_groups_similar_log_messages(
     tmp_path: Path, monkeypatch
 ) -> None:

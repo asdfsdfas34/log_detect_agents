@@ -21,6 +21,8 @@ class Evidence(TypedDict):
     stack_traces: list[str]
     incident_candidates: list[dict]
     source_code_evidence: list[dict]
+    summary: dict
+    recommendation: dict
 
 
 class Metrics(TypedDict):
@@ -97,6 +99,8 @@ def create_initial_state(
             "stack_traces": [],
             "incident_candidates": [],
             "source_code_evidence": [],
+            "summary": {},
+            "recommendation": {},
         },
         "metrics": {
             "error_rate": None,

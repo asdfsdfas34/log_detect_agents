@@ -125,6 +125,9 @@ def run_analysis(client: BackendClient) -> None:
 
 def metric_overview(result: dict[str, Any]) -> dict[str, Any]:
     evidence = result.get("evidence", {})
+    final = result.get("final", {})
+    evidence_bundle = final.get("evidence_bundle") or {}
+    scenario_summary = evidence_bundle.get("summary") or evidence.get("summary") or {}
     assessment = result.get("assessment", {})
     risk_score = assessment.get("risk_score") or 0
     if risk_score >= 70:
@@ -134,11 +137,17 @@ def metric_overview(result: dict[str, Any]) -> dict[str, Any]:
     else:
         risk = "Low"
     return {
-        "total_logs": len(evidence.get("normalized_logs", [])),
-        "total_anomalies": len(evidence.get("anomalies", [])),
-        "unique_patterns": len(evidence.get("clusters", [])),
-        "impact_score": risk_score,
-        "risk": risk,
+        "total_logs": scenario_summary.get(
+            "total_logs", len(evidence.get("normalized_logs", []))
+        ),
+        "total_anomalies": scenario_summary.get(
+            "anomalies_detected", len(evidence.get("anomalies", []))
+        ),
+        "unique_patterns": scenario_summary.get(
+            "total_fingerprints", len(evidence.get("clusters", []))
+        ),
+        "impact_score": scenario_summary.get("risk_score", risk_score),
+        "risk": scenario_summary.get("risk_level", risk),
     }
 
 

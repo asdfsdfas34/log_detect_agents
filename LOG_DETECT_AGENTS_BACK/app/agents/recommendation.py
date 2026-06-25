@@ -54,6 +54,8 @@ class RecommendationAgent:
                 "total_matches": len(known_matches),
                 "suppressed": len(state["evidence"].get("suppressed_logs", [])),
             },
+            "summary": state["evidence"].get("summary", {}),
+            "recommendation": state["evidence"].get("recommendation", {}),
             "similar_cases": related,
         }
 

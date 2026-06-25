@@ -410,6 +410,29 @@ export const useLogDetectStore = defineStore('logDetect', () => {
     }
   }
 
+  async function saveKnownPattern(
+    fingerprint: string,
+    cause: string,
+    recommendation: string
+  ) {
+    try {
+      const { data } = await agentApi.saveKnownPattern({
+        fingerprint,
+        category: 'Manual',
+        sub_category: 'Known Pattern',
+        cause,
+        recommendation,
+        confidence: 'HIGH'
+      })
+      addToast('info', `Known Pattern 저장 완료: ${data.fingerprint}`)
+      return true
+    } catch (caught) {
+      error.value = (caught as Error).message
+      addToast('error', `Known Pattern 저장 실패: ${error.value}`)
+      return false
+    }
+  }
+
   async function saveCurrentRecommendation(serviceName: string) {
     const recommendation = state.value?.final.generated_answer
     if (!state.value || !recommendation) {
@@ -521,6 +544,7 @@ export const useLogDetectStore = defineStore('logDetect', () => {
     deleteSavedRecommendation,
     fetchKnowledgeCards,
     fetchExceptionRegistry,
+    saveKnownPattern,
     saveCurrentRecommendation,
     approveCurrentRecommendation,
     registerCurrentException,
