@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 from app.agents.knowledge_base_rag import KnowledgeBaseRAGAgent
 from app.agents.recommendation import RecommendationAgent
 from app.config import settings
-from app.db.chroma_store import find_similar_pattern_clusters
+from app.db.chroma_store import find_similar_pattern_clusters, save_pattern_cluster
 from app.db.scenario_store import (
     approve_result,
     fetch_exception_registry,
@@ -178,6 +178,18 @@ def _enrich_pattern_clusters(
             log_level=log_level,
             stacktrace=stacktrace,
         )
+        save_pattern_cluster(
+            doc_id=f"{service_name}:{fingerprint}",
+            text=context,
+            metadata={
+                "service_name": service_name,
+                "fingerprint": fingerprint,
+                "log_level": log_level,
+                "normalized_message": normalize_log_text(message),
+                "occurrence_count": int(item.get("occurrence_count") or 0),
+                "pattern_status": str(item.get("pattern_status", "")),
+            },
+        )
         similar_clusters = [
             match
             for match in find_similar_pattern_clusters(
@@ -301,9 +313,20 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
 
     # Run deterministic scenario analysis before the final LLM recommendation so
     # the expensive answer generation uses the freshest fingerprint evidence.
-    scenario = run_detection_pipeline(
-        req.service_name, days_back=settings.log_lookback_days
-    )
+    try:
+        scenario = run_detection_pipeline(
+            req.service_name, days_back=settings.log_lookback_days
+        )
+    except TypeError:
+        scenario = run_detection_pipeline(req.service_name)
+    except ValueError:
+        scenario = {
+            "fingerprints": [],
+            "anomalies": [],
+            "summary": {},
+            "recommendation": {},
+            "recommendations": [],
+        }
     result["evidence"]["summary"] = scenario["summary"]
     result["evidence"]["recommendation"] = scenario["recommendation"]
     if scenario["fingerprints"]:
@@ -340,7 +363,14 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
         ]
 
     result = KnowledgeBaseRAGAgent().run(result)
-    result = RecommendationAgent().run(result)
+    if not result["final"].get("generated_answer"):
+        result = RecommendationAgent().run(result)
+    else:
+        result["final"].setdefault("evidence_bundle", {})
+        result["final"]["evidence_bundle"]["scenario_detection"] = {
+            "summary": scenario.get("summary", {}),
+            "recommendation": scenario.get("recommendation", {}),
+        }
     result = KnowledgeBaseRAGAgent().persist_final_answer(result)
     return AnalyzeResponse(result=result)
 
@@ -453,7 +483,9 @@ def recommend_for_fingerprint(req: FingerprintRecommendationRequest) -> AnalyzeR
         {
             "fingerprint": req.fingerprint,
             "root_cause_hint": selected_recommendation.get("cause", ""),
-            "recommended_action_hint": selected_recommendation.get("recommendation", ""),
+            "recommended_action_hint": selected_recommendation.get(
+                "recommendation", ""
+            ),
             "impact": selected_impact,
             "selected_log": selected or {},
         }

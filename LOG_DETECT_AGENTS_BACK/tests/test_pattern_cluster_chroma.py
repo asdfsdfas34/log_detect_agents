@@ -31,6 +31,28 @@ class FakeClient:
         return collection
 
 
+class FakeEmbeddingData:
+    embedding = [0.1, 0.2, 0.3]
+
+
+class FakeEmbeddingResponse:
+    data = [FakeEmbeddingData()]
+
+
+class FakeEmbeddings:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def create(self, **kwargs: Any) -> FakeEmbeddingResponse:
+        self.calls.append(kwargs)
+        return FakeEmbeddingResponse()
+
+
+class FakeOpenAIClient:
+    def __init__(self) -> None:
+        self.embeddings = FakeEmbeddings()
+
+
 def test_pattern_cluster_chroma_uses_dedicated_collection(monkeypatch) -> None:
     client = FakeClient()
     monkeypatch.setattr(chroma_store, "_client", lambda: client)
@@ -50,11 +72,78 @@ def test_pattern_cluster_chroma_uses_dedicated_collection(monkeypatch) -> None:
     assert matches[0]["similarity"] == 0.8200000000000001
 
 
+def test_pattern_cluster_v2_uses_dedicated_openai_embedding_key(monkeypatch) -> None:
+    client = FakeClient()
+    embedding_client = FakeOpenAIClient()
+    monkeypatch.setattr(chroma_store, "_client", lambda: client)
+    monkeypatch.setattr(chroma_store, "_embedding_client", lambda: embedding_client)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_EMBEDDING_API_KEY", "embedding-only-key")
+    monkeypatch.setenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-large")
+    monkeypatch.setenv("OPENAI_PATTERN_EMBEDDING_DIMENSIONS", "1024")
+
+    assert chroma_store.save_pattern_cluster(
+        doc_id="checkout-api:FP-NEW",
+        text="service=checkout-api\nfingerprint=FP-NEW",
+        metadata={
+            "service_name": "checkout-api",
+            "fingerprint": "FP-NEW",
+            "log_level": "ERROR",
+            "normalized_message": "Payment failed for order *",
+        },
+    )
+
+    upsert = client.collections["pattern_templates_v2"].upserts[0]
+
+    assert upsert["ids"] == ["pattern-template-v2:checkout-api:FP-NEW"]
+    assert upsert["embeddings"] == [[0.1, 0.2, 0.3]]
+    assert upsert["metadatas"][0]["embedding_model"] == "text-embedding-3-large"
+    assert upsert["metadatas"][0]["embedding_dimensions"] == 1024
+    assert embedding_client.embeddings.calls[0]["dimensions"] == 1024
+
+
+def test_analysis_documents_route_to_v2_collections(monkeypatch) -> None:
+    client = FakeClient()
+    embedding_client = FakeOpenAIClient()
+    monkeypatch.setattr(chroma_store, "_client", lambda: client)
+    monkeypatch.setattr(chroma_store, "_embedding_client", lambda: embedding_client)
+    monkeypatch.setenv("OPENAI_EMBEDDING_API_KEY", "embedding-only-key")
+    monkeypatch.setenv("OPENAI_CASE_CARD_EMBEDDING_DIMENSIONS", "1536")
+
+    assert chroma_store.save_analysis_document(
+        doc_id="knowledge-card:KC-123",
+        text="[Case Card]\nresolution",
+        metadata={"fingerprint": "FP-123"},
+    )
+    assert chroma_store.save_analysis_document(
+        doc_id="known-pattern:7",
+        text="[Known Pattern]\nknown",
+        metadata={"fingerprint": "FP-456"},
+    )
+
+    assert "case_cards_v2" in client.collections
+    assert "known_patterns_v2" in client.collections
+    assert (
+        client.collections["case_cards_v2"].upserts[0]["metadatas"][0]["document_type"]
+        == "case_card"
+    )
+    assert (
+        client.collections["known_patterns_v2"].upserts[0]["metadatas"][0][
+            "document_type"
+        ]
+        == "known_pattern"
+    )
+
+
 def test_enrich_pattern_clusters_adds_backend_semantic_similarity(monkeypatch) -> None:
     client = FakeClient()
     monkeypatch.setattr(chroma_store, "_client", lambda: client)
 
-    monkeypatch.setattr(main, "find_similar_pattern_clusters", chroma_store.find_similar_pattern_clusters)
+    monkeypatch.setattr(
+        main,
+        "find_similar_pattern_clusters",
+        chroma_store.find_similar_pattern_clusters,
+    )
     monkeypatch.setattr(main, "save_pattern_cluster", chroma_store.save_pattern_cluster)
 
     clusters = main._enrich_pattern_clusters(

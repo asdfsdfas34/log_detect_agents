@@ -114,22 +114,48 @@ def _restore_semantic_values(text: str, protected: dict[str, str]) -> str:
     return text
 
 
+def _json_list(value: list[Any]) -> str:
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _json_dict(value: dict[str, Any]) -> str:
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _load_json_list(value: str) -> list[Any]:
+    try:
+        loaded = json.loads(value or "[]")
+    except json.JSONDecodeError:
+        return []
+    return loaded if isinstance(loaded, list) else []
+
+
+def _load_json_dict(value: str) -> dict[str, Any]:
+    try:
+        loaded = json.loads(value or "{}")
+    except json.JSONDecodeError:
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
 def _normalize_url(match: re.Match[str]) -> str:
     raw = match.group(0).rstrip(".,)")
-    suffix = match.group(0)[len(raw):]
+    suffix = match.group(0)[len(raw) :]
     try:
         parsed = urlsplit(raw)
     except ValueError:
         return "URL" + suffix
     path_parts = [
-        "*"
-        if UUID_RE.fullmatch(part)
-        or part.isdigit()
-        or HASH_LIKE_RE.fullmatch(part)
-        else part
+        (
+            "*"
+            if UUID_RE.fullmatch(part) or part.isdigit() or HASH_LIKE_RE.fullmatch(part)
+            else part
+        )
         for part in parsed.path.split("/")
     ]
-    query = "&".join(f"{key}=*" for key, _ in parse_qsl(parsed.query, keep_blank_values=True))
+    query = "&".join(
+        f"{key}=*" for key, _ in parse_qsl(parsed.query, keep_blank_values=True)
+    )
     normalized = urlunsplit(("URL", parsed.netloc, "/".join(path_parts), query, ""))
     return normalized + suffix
 
@@ -290,6 +316,32 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             embedding_status TEXT DEFAULT 'pending',
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
+        CREATE TABLE IF NOT EXISTS log_processing_state (
+            service_name TEXT PRIMARY KEY,
+            last_rowid INTEGER NOT NULL DEFAULT 0,
+            last_processed_at TEXT DEFAULT '',
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS processed_log_offsets (
+            service_name TEXT NOT NULL,
+            log_rowid INTEGER NOT NULL,
+            fingerprint TEXT NOT NULL,
+            processed_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY(service_name, log_rowid)
+        );
+        CREATE TABLE IF NOT EXISTS pattern_time_series_metrics (
+            service_name TEXT NOT NULL,
+            fingerprint TEXT NOT NULL,
+            bucket_start TEXT NOT NULL,
+            bucket_size TEXT NOT NULL,
+            total_count INTEGER NOT NULL DEFAULT 0,
+            error_count INTEGER NOT NULL DEFAULT 0,
+            warn_count INTEGER NOT NULL DEFAULT 0,
+            info_count INTEGER NOT NULL DEFAULT 0,
+            first_seen TEXT NOT NULL,
+            last_seen TEXT NOT NULL,
+            PRIMARY KEY(service_name, fingerprint, bucket_start, bucket_size)
+        );
         """)
 
     for column, definition in {
@@ -303,7 +355,9 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             for row in cur.execute("PRAGMA table_info(log_analysis_results)").fetchall()
         ]
         if column not in analysis_columns:
-            cur.execute(f"ALTER TABLE log_analysis_results ADD COLUMN {column} {definition}")
+            cur.execute(
+                f"ALTER TABLE log_analysis_results ADD COLUMN {column} {definition}"
+            )
     for column, definition in {
         "resolution_method": "TEXT DEFAULT ''",
         "title": "TEXT DEFAULT ''",
@@ -335,7 +389,9 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             for row in cur.execute("PRAGMA table_info(exception_registry)").fetchall()
         ]
         if column not in exception_columns:
-            cur.execute(f"ALTER TABLE exception_registry ADD COLUMN {column} {definition}")
+            cur.execute(
+                f"ALTER TABLE exception_registry ADD COLUMN {column} {definition}"
+            )
     conn.commit()
 
 
@@ -438,13 +494,14 @@ def _pattern_status(
         ]
     )
     best_match = _top_similarity([m for m in [approved_match, observed_match] if m])
-    if best_match and float(best_match.get("similarity") or 0) >= KNOWN_SIMILARITY_THRESHOLD:
+    if (
+        best_match
+        and float(best_match.get("similarity") or 0) >= KNOWN_SIMILARITY_THRESHOLD
+    ):
         metadata = best_match.get("metadata") or {}
         similar_fp = str(metadata.get("fingerprint") or best_match.get("id") or "")
         source = (
-            "incident_analyses"
-            if best_match is approved_match
-            else "pattern_clusters"
+            "incident_analyses" if best_match is approved_match else "pattern_clusters"
         )
         return {
             "pattern_status": "known_similar",
@@ -540,6 +597,192 @@ def _pipeline_signature(
     return int(row[0] or 0), str(row[1] or "")
 
 
+def _state_key(service_name: str | None) -> str:
+    return service_name or "__all__"
+
+
+def _last_processed_rowid(conn: sqlite3.Connection, service_name: str | None) -> int:
+    row = conn.execute(
+        "SELECT last_rowid FROM log_processing_state WHERE service_name=?",
+        (_state_key(service_name),),
+    ).fetchone()
+    return int(row[0] or 0) if row else 0
+
+
+def _save_processing_state(
+    conn: sqlite3.Connection,
+    service_name: str | None,
+    last_rowid: int,
+    last_created_at: str,
+) -> None:
+    conn.execute(
+        """
+        REPLACE INTO log_processing_state(service_name, last_rowid, last_processed_at, updated_at)
+        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+        """,
+        (_state_key(service_name), last_rowid, last_created_at),
+    )
+
+
+def _bucket_start(value: str, bucket_size: str) -> str:
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        parsed = datetime.utcnow()
+    if bucket_size == "hour":
+        return parsed.replace(minute=0, second=0, microsecond=0).isoformat(
+            timespec="seconds"
+        )
+    return parsed.date().isoformat()
+
+
+def _increment_pattern_metric(
+    conn: sqlite3.Connection,
+    *,
+    service_name: str,
+    fingerprint: str,
+    level: str,
+    created_at: str,
+    bucket_size: str,
+) -> None:
+    bucket = _bucket_start(created_at, bucket_size)
+    level_upper = level.upper()
+    conn.execute(
+        """
+        INSERT INTO pattern_time_series_metrics(
+            service_name, fingerprint, bucket_start, bucket_size,
+            total_count, error_count, warn_count, info_count, first_seen, last_seen
+        ) VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
+        ON CONFLICT(service_name, fingerprint, bucket_start, bucket_size)
+        DO UPDATE SET
+            total_count = total_count + 1,
+            error_count = error_count + excluded.error_count,
+            warn_count = warn_count + excluded.warn_count,
+            info_count = info_count + excluded.info_count,
+            first_seen = MIN(first_seen, excluded.first_seen),
+            last_seen = MAX(last_seen, excluded.last_seen)
+        """,
+        (
+            service_name,
+            fingerprint,
+            bucket,
+            bucket_size,
+            1 if level_upper == "ERROR" else 0,
+            1 if level_upper in {"WARN", "WARNING"} else 0,
+            1 if level_upper in {"INFO", "INFORMATION"} else 0,
+            created_at,
+            created_at,
+        ),
+    )
+
+
+def _metric_baseline(
+    conn: sqlite3.Connection, *, service_name: str, fingerprint: str
+) -> dict[str, Any]:
+    rows = conn.execute(
+        """
+        SELECT bucket_start, total_count
+        FROM pattern_time_series_metrics
+        WHERE service_name=? AND fingerprint=? AND bucket_size='day'
+        ORDER BY bucket_start DESC
+        LIMIT 8
+        """,
+        (service_name, fingerprint),
+    ).fetchall()
+    if not rows:
+        return {"latest_count": 0, "baseline_count": 0.0, "latest_bucket": ""}
+    latest_count = int(rows[0][1] or 0)
+    history = [int(row[1] or 0) for row in rows[1:]]
+    baseline = round(sum(history) / len(history), 2) if history else 0.0
+    return {
+        "latest_bucket": str(rows[0][0]),
+        "latest_count": latest_count,
+        "baseline_count": baseline,
+    }
+
+
+def _anomaly_type_for(
+    *,
+    group: dict[str, Any],
+    known: bool,
+    spike_ratio: float,
+    metric: dict[str, Any],
+) -> tuple[bool, str, str]:
+    latest = int(metric.get("latest_count") or 0)
+    baseline = float(metric.get("baseline_count") or 0)
+    status = str(group.get("pattern_status") or "")
+    if status == "new_pattern":
+        return (
+            True,
+            "NEW_ERROR" if group.get("log_level") == "ERROR" else "NEW_PATTERN",
+            "HIGH",
+        )
+    if status == "known_similar":
+        return True, "SIMILAR_CASE_MATCH", "MEDIUM"
+    if known and group.get("previous_last_seen") and group.get("first_seen"):
+        try:
+            previous = datetime.fromisoformat(
+                str(group["previous_last_seen"]).replace("Z", "+00:00")
+            )
+            current = datetime.fromisoformat(
+                str(group["first_seen"]).replace("Z", "+00:00")
+            )
+            if current - previous >= timedelta(days=1):
+                return True, "RECURRENCE", "MEDIUM"
+        except ValueError:
+            pass
+    if baseline >= 1 and latest >= baseline * 2:
+        return True, "SPIKE", "HIGH"
+    if baseline >= 4 and latest <= baseline * 0.5:
+        return True, "DROP", "MEDIUM"
+    if spike_ratio >= 200:
+        return True, "SPIKE", "HIGH"
+    return False, "NONE", "NONE"
+
+
+def _load_fingerprint_groups(
+    conn: sqlite3.Connection, service_name: str | None
+) -> dict[str, dict[str, Any]]:
+    params: list[Any] = []
+    where = ""
+    if service_name:
+        where = "WHERE fp.service_name=?"
+        params.append(service_name)
+    rows = conn.execute(
+        f"""
+        SELECT
+            fp.fingerprint, fp.occurrence_count, fp.log_level, fp.message,
+            fp.stacktrace, fp.service_name, fp.first_seen, fp.last_seen,
+            COALESCE(lar.pattern_status, 'observed_existing'),
+            COALESCE(lar.match_source, ''),
+            COALESCE(lar.similar_fingerprint, ''),
+            lar.similarity_score
+        FROM fingerprints fp
+        LEFT JOIN log_analysis_results lar ON lar.fingerprint = fp.fingerprint
+        {where}
+        """,
+        params,
+    ).fetchall()
+    return {
+        str(row[0]): {
+            "fingerprint": str(row[0]),
+            "occurrence_count": int(row[1] or 0),
+            "log_level": str(row[2] or "").upper(),
+            "message": str(row[3] or ""),
+            "normalized_message": normalize_log_text(str(row[3] or "")),
+            "stacktrace": str(row[4] or ""),
+            "service_name": str(row[5] or ""),
+            "first_seen": str(row[6] or ""),
+            "last_seen": str(row[7] or ""),
+            "pattern_status": str(row[8] or "observed_existing"),
+            "match_source": str(row[9] or ""),
+            "similar_fingerprint": str(row[10] or ""),
+            "similarity_score": row[11],
+        }
+        for row in rows
+    }
+
+
 def run_detection_pipeline(
     service_name: str | None = None, *, days_back: int | None = None
 ) -> dict[str, Any]:
@@ -550,29 +793,42 @@ def run_detection_pipeline(
         ensure_schema(conn)
         cur = conn.cursor()
         cutoff = (
-            (datetime.utcnow() - timedelta(days=days_back)).isoformat(timespec="seconds")
+            (datetime.utcnow() - timedelta(days=days_back)).isoformat(
+                timespec="seconds"
+            )
             if days_back is not None
             else None
         )
         signature_count, signature_max_created = _pipeline_signature(
             conn, service_name, cutoff
         )
-        cache_key = (service_name, days_back, signature_count, signature_max_created)
+        last_rowid = _last_processed_rowid(conn, service_name)
+        cache_key = (
+            service_name,
+            days_back,
+            signature_count,
+            last_rowid,
+            signature_max_created,
+        )
         cached = _PIPELINE_CACHE.get(cache_key)
         if cached is not None:
             return copy.deepcopy(cached)
 
-        where_parts = []
-        params: list[Any] = []
+        where_parts = ["rowid > ?"]
+        params: list[Any] = [last_rowid]
         if service_name:
             where_parts.append("service_name=?")
             params.append(service_name)
         if cutoff:
             where_parts.append("created_at>=?")
             params.append(cutoff)
-        where = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
+        where = f"WHERE {' AND '.join(where_parts)}"
         rows = cur.execute(
-            f"SELECT service_name, level, message, COALESCE(stack_trace,''), created_at FROM service_logs {where}",
+            f"""
+            SELECT rowid, service_name, level, message, COALESCE(stack_trace,''), created_at
+            FROM service_logs {where}
+            ORDER BY rowid ASC
+            """,
             params,
         ).fetchall()
         existing_fingerprints = {
@@ -580,26 +836,58 @@ def run_detection_pipeline(
             for row in cur.execute("SELECT fingerprint FROM fingerprints").fetchall()
         }
         groups: dict[str, dict[str, Any]] = {}
-        for svc, level, msg, stack, created in rows:
+        max_rowid = last_rowid
+        max_created = ""
+        for rowid, svc, level, msg, stack, created in rows:
+            max_rowid = max(max_rowid, int(rowid))
+            max_created = max(max_created, str(created))
             normalized_message = normalize_log_text(msg)
             fp = fingerprint_id(svc, level.upper(), msg, stack)
+            existing = cur.execute(
+                """
+                SELECT occurrence_count, first_seen, last_seen, message, stacktrace
+                FROM fingerprints WHERE fingerprint=?
+                """,
+                (fp,),
+            ).fetchone()
             item = groups.setdefault(
                 fp,
                 {
                     "fingerprint": fp,
-                    "occurrence_count": 0,
+                    "occurrence_count": int(existing[0] or 0) if existing else 0,
                     "log_level": level.upper(),
-                    "message": msg,
+                    "message": str(existing[3] or msg) if existing else msg,
                     "normalized_message": normalized_message,
-                    "stacktrace": normalize_stacktrace(stack),
+                    "stacktrace": (
+                        str(existing[4] or normalize_stacktrace(stack))
+                        if existing
+                        else normalize_stacktrace(stack)
+                    ),
                     "service_name": svc,
-                    "first_seen": created,
-                    "last_seen": created,
+                    "first_seen": str(existing[1] or created) if existing else created,
+                    "last_seen": str(existing[2] or created) if existing else created,
+                    "previous_last_seen": str(existing[2] or "") if existing else "",
                 },
             )
             item["occurrence_count"] += 1
             item["first_seen"] = min(item["first_seen"], created)
             item["last_seen"] = max(item["last_seen"], created)
+            for bucket_size in ("day", "hour"):
+                _increment_pattern_metric(
+                    conn,
+                    service_name=svc,
+                    fingerprint=fp,
+                    level=level,
+                    created_at=created,
+                    bucket_size=bucket_size,
+                )
+            cur.execute(
+                """
+                INSERT OR IGNORE INTO processed_log_offsets(service_name, log_rowid, fingerprint)
+                VALUES (?, ?, ?)
+                """,
+                (svc, int(rowid), fp),
+            )
         for g in groups.values():
             g.update(
                 _pattern_status(
@@ -614,40 +902,6 @@ def run_detection_pipeline(
                 "REPLACE INTO fingerprints VALUES (:fingerprint,:occurrence_count,:log_level,:message,:stacktrace,:service_name,:first_seen,:last_seen)",
                 g,
             )
-        ignored = {
-            r[0]
-            for r in cur.execute(
-                "SELECT fingerprint FROM exception_registry"
-            ).fetchall()
-        }
-        ignored_signatures = set()
-        for row in cur.execute(
-            """
-            SELECT
-                er.normalized_message,
-                er.log_level,
-                er.message,
-                fp.message,
-                fp.log_level
-            FROM exception_registry er
-            LEFT JOIN fingerprints fp ON fp.fingerprint = er.fingerprint
-            """
-        ).fetchall():
-            normalized = str(row[0] or "")
-            message = str(row[2] or row[3] or "")
-            level = str(row[1] or row[4] or "").upper()
-            if not normalized and message:
-                normalized = normalize_log_text(message)
-            if normalized and level:
-                ignored_signatures.add((normalized, level))
-        anomalies = []
-        impacts = []
-        recs = []
-        for fp, g in groups.items():
-            is_ignored = fp in ignored or (
-                g["normalized_message"],
-                g["log_level"],
-            ) in ignored_signatures
             cat, sub = classify(g["message"], g["stacktrace"])
             known = g["pattern_status"] in {"known_exact", "known_similar"}
             cur.execute(
@@ -659,7 +913,7 @@ def run_detection_pipeline(
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    fp,
+                    g["fingerprint"],
                     cat,
                     sub,
                     int(known),
@@ -670,6 +924,48 @@ def run_detection_pipeline(
                     g["similarity_score"],
                 ),
             )
+        if rows:
+            _save_processing_state(conn, service_name, max_rowid, max_created)
+
+        all_groups = _load_fingerprint_groups(conn, service_name)
+        ignored = {
+            r[0]
+            for r in cur.execute(
+                "SELECT fingerprint FROM exception_registry"
+            ).fetchall()
+        }
+        ignored_signatures = set()
+        for row in cur.execute("""
+            SELECT
+                er.normalized_message,
+                er.log_level,
+                er.message,
+                fp.message,
+                fp.log_level
+            FROM exception_registry er
+            LEFT JOIN fingerprints fp ON fp.fingerprint = er.fingerprint
+            """).fetchall():
+            normalized = str(row[0] or "")
+            message = str(row[2] or row[3] or "")
+            level = str(row[1] or row[4] or "").upper()
+            if not normalized and message:
+                normalized = normalize_log_text(message)
+            if normalized and level:
+                ignored_signatures.add((normalized, level))
+        anomalies = []
+        impacts = []
+        recs = []
+        for fp, g in all_groups.items():
+            is_ignored = (
+                fp in ignored
+                or (
+                    g["normalized_message"],
+                    g["log_level"],
+                )
+                in ignored_signatures
+            )
+            cat, sub = classify(g["message"], g["stacktrace"])
+            known = g["pattern_status"] in {"known_exact", "known_similar"}
             baseline = max(
                 1,
                 math.ceil(
@@ -677,30 +973,37 @@ def run_detection_pipeline(
                 ),
             )
             spike_ratio = round((g["occurrence_count"] / baseline) * 100, 1)
-            anomaly = g["pattern_status"] == "new_pattern" or spike_ratio >= 200
+            metric = _metric_baseline(
+                conn, service_name=g["service_name"], fingerprint=fp
+            )
+            anomaly, anomaly_type, severity = _anomaly_type_for(
+                group=g, known=known, spike_ratio=spike_ratio, metric=metric
+            )
             if is_ignored:
                 anomaly = False
-            severity = "HIGH" if spike_ratio >= 200 or not known else "LOW"
+                anomaly_type = "IGNORED"
+                severity = "NONE"
             cur.execute(
                 "REPLACE INTO anomaly_results VALUES (?,?,?,?,?,CURRENT_TIMESTAMP)",
                 (
                     fp,
                     int(anomaly),
                     spike_ratio if anomaly else 0,
-                    severity if anomaly else "NONE",
-                    "NEW_ERROR" if not known else "SPIKE",
+                    severity,
+                    anomaly_type,
                 ),
             )
             if anomaly:
-                anomalies.append(
-                    {
-                        "system": g["service_name"],
-                        "severity": severity,
-                        "pattern": fp,
-                        "message": g["message"],
-                        "spike_ratio": spike_ratio,
-                    }
-                )
+                anomaly_item = {
+                    "system": g["service_name"],
+                    "severity": severity,
+                    "pattern": fp,
+                    "message": g["message"],
+                    "spike_ratio": spike_ratio,
+                    "anomaly_type": anomaly_type,
+                    "metric": metric,
+                }
+                anomalies.append(anomaly_item)
             score = min(
                 100,
                 LEVEL_SCORE.get(g["log_level"], 5)
@@ -737,24 +1040,35 @@ def run_detection_pipeline(
             )
             recs.append(r)
         conn.commit()
-        total_logs = len(rows)
+        total_logs = int(signature_count)
         exception_count = cur.execute(
             "SELECT COUNT(*) FROM exception_registry"
         ).fetchone()[0]
     visible_groups = []
     ignored_fingerprints = set(ignored)
-    for fp, group in groups.items():
-        if fp in ignored or (
-            group["normalized_message"],
-            group["log_level"],
-        ) in ignored_signatures:
+    for fp, group in all_groups.items():
+        if (
+            fp in ignored
+            or (
+                group["normalized_message"],
+                group["log_level"],
+            )
+            in ignored_signatures
+        ):
             ignored_fingerprints.add(fp)
             continue
         visible_groups.append(group)
     visible_impacts = [
-        impact for impact in impacts if impact["fingerprint"] not in ignored_fingerprints
+        impact
+        for impact in impacts
+        if impact["fingerprint"] not in ignored_fingerprints
     ]
-    visible_recs = [rec for rec in recs if rec["fingerprint"] not in ignored_fingerprints]
+    visible_recs = [
+        rec for rec in recs if rec["fingerprint"] not in ignored_fingerprints
+    ]
+    anomalies = [
+        item for item in anomalies if item["pattern"] not in ignored_fingerprints
+    ]
     known_count = sum(
         1
         for group in visible_groups
@@ -781,6 +1095,7 @@ def run_detection_pipeline(
         "recommendation": top_rec,
         "summary": {
             "total_logs": total_logs,
+            "processed_new_logs": len(rows),
             "total_fingerprints": len(visible_groups),
             "known_patterns": known_count,
             "new_patterns": new_count,
@@ -788,36 +1103,11 @@ def run_detection_pipeline(
             "exception_registered_count": exception_count,
             "risk_score": top_impact["risk_score"],
             "risk_level": top_impact["risk_level"],
-            "detection_status": "Detected" if top_impact["detected"] else "Normal",
+            "detection_status": "Detected" if anomalies else "Normal",
         },
     }
     _PIPELINE_CACHE[cache_key] = copy.deepcopy(result)
     return result
-
-
-
-def _json_list(items: list[str]) -> str:
-    return json.dumps(items, ensure_ascii=False)
-
-
-def _json_dict(item: dict[str, Any]) -> str:
-    return json.dumps(item, ensure_ascii=False, sort_keys=True)
-
-
-def _load_json_list(raw: str) -> list[str]:
-    try:
-        value = json.loads(raw or "[]")
-    except json.JSONDecodeError:
-        return []
-    return [str(item) for item in value] if isinstance(value, list) else []
-
-
-def _load_json_dict(raw: str) -> dict[str, Any]:
-    try:
-        value = json.loads(raw or "{}")
-    except json.JSONDecodeError:
-        return {}
-    return value if isinstance(value, dict) else {}
 
 
 def _case_card_context(conn: sqlite3.Connection, fingerprint: str) -> dict[str, Any]:
@@ -900,7 +1190,9 @@ def build_rag_case_card(
     stacktrace = str(context.get("stacktrace") or "")
     occurrence_count = int(context.get("occurrence_count") or 0)
     title = f"{service_name} {sub_category} case ({fingerprint})"
-    summary = f"{service_name}에서 {sub_category} 패턴이 {occurrence_count}회 관측되었습니다."
+    summary = (
+        f"{service_name}에서 {sub_category} 패턴이 {occurrence_count}회 관측되었습니다."
+    )
     symptoms = [
         f"{service_name} 서비스에서 {log_level} 로그가 발생했습니다.",
         f"동일 fingerprint({fingerprint})가 {occurrence_count}회 관측되었습니다.",
@@ -987,6 +1279,7 @@ def build_rag_case_card(
         "metadata": metadata,
         "rag_document": rag_document,
     }
+
 
 def fetch_knowledge_cards(
     *, fingerprint: str | None = None, limit: int = 20

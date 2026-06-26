@@ -15,13 +15,13 @@ from app.db.scenario_store import (
 
 def test_fingerprint_normalizes_json_payload_values() -> None:
     first = (
-        '.DevOpsController - IssueUpdate Success  = '
+        ".DevOpsController - IssueUpdate Success  = "
         '{"WorkID":"b3a40081-8902-4483-b52c-99da52aae493",'
         '"DevID":"09ae79d3-1def-436a-bbee-4a3854da6cbb",'
         '"DevOpsStatus":"DO000004"}'
     )
     second = (
-        'DevOpsController - IssueUpdate Success  = '
+        "DevOpsController - IssueUpdate Success  = "
         '{"WorkID":"c02f6606-db0e-4964-9267-02e65d9324db",'
         '"DevID":"5e57ac6d-9c7d-4710-a7bd-444d6b16335f",'
         '"DevOpsStatus":"DO000001"}'
@@ -63,14 +63,8 @@ def test_fingerprint_normalizes_plain_text_request_values() -> None:
 
 
 def test_fingerprint_normalizes_korean_user_suffix_numbers() -> None:
-    first = (
-        "테스트3님 권한이 없습니다. "
-        "WorkID=552f54af-69e5-4f23-8402-6e9252bdad95"
-    )
-    second = (
-        "테스트7님 권한이 없습니다. "
-        "WorkID=ece6d12a-ad85-459c-98e2-27760fc13c0d"
-    )
+    first = "테스트3님 권한이 없습니다. " "WorkID=552f54af-69e5-4f23-8402-6e9252bdad95"
+    second = "테스트7님 권한이 없습니다. " "WorkID=ece6d12a-ad85-459c-98e2-27760fc13c0d"
 
     assert normalize_log_text(first) == normalize_log_text(second)
     assert fingerprint_id("auth-service", "WARN", first, "") == fingerprint_id(
@@ -111,12 +105,12 @@ def test_fingerprint_preserves_domain_names_while_normalizing_runtime_values() -
 
 def test_fingerprint_normalizes_urls_paths_and_quoted_runtime_values() -> None:
     first = (
-        'AbsoluteUri : http://test.com/test_appl/Main/View/123?token=abc '
+        "AbsoluteUri : http://test.com/test_appl/Main/View/123?token=abc "
         'Cannot convert "S970" into NUM '
         r"파일 E:\Test\30_Component\Test.Appl.Biz\LineBiz.cs:줄 94"
     )
     second = (
-        'AbsoluteUri : http://test.com/test_appl/Main/View/456?token=def '
+        "AbsoluteUri : http://test.com/test_appl/Main/View/456?token=def "
         'Cannot convert "S971" into NUM '
         r"파일 E:\Test\30_Component\Test.Appl.Biz\LineBiz.cs:줄 211"
     )
@@ -177,14 +171,174 @@ def test_detection_pipeline_groups_similar_log_messages(
     assert result["fingerprints"][0]["occurrence_count"] == 2
 
 
+def test_detection_pipeline_processes_only_new_raw_logs_and_tracks_metrics(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db_path = tmp_path / "logs.db"
+    monkeypatch.setenv("SQLITE_PATH", str(db_path))
+
+    with sqlite3.connect(db_path) as conn:
+        ensure_schema(conn)
+        conn.execute(
+            """
+            INSERT INTO service_logs(service_name, level, message, stack_trace, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                "billing-service",
+                "ERROR",
+                "Payment failed orderId=100",
+                "",
+                "2026-06-16T10:00:00",
+            ),
+        )
+        conn.commit()
+
+    first = run_detection_pipeline("billing-service")
+    second = run_detection_pipeline("billing-service")
+
+    assert first["summary"]["processed_new_logs"] == 1
+    assert second["summary"]["processed_new_logs"] == 0
+    assert second["fingerprints"][0]["occurrence_count"] == 1
+
+    with sqlite3.connect(db_path) as conn:
+        processed_count = conn.execute(
+            "SELECT COUNT(*) FROM processed_log_offsets"
+        ).fetchone()[0]
+        metric_rows = conn.execute("""
+            SELECT bucket_size, total_count, error_count
+            FROM pattern_time_series_metrics
+            ORDER BY bucket_size
+            """).fetchall()
+
+    assert processed_count == 1
+    assert metric_rows == [("day", 1, 1), ("hour", 1, 1)]
+
+
+def test_detection_pipeline_reports_spike_and_drop_anomaly_types(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db_path = tmp_path / "logs.db"
+    monkeypatch.setenv("SQLITE_PATH", str(db_path))
+    message = "Queue latency high queueId=42"
+
+    with sqlite3.connect(db_path) as conn:
+        ensure_schema(conn)
+        fp = fingerprint_id("queue-service", "ERROR", message, "")
+        conn.execute(
+            """
+            INSERT INTO fingerprints(
+                fingerprint, occurrence_count, log_level, message, stacktrace,
+                service_name, first_seen, last_seen
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                fp,
+                20,
+                "ERROR",
+                message,
+                "",
+                "queue-service",
+                "2026-06-14T00:00:00",
+                "2026-06-15T23:59:00",
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO log_analysis_results(
+                fingerprint, category, sub_category, is_known_pattern, is_new_pattern,
+                pattern_status, match_source, similar_fingerprint, similarity_score
+            ) VALUES (?, 'Application', 'Queue', 0, 0, 'observed_existing', 'fingerprints', '', NULL)
+            """,
+            (fp,),
+        )
+        conn.executemany(
+            """
+            INSERT INTO pattern_time_series_metrics(
+                service_name, fingerprint, bucket_start, bucket_size,
+                total_count, error_count, warn_count, info_count, first_seen, last_seen
+            ) VALUES (?, ?, ?, 'day', ?, ?, 0, 0, ?, ?)
+            """,
+            [
+                (
+                    "queue-service",
+                    fp,
+                    "2026-06-14",
+                    10,
+                    10,
+                    "2026-06-14T00:00:00",
+                    "2026-06-14T23:59:00",
+                ),
+                (
+                    "queue-service",
+                    fp,
+                    "2026-06-15",
+                    10,
+                    10,
+                    "2026-06-15T00:00:00",
+                    "2026-06-15T23:59:00",
+                ),
+            ],
+        )
+        conn.executemany(
+            """
+            INSERT INTO service_logs(service_name, level, message, stack_trace, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    "queue-service",
+                    "ERROR",
+                    f"Queue latency high queueId={idx}",
+                    "",
+                    f"2026-06-16T10:{idx:02d}:00",
+                )
+                for idx in range(20)
+            ],
+        )
+        conn.commit()
+
+    spike = run_detection_pipeline("queue-service")
+
+    assert any(item["anomaly_type"] == "SPIKE" for item in spike["anomalies"])
+
+    with sqlite3.connect(db_path) as conn:
+        conn.executemany(
+            """
+            INSERT INTO service_logs(service_name, level, message, stack_trace, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    "queue-service",
+                    "ERROR",
+                    "Queue latency high queueId=900",
+                    "",
+                    "2026-06-17T10:00:00",
+                ),
+                (
+                    "queue-service",
+                    "ERROR",
+                    "Queue latency high queueId=901",
+                    "",
+                    "2026-06-17T10:01:00",
+                ),
+            ],
+        )
+        conn.commit()
+
+    drop = run_detection_pipeline("queue-service")
+
+    assert any(item["anomaly_type"] == "DROP" for item in drop["anomalies"])
+
+
 def test_detection_pipeline_hides_exception_fingerprints_from_clusters(
     tmp_path: Path, monkeypatch
 ) -> None:
     db_path = tmp_path / "logs.db"
     monkeypatch.setenv("SQLITE_PATH", str(db_path))
     ignored_message = (
-        "테스트3님 권한이 없습니다. "
-        "WorkID=552f54af-69e5-4f23-8402-6e9252bdad95"
+        "테스트3님 권한이 없습니다. " "WorkID=552f54af-69e5-4f23-8402-6e9252bdad95"
     )
 
     with sqlite3.connect(db_path) as conn:
@@ -351,10 +505,16 @@ def test_registered_items_include_message_and_level(
     assert cards[0]["message"] == message
     assert cards[0]["log_level"] == "WARN"
     assert cards[0]["title"].startswith("auth-service")
-    assert cards[0]["resolution_method"] == "Granted the missing role and redeployed the service."
+    assert (
+        cards[0]["resolution_method"]
+        == "Granted the missing role and redeployed the service."
+    )
     assert "[Case Card]" in cards[0]["rag_document"]
     assert "[Resolution Method]" in cards[0]["rag_document"]
-    assert "Granted the missing role and redeployed the service." in cards[0]["rag_document"]
+    assert (
+        "Granted the missing role and redeployed the service."
+        in cards[0]["rag_document"]
+    )
     assert cards[0]["metadata"]["schema_version"] == "rag-case-card-v1"
     assert cards[0]["embedding_status"] == "embedded"
     assert saved_documents[0]["doc_id"].startswith("knowledge-card:KC-")
