@@ -28,6 +28,19 @@ npm run dev
 
 이 백엔드는 SC-001~SC-007 흐름을 SQLite 기반 데모 데이터로 실행할 수 있습니다.
 
+### ChromaDB OpenAI 임베딩 설정
+
+ChromaDB v2 임베딩은 일반 LLM 호출용 `OPENAI_API_KEY`가 아니라 별도 키인
+`OPENAI_EMBEDDING_API_KEY`를 사용합니다. 키가 없으면 기존 ChromaDB 저장/검색 경로는
+유지되고, OpenAI 임베딩 기반 v2 collection 저장은 건너뜁니다.
+
+```bash
+OPENAI_EMBEDDING_API_KEY=...
+OPENAI_EMBEDDING_MODEL=text-embedding-3-large
+OPENAI_PATTERN_EMBEDDING_DIMENSIONS=1024
+OPENAI_CASE_CARD_EMBEDDING_DIMENSIONS=1536
+```
+
 ### 테스트 데이터 생성
 
 ```bash
