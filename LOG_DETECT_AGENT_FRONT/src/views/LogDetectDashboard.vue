@@ -26,20 +26,15 @@
           </p>
           <p>Last run: {{ store.lastExecutionAt ?? '-' }}</p>
         </div>
-        <button
-          class="rounded border px-3 py-2 text-xs"
-          :class="
-            saveToChromaDb
-              ? 'border-emerald-600 bg-emerald-600 text-white'
-              : 'border-slate-300 bg-white text-slate-700 hover:bg-slate-50'
-          "
-          @click="saveToChromaDb = !saveToChromaDb"
-        >
-          {{ saveToChromaDb ? 'ChromaDB 저장: ON' : 'ChromaDB 저장: OFF' }}
-        </button>
+        <input
+          v-model="analysisDate"
+          type="date"
+          class="rounded border border-slate-300 bg-white px-3 py-2 text-sm"
+          aria-label="Analysis date"
+        />
         <button
           class="rounded bg-blue-600 px-3 py-2 text-sm text-white disabled:cursor-not-allowed disabled:bg-slate-300"
-          :disabled="store.loading || !serviceName.trim()"
+          :disabled="store.loading || !serviceName.trim() || !analysisDate"
           @click="handleRunAnalysis"
         >
           Re-run analysis
@@ -47,7 +42,7 @@
       </div>
     </template>
 
-    <section class="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+    <section class="grid gap-4 lg:grid-cols-2">
       <div class="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
         <h2
           class="mb-3 text-sm font-semibold uppercase tracking-wide text-slate-500"
@@ -79,60 +74,17 @@
         </div>
       </div>
 
-      <div
-        class="rounded-lg border border-slate-200 bg-white p-4 text-center shadow-sm"
-      >
-        <h2
-          class="mb-3 text-sm font-semibold uppercase tracking-wide text-slate-500"
-        >
-          Risk Summary
-        </h2>
-        <p class="text-sm text-slate-500">Impact Score</p>
-        <p class="text-5xl font-bold text-slate-900">
-          {{ store.overview.riskScore }}
-        </p>
-        <p class="mt-1 text-lg font-semibold text-red-600">
-          {{ store.overview.riskLevel }}
-        </p>
-        <p class="mt-4 text-sm text-slate-600">
-          Detection Status:
-          <span class="font-semibold">{{
-            store.overview.detectionStatus
-          }}</span>
-        </p>
-      </div>
-
-      <div class="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
-        <h2
-          class="mb-3 text-sm font-semibold uppercase tracking-wide text-slate-500"
-        >
-          Recommendation Summary
-        </h2>
-        <dl class="space-y-3 text-sm">
-          <div>
-            <dt class="font-semibold text-slate-600">Cause</dt>
-            <dd>{{ store.recommendationSummary?.cause ?? '-' }}</dd>
-          </div>
-          <div>
-            <dt class="font-semibold text-slate-600">Recommendation</dt>
-            <dd>{{ store.recommendationSummary?.recommendation ?? '-' }}</dd>
-          </div>
-          <div>
-            <dt class="font-semibold text-slate-600">Confidence</dt>
-            <dd>{{ store.recommendationSummary?.confidence ?? '-' }}</dd>
-          </div>
-        </dl>
-      </div>
+      <AnomalyTimelineChart
+        v-if="store.state"
+        :anomalies="store.state.evidence.anomalies"
+        :logs="store.state.evidence.normalized_logs"
+      />
     </section>
 
     <LoadingSpinner v-if="store.loading" label="Running multi-agent analysis" />
     <ErrorState v-else-if="store.error" :message="store.error" />
 
     <template v-if="store.state">
-      <AnomalyTimelineChart
-        :anomalies="store.state.evidence.anomalies"
-        :logs="store.state.evidence.normalized_logs"
-      />
       <PatternClusterTable
         :clusters="store.state.evidence.clusters"
         @save-known-pattern="handleSaveKnownPattern"
@@ -251,7 +203,7 @@ import type { Cluster } from '@/types/agentTypes'
 
 const store = useLogDetectStore()
 const serviceName = ref('')
-const saveToChromaDb = ref(false)
+const analysisDate = ref(new Date().toISOString().slice(0, 10))
 const showServiceLayer = ref(false)
 const canModerateRecommendation = computed(
   () =>
@@ -272,8 +224,8 @@ function handleSelectService(service: string) {
 
 function handleRunAnalysis() {
   const trimmed = serviceName.value.trim()
-  if (!trimmed) return
-  void store.runAnalysis(trimmed, saveToChromaDb.value)
+  if (!trimmed || !analysisDate.value) return
+  void store.runAnalysis(trimmed, analysisDate.value)
 }
 
 function handleRequestRecommendation(cluster: Cluster) {

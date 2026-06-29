@@ -1,12 +1,16 @@
 import os
 import sqlite3
+import sys
 from pathlib import Path
 
 import pandas as pd
 from dotenv import load_dotenv
 
-
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from app.db.scenario_store import ensure_schema  # noqa: E402
 
 
 def get_db_path() -> str:
@@ -79,6 +83,7 @@ def import_excel_to_sqlite(excel_file: str) -> None:
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
 
     with sqlite3.connect(db_path) as conn:
+        ensure_schema(conn)
         cur = conn.cursor()
         cur.executemany(
             """
@@ -100,4 +105,4 @@ def import_excel_to_sqlite(excel_file: str) -> None:
 
 
 if __name__ == "__main__":
-    import_excel_to_sqlite("./log_raw_edit.xlsx")
+    import_excel_to_sqlite("./log_raw_edit_daily3.xlsx")

@@ -34,11 +34,17 @@ class BackendClient:
         payload = response.json()
         return payload.get("services", [])
 
-    def analyze(self, service_name: str, save_to_chromadb: bool) -> dict[str, Any]:
+    def analyze(
+        self,
+        service_name: str,
+        save_to_chromadb: bool = True,
+        analysis_date: str | None = None,
+    ) -> dict[str, Any]:
         payload = {
             "service_name": service_name,
             "goal": f"{service_name} service log anomaly investigation",
             "save_to_chromadb": save_to_chromadb,
+            "analysis_date": analysis_date,
         }
         response = requests.post(self._url("/analyze"), json=payload, timeout=self.timeout)
         response.raise_for_status()

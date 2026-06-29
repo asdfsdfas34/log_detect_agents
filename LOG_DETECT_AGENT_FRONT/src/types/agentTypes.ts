@@ -14,6 +14,7 @@ export interface AnalyzeRequest {
   goal?: string
   scope?: Scope
   save_to_chromadb?: boolean
+  analysis_date?: string
 }
 
 export interface FingerprintRecommendationRequest {

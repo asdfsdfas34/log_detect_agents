@@ -81,7 +81,7 @@ class SharedState(TypedDict):
 
 
 def create_initial_state(
-    goal: str, scope: Scope, request_id: str, save_to_chromadb: bool = False
+    goal: str, scope: Scope, request_id: str, save_to_chromadb: bool = True
 ) -> SharedState:
     """Build a fully-initialized shared state."""
 

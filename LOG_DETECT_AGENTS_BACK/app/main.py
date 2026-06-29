@@ -1,5 +1,7 @@
 """FastAPI entrypoint for 장애 예방 AI backend."""
 
+import logging
+from datetime import date
 from uuid import uuid4
 
 from fastapi import FastAPI
@@ -9,7 +11,10 @@ from pydantic import BaseModel, Field
 from app.agents.knowledge_base_rag import KnowledgeBaseRAGAgent
 from app.agents.recommendation import RecommendationAgent
 from app.config import settings
-from app.db.chroma_store import find_similar_pattern_clusters, save_pattern_cluster
+from app.db.chroma_store import (
+    find_similar_pattern_clusters_batch,
+    save_pattern_clusters,
+)
 from app.db.scenario_store import (
     approve_result,
     fetch_exception_registry,
@@ -29,6 +34,25 @@ from app.graph.engine import build_graph
 from app.langsmith_tracing import configure_langsmith, fetch_langsmith_runs
 from app.state import Scope, SharedState, create_initial_state
 
+
+def configure_logging() -> None:
+    """Apply LOG_LEVEL to app loggers used by background analysis work."""
+
+    level_name = settings.log_level.upper()
+    level = getattr(logging, level_name, logging.INFO)
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+    )
+    logging.getLogger("app").setLevel(level)
+    logging.getLogger("app.db.chroma_store").setLevel(level)
+    logging.getLogger("uvicorn.error").setLevel(level)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("openai").setLevel(logging.WARNING)
+
+
+configure_logging()
 configure_langsmith()
 
 app = FastAPI(title="Failure Prevention AI Backend", version="0.2.0")
@@ -55,7 +79,10 @@ class AnalyzeRequest(BaseModel):
         default=None, description="Optional detailed analysis scope"
     )
     save_to_chromadb: bool = Field(
-        default=False, description="Persist final answer to ChromaDB"
+        default=True, description="Persist final answer to ChromaDB"
+    )
+    analysis_date: date | None = Field(
+        default=None, description="Only analyze service_logs from this date"
     )
 
 
@@ -166,6 +193,8 @@ def _enrich_pattern_clusters(
     *, service_name: str, fingerprints: list[dict], n_results: int = 5
 ) -> list[dict]:
     enriched: list[dict] = []
+    pattern_documents: list[dict] = []
+    pattern_contexts: list[dict] = []
     for item in fingerprints:
         fingerprint = str(item.get("fingerprint", ""))
         message = str(item.get("message", ""))
@@ -178,25 +207,46 @@ def _enrich_pattern_clusters(
             log_level=log_level,
             stacktrace=stacktrace,
         )
-        save_pattern_cluster(
-            doc_id=f"{service_name}:{fingerprint}",
-            text=context,
-            metadata={
-                "service_name": service_name,
-                "fingerprint": fingerprint,
-                "log_level": log_level,
-                "normalized_message": normalize_log_text(message),
-                "occurrence_count": int(item.get("occurrence_count") or 0),
-                "pattern_status": str(item.get("pattern_status", "")),
-            },
+        pattern_documents.append(
+            {
+                "doc_id": f"{service_name}:{fingerprint}",
+                "text": context,
+                "metadata": {
+                    "service_name": service_name,
+                    "fingerprint": fingerprint,
+                    "log_level": log_level,
+                    "normalized_message": normalize_log_text(message),
+                    "occurrence_count": int(item.get("occurrence_count") or 0),
+                    "pattern_status": str(item.get("pattern_status", "")),
+                },
+            }
+        )
+        pattern_contexts.append(
+            {
+                "item": item,
+                "doc_id": f"{service_name}:{fingerprint}",
+                "query": context,
+            }
+        )
+    save_pattern_clusters(pattern_documents)
+    similar_cluster_groups = find_similar_pattern_clusters_batch(
+        queries=[str(item["query"]) for item in pattern_contexts],
+        n_results=n_results + 1,
+    )
+    for index, pattern_context in enumerate(pattern_contexts):
+        item = pattern_context["item"]
+        similar_group = (
+            similar_cluster_groups[index] if index < len(similar_cluster_groups) else []
         )
         similar_clusters = [
             match
-            for match in find_similar_pattern_clusters(
-                query=context, n_results=n_results + 1
-            )
-            if match.get("id") != f"{service_name}:{fingerprint}"
+            for match in similar_group
+            if match.get("id") != pattern_context["doc_id"]
         ][:n_results]
+        fingerprint = str(item.get("fingerprint", ""))
+        message = str(item.get("message", ""))
+        log_level = str(item.get("log_level", ""))
+        stacktrace = str(item.get("stacktrace", ""))
         semantic_similarity = (
             round(float(similar_clusters[0]["similarity"]) * 100)
             if similar_clusters and similar_clusters[0].get("similarity") is not None
@@ -296,12 +346,19 @@ def list_langsmith_runs(limit: int = 20) -> LangSmithRunsResponse:
 @app.post("/analyze", response_model=AnalyzeResponse)
 def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
     graph = build_graph()
+    time_range = {"from": "", "to": ""}
+    if req.analysis_date is not None:
+        time_range = {
+            "from": req.analysis_date.isoformat(),
+            "to": req.analysis_date.isoformat(),
+        }
     effective_scope: Scope = req.scope or {
         "systems": [req.service_name],
-        "time_range": {"from": "", "to": ""},
+        "time_range": time_range,
         "filters": {},
     }
     effective_scope["systems"] = [req.service_name]
+    effective_scope["time_range"] = time_range
 
     initial_state = create_initial_state(
         goal=req.goal,
@@ -311,12 +368,17 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
     )
     result = graph.invoke(initial_state)
 
-    # Run deterministic scenario analysis before the final LLM recommendation so
-    # the expensive answer generation uses the freshest fingerprint evidence.
+    # Run deterministic scenario analysis for dashboard evidence. Final
+    # recommendations are generated only through the explicit recommendation API.
     try:
-        scenario = run_detection_pipeline(
-            req.service_name, days_back=settings.log_lookback_days
-        )
+        if req.analysis_date is not None:
+            scenario = run_detection_pipeline(
+                req.service_name, analysis_date=req.analysis_date.isoformat()
+            )
+        else:
+            scenario = run_detection_pipeline(
+                req.service_name, days_back=settings.log_lookback_days
+            )
     except TypeError:
         scenario = run_detection_pipeline(req.service_name)
     except ValueError:
@@ -346,7 +408,11 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
         result["assessment"]["rationale"] = [
             f"Risk Level: {scenario['summary']['risk_level']}",
             f"Detection Status: {scenario['summary']['detection_status']}",
-            f"Recent window: {settings.log_lookback_days} days",
+            (
+                f"Analysis date: {req.analysis_date.isoformat()}"
+                if req.analysis_date is not None
+                else f"Recent window: {settings.log_lookback_days} days"
+            ),
         ]
         result["evidence"]["known_pattern_matches"] = scenario.get(
             "recommendations", []
@@ -362,15 +428,26 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
             }
         ]
 
-    result = KnowledgeBaseRAGAgent().run(result)
-    if not result["final"].get("generated_answer"):
-        result = RecommendationAgent().run(result)
-    else:
-        result["final"].setdefault("evidence_bundle", {})
-        result["final"]["evidence_bundle"]["scenario_detection"] = {
+    result["final"].setdefault("evidence_bundle", {})
+    if result["final"]["evidence_bundle"] is None:
+        result["final"]["evidence_bundle"] = {}
+    result["final"]["evidence_bundle"].update(
+        {
             "summary": scenario.get("summary", {}),
             "recommendation": scenario.get("recommendation", {}),
+            "scenario_detection": {
+                "summary": scenario.get("summary", {}),
+                "recommendation": scenario.get("recommendation", {}),
+            },
+            "known_pattern_summary": {
+                "total_matches": len(result["evidence"].get("known_pattern_matches", [])),
+                "suppressed": len(result["evidence"].get("suppressed_logs", [])),
+            },
         }
+    )
+    result["decisions"]["skipped_agents"].append("RecommendationAgent")
+
+    result = KnowledgeBaseRAGAgent().run(result)
     result = KnowledgeBaseRAGAgent().persist_final_answer(result)
     return AnalyzeResponse(result=result)
 

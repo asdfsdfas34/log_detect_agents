@@ -103,6 +103,52 @@ def test_fingerprint_preserves_domain_names_while_normalizing_runtime_values() -
     assert "functionName: select_CurrentLineStepUserID" in normalized
 
 
+def test_detection_pipeline_filters_service_logs_by_analysis_date(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db_path = tmp_path / "logs.db"
+    monkeypatch.setenv("SQLITE_PATH", str(db_path))
+
+    with sqlite3.connect(db_path) as conn:
+        ensure_schema(conn)
+        conn.executemany(
+            """
+            INSERT INTO service_logs(service_name, level, message, stack_trace, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    "payment-api",
+                    "ERROR",
+                    "target day failure",
+                    "",
+                    "2026-06-16T10:00:00",
+                ),
+                (
+                    "payment-api",
+                    "ERROR",
+                    "other day failure",
+                    "",
+                    "2026-06-17T10:00:00",
+                ),
+                (
+                    "auth-service",
+                    "ERROR",
+                    "other service failure",
+                    "",
+                    "2026-06-16 10:00:00",
+                ),
+            ],
+        )
+        conn.commit()
+
+    result = run_detection_pipeline("payment-api", analysis_date="2026-06-16")
+
+    assert result["summary"]["total_logs"] == 1
+    assert result["summary"]["processed_new_logs"] == 1
+    assert result["fingerprints"][0]["message"] == "target day failure"
+
+
 def test_fingerprint_normalizes_urls_paths_and_quoted_runtime_values() -> None:
     first = (
         "AbsoluteUri : http://test.com/test_appl/Main/View/123?token=abc "

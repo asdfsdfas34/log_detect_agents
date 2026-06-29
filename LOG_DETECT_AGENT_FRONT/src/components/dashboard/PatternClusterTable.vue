@@ -8,8 +8,30 @@
         </p>
       </div>
       <div class="text-xs text-slate-500">
-        {{ sortedClusters.length }} patterns
+        {{ activeClusters.length }} patterns
       </div>
+    </div>
+
+    <div class="mb-4 flex flex-wrap gap-2 border-b border-slate-200">
+      <button
+        v-for="tab in tabs"
+        :key="tab.key"
+        class="-mb-px border-b-2 px-3 py-2 text-sm font-semibold"
+        type="button"
+        :class="
+          activeTab === tab.key
+            ? 'border-blue-600 text-blue-700'
+            : 'border-transparent text-slate-500 hover:text-slate-800'
+        "
+        @click="activeTab = tab.key"
+      >
+        {{ tab.label }}
+        <span
+          class="ml-1 rounded bg-slate-100 px-1.5 py-0.5 text-xs text-slate-600"
+        >
+          {{ tab.count }}
+        </span>
+      </button>
     </div>
 
     <div class="overflow-x-auto">
@@ -55,7 +77,17 @@
               </span>
             </td>
             <td class="py-2">
+              <button
+                v-if="item.pattern_status === 'known_similar'"
+                class="rounded px-2 py-1 text-xs font-semibold hover:ring-2 hover:ring-cyan-200"
+                :class="statusClass(item.pattern_status)"
+                type="button"
+                @click="selectedSimilarCluster = item"
+              >
+                {{ statusLabel(item.pattern_status) }}
+              </button>
               <span
+                v-else
                 class="rounded px-2 py-1 text-xs font-semibold"
                 :class="statusClass(item.pattern_status)"
               >
@@ -94,7 +126,10 @@
             </td>
           </tr>
           <tr v-if="pagedClusters.length === 0">
-            <td class="border-t py-8 text-center text-sm text-slate-500" colspan="7">
+            <td
+              class="border-t py-8 text-center text-sm text-slate-500"
+              colspan="7"
+            >
               No pattern clusters found.
             </td>
           </tr>
@@ -148,7 +183,9 @@
       class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
       @click.self="selectedCluster = null"
     >
-      <div class="max-h-[85vh] w-full max-w-4xl overflow-hidden rounded-lg bg-white shadow-xl">
+      <div
+        class="max-h-[85vh] w-full max-w-4xl overflow-hidden rounded-lg bg-white shadow-xl"
+      >
         <div class="flex items-center justify-between border-b px-4 py-3">
           <div>
             <h4 class="text-base font-semibold text-slate-900">
@@ -170,14 +207,106 @@
             <h5 class="mb-2 text-sm font-semibold text-slate-700">
               Error Message
             </h5>
-            <pre class="whitespace-pre-wrap rounded border border-slate-200 bg-slate-50 p-3 text-sm text-slate-800">{{ selectedCluster.message || '-' }}</pre>
+            <pre
+              class="whitespace-pre-wrap rounded border border-slate-200 bg-slate-50 p-3 text-sm text-slate-800"
+              >{{ selectedCluster.message || '-' }}</pre
+            >
           </section>
 
           <section>
             <h5 class="mb-2 text-sm font-semibold text-slate-700">
               Stack Trace
             </h5>
-            <pre class="whitespace-pre-wrap rounded border border-slate-200 bg-slate-950 p-3 text-xs text-slate-100">{{ selectedCluster.stacktrace || '-' }}</pre>
+            <pre
+              class="whitespace-pre-wrap rounded border border-slate-200 bg-slate-950 p-3 text-xs text-slate-100"
+              >{{ selectedCluster.stacktrace || '-' }}</pre
+            >
+          </section>
+        </div>
+      </div>
+    </div>
+
+    <div
+      v-if="selectedSimilarCluster"
+      class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+      @click.self="selectedSimilarCluster = null"
+    >
+      <div
+        class="max-h-[85vh] w-full max-w-5xl overflow-hidden rounded-lg bg-white shadow-xl"
+      >
+        <div class="flex items-center justify-between border-b px-4 py-3">
+          <div>
+            <h4 class="text-base font-semibold text-slate-900">
+              {{ selectedSimilarCluster.cluster }}
+            </h4>
+            <p class="text-xs text-slate-500">Similar pattern matches</p>
+          </div>
+          <button
+            class="rounded px-2 py-1 text-sm text-slate-500 hover:bg-slate-100"
+            type="button"
+            @click="selectedSimilarCluster = null"
+          >
+            Close
+          </button>
+        </div>
+
+        <div class="max-h-[calc(85vh-64px)] space-y-4 overflow-y-auto p-4">
+          <section>
+            <h5 class="mb-2 text-sm font-semibold text-slate-700">
+              Current Pattern
+            </h5>
+            <pre
+              class="max-h-36 overflow-y-auto whitespace-pre-wrap rounded border border-slate-200 bg-slate-50 p-3 text-sm text-slate-800"
+              >{{ selectedSimilarCluster.message || '-' }}</pre
+            >
+          </section>
+
+          <section>
+            <h5 class="mb-2 text-sm font-semibold text-slate-700">
+              Matched Patterns
+            </h5>
+            <div
+              v-if="selectedSimilarCluster.similar_clusters?.length"
+              class="space-y-3"
+            >
+              <article
+                v-for="(match, index) in selectedSimilarCluster.similar_clusters"
+                :key="similarMatchKey(match, index)"
+                class="rounded border border-slate-200 p-3"
+              >
+                <div class="mb-2 flex flex-wrap items-center justify-between gap-2">
+                  <div class="font-mono text-xs font-semibold text-slate-700">
+                    {{ similarMatchId(match) }}
+                  </div>
+                  <span
+                    class="rounded bg-cyan-100 px-2 py-1 text-xs font-semibold text-cyan-700"
+                  >
+                    {{ similarMatchPercent(match) }}%
+                  </span>
+                </div>
+                <dl class="grid gap-2 text-xs text-slate-600 md:grid-cols-3">
+                  <div>
+                    <dt class="font-semibold text-slate-500">Fingerprint</dt>
+                    <dd class="break-all">{{ similarMatchFingerprint(match) }}</dd>
+                  </div>
+                  <div>
+                    <dt class="font-semibold text-slate-500">Service</dt>
+                    <dd>{{ similarMatchMetadata(match, 'service_name') }}</dd>
+                  </div>
+                  <div>
+                    <dt class="font-semibold text-slate-500">Level</dt>
+                    <dd>{{ similarMatchMetadata(match, 'log_level') }}</dd>
+                  </div>
+                </dl>
+                <pre
+                  class="mt-3 max-h-44 overflow-y-auto whitespace-pre-wrap rounded bg-slate-50 p-3 text-xs text-slate-700"
+                  >{{ similarMatchDocument(match) }}</pre
+                >
+              </article>
+            </div>
+            <p v-else class="rounded border border-slate-200 p-4 text-sm text-slate-500">
+              No similar pattern details available.
+            </p>
           </section>
         </div>
       </div>
@@ -190,6 +319,7 @@ import { computed, ref, watch } from 'vue'
 import type { Cluster } from '@/types/agentTypes'
 
 const PAGE_SIZE = 10
+type PatternTab = 'similar' | 'new' | 'known' | 'observed' | 'anomaly'
 
 const props = defineProps<{ clusters: Cluster[] }>()
 const emit = defineEmits<{
@@ -199,18 +329,82 @@ const emit = defineEmits<{
 
 const currentPage = ref(1)
 const selectedCluster = ref<Cluster | null>(null)
+const selectedSimilarCluster = ref<Cluster | null>(null)
+const activeTab = ref<PatternTab>('similar')
 
 const sortedClusters = computed(() =>
   [...props.clusters].sort((a, b) => b.count - a.count)
 )
 
+const knownClusters = computed(() =>
+  sortedClusters.value.filter((cluster) => cluster.pattern_status === 'known_exact')
+)
+
+const similarClusters = computed(() =>
+  sortedClusters.value.filter(
+    (cluster) => cluster.pattern_status === 'known_similar'
+  )
+)
+
+const newClusters = computed(() =>
+  sortedClusters.value.filter(
+    (cluster) => cluster.pattern_status === 'new_pattern'
+  )
+)
+
+const observedClusters = computed(() =>
+  sortedClusters.value.filter(
+    (cluster) => cluster.pattern_status === 'observed_existing'
+  )
+)
+
+const anomalyClusters = computed(() =>
+  sortedClusters.value.filter((cluster) => cluster.log_level === 'ERROR')
+)
+
+const tabs = computed(() => [
+  {
+    key: 'similar' as const,
+    label: 'Similar Pattern',
+    count: similarClusters.value.length
+  },
+  {
+    key: 'known' as const,
+    label: 'Known Pattern',
+    count: knownClusters.value.length
+  },
+  {
+    key: 'new' as const,
+    label: 'New Pattern',
+    count: newClusters.value.length
+  },
+  {
+    key: 'observed' as const,
+    label: 'Observed Existing',
+    count: observedClusters.value.length
+  },
+  {
+    key: 'anomaly' as const,
+    label: 'Anomalies Detected',
+    count: anomalyClusters.value.length
+  }
+])
+
+const activeClusters = computed(() => {
+  if (activeTab.value === 'similar') return similarClusters.value
+  if (activeTab.value === 'new') return newClusters.value
+  if (activeTab.value === 'observed') return observedClusters.value
+  if (activeTab.value === 'anomaly') return anomalyClusters.value
+  return knownClusters.value
+})
+
 const pageCount = computed(() =>
-  Math.max(1, Math.ceil(sortedClusters.value.length / PAGE_SIZE))
+  Math.max(1, Math.ceil(activeClusters.value.length / PAGE_SIZE))
 )
 
 const pagedClusters = computed(() => {
   const start = (currentPage.value - 1) * PAGE_SIZE
-  return sortedClusters.value.slice(start, start + PAGE_SIZE)
+  return activeClusters.value.slice(start, start + PAGE_SIZE)
 })
 
 const visiblePages = computed(() => {
@@ -227,6 +421,10 @@ watch(
     currentPage.value = 1
   }
 )
+
+watch(activeTab, () => {
+  currentPage.value = 1
+})
 
 watch(pageCount, (count) => {
   if (currentPage.value > count) currentPage.value = count
@@ -260,5 +458,35 @@ function statusClass(status?: string): string {
   if (status === 'observed_existing') return 'bg-slate-100 text-slate-700'
   if (status === 'new_pattern') return 'bg-amber-100 text-amber-700'
   return 'bg-slate-100 text-slate-500'
+}
+
+function similarMatchKey(match: Record<string, unknown>, index: number): string {
+  return `${similarMatchId(match)}-${index}`
+}
+
+function similarMatchId(match: Record<string, unknown>): string {
+  return String(match.id ?? '-')
+}
+
+function similarMatchPercent(match: Record<string, unknown>): number {
+  const value = Number(match.similarity ?? 0)
+  return Math.round(value * 100)
+}
+
+function similarMatchMetadata(
+  match: Record<string, unknown>,
+  key: string
+): string {
+  const metadata = match.metadata as Record<string, unknown> | undefined
+  return String(metadata?.[key] ?? '-')
+}
+
+function similarMatchFingerprint(match: Record<string, unknown>): string {
+  const metadata = match.metadata as Record<string, unknown> | undefined
+  return String(metadata?.fingerprint ?? match.id ?? '-')
+}
+
+function similarMatchDocument(match: Record<string, unknown>): string {
+  return String(match.document ?? '-')
 }
 </script>

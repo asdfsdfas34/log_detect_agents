@@ -35,7 +35,8 @@ def init_state() -> None:
         "error": None,
         "service_options": [],
         "selected_service": "",
-        "save_to_chromadb": False,
+        "save_to_chromadb": True,
+        "analysis_date": datetime.now().date(),
         "result_state": None,
         "timeline": [{"name": step, "status": "pending"} for step in STEP_NAMES],
     }
@@ -106,7 +107,11 @@ def run_analysis(client: BackendClient) -> None:
     ]
 
     try:
-        payload = client.analyze(service_name, st.session_state.save_to_chromadb)
+        payload = client.analyze(
+            service_name,
+            st.session_state.save_to_chromadb,
+            st.session_state.analysis_date.isoformat(),
+        )
         result = payload.get("result", {})
         st.session_state.result_state = result
         update_timeline(result)

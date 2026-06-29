@@ -25,12 +25,13 @@ const stepNames = [
 
 function buildDefaultRequest(
   serviceName: string,
-  saveToChromaDb: boolean
+  analysisDate?: string
 ): AnalyzeRequest {
   return {
     service_name: serviceName,
     goal: `${serviceName} service log anomaly investigation`,
-    save_to_chromadb: saveToChromaDb
+    save_to_chromadb: true,
+    analysis_date: analysisDate || undefined
   }
 }
 
@@ -70,10 +71,12 @@ export const useLogDetectStore = defineStore('logDetect', () => {
   let stream: EventSource | null = null
 
   const scenarioSummary = computed(
-    () => state.value?.final.evidence_bundle?.summary
+    () => state.value?.final.evidence_bundle?.summary ?? state.value?.evidence.summary
   )
   const recommendationSummary = computed(
-    () => state.value?.final.evidence_bundle?.recommendation
+    () =>
+      state.value?.final.evidence_bundle?.recommendation ??
+      state.value?.evidence.recommendation
   )
 
   const riskClassification = computed(() => {
@@ -303,8 +306,8 @@ export const useLogDetectStore = defineStore('logDetect', () => {
     }, 5000)
   }
 
-  async function runAnalysis(serviceName: string, saveToChromaDb: boolean) {
-    const request = buildDefaultRequest(serviceName, saveToChromaDb)
+  async function runAnalysis(serviceName: string, analysisDate?: string) {
+    const request = buildDefaultRequest(serviceName, analysisDate)
     loading.value = true
     executionStatus.value = 'running'
     error.value = null

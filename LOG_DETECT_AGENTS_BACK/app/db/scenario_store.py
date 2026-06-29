@@ -15,9 +15,11 @@ from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
 from app.db.chroma_store import (
     find_similar_analysis_documents,
+    find_similar_analysis_documents_batch,
     find_similar_pattern_clusters,
+    find_similar_pattern_clusters_batch,
     save_analysis_document,
-    save_pattern_cluster,
+    save_pattern_clusters,
 )
 from app.db.sqlite_store import _resolve_db_path
 
@@ -465,6 +467,24 @@ def _pattern_status(
     item: dict[str, Any],
     existing_fingerprints: set[str],
 ) -> dict[str, Any]:
+    context = _pattern_cluster_context(item)
+    return _pattern_status_from_matches(
+        conn=conn,
+        item=item,
+        existing_fingerprints=existing_fingerprints,
+        approved_matches=find_similar_analysis_documents(query=context),
+        observed_matches=find_similar_pattern_clusters(query=context),
+    )
+
+
+def _pattern_status_from_matches(
+    *,
+    conn: sqlite3.Connection,
+    item: dict[str, Any],
+    existing_fingerprints: set[str],
+    approved_matches: list[dict[str, Any]],
+    observed_matches: list[dict[str, Any]],
+) -> dict[str, Any]:
     fp = str(item["fingerprint"])
     known_exact, match_source = _exact_known_match(conn, fp)
     if known_exact:
@@ -475,11 +495,10 @@ def _pattern_status(
             "similarity_score": None,
         }
 
-    context = _pattern_cluster_context(item)
     approved_match = _top_similarity(
         [
             match
-            for match in find_similar_analysis_documents(query=context)
+            for match in approved_matches
             if (match.get("metadata") or {}).get("source")
             in {"approved_recommendation", "known_pattern"}
             or str(match.get("id") or "").startswith("knowledge-card:")
@@ -489,7 +508,7 @@ def _pattern_status(
     observed_match = _top_similarity(
         [
             match
-            for match in find_similar_pattern_clusters(query=context)
+            for match in observed_matches
             if match.get("id") != f"{item.get('service_name')}:{fp}"
         ]
     )
@@ -527,17 +546,26 @@ def _pattern_status(
 
 
 def _upsert_pattern_cluster(item: dict[str, Any]) -> None:
-    save_pattern_cluster(
-        doc_id=f"{item.get('service_name')}:{item.get('fingerprint')}",
-        text=_pattern_cluster_context(item),
-        metadata={
-            "service_name": str(item.get("service_name") or ""),
-            "fingerprint": str(item.get("fingerprint") or ""),
-            "log_level": str(item.get("log_level") or ""),
-            "normalized_message": str(item.get("normalized_message") or ""),
-            "occurrence_count": int(item.get("occurrence_count") or 0),
-            "pattern_status": str(item.get("pattern_status") or ""),
-        },
+    _upsert_pattern_clusters([item])
+
+
+def _upsert_pattern_clusters(items: list[dict[str, Any]]) -> None:
+    save_pattern_clusters(
+        [
+            {
+                "doc_id": f"{item.get('service_name')}:{item.get('fingerprint')}",
+                "text": _pattern_cluster_context(item),
+                "metadata": {
+                    "service_name": str(item.get("service_name") or ""),
+                    "fingerprint": str(item.get("fingerprint") or ""),
+                    "log_level": str(item.get("log_level") or ""),
+                    "normalized_message": str(item.get("normalized_message") or ""),
+                    "occurrence_count": int(item.get("occurrence_count") or 0),
+                    "pattern_status": str(item.get("pattern_status") or ""),
+                },
+            }
+            for item in items
+        ]
     )
 
 
@@ -579,7 +607,11 @@ def recommendation_for(
 
 
 def _pipeline_signature(
-    conn: sqlite3.Connection, service_name: str | None, cutoff: str | None
+    conn: sqlite3.Connection,
+    service_name: str | None,
+    cutoff: str | None,
+    date_start: str | None = None,
+    date_end: str | None = None,
 ) -> tuple[int, str]:
     where_parts = []
     params: list[Any] = []
@@ -589,6 +621,9 @@ def _pipeline_signature(
     if cutoff:
         where_parts.append("created_at>=?")
         params.append(cutoff)
+    if date_start:
+        where_parts.append("substr(created_at, 1, 10)=?")
+        params.append(date_start)
     where_sql = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
     row = conn.execute(
         f"SELECT COUNT(*), COALESCE(MAX(created_at), '') FROM service_logs {where_sql}",
@@ -784,7 +819,10 @@ def _load_fingerprint_groups(
 
 
 def run_detection_pipeline(
-    service_name: str | None = None, *, days_back: int | None = None
+    service_name: str | None = None,
+    *,
+    days_back: int | None = None,
+    analysis_date: str | None = None,
 ) -> dict[str, Any]:
     """Run SC-001~SC-005 over stored logs and return dashboard-ready summary data."""
     db_path = _resolve_db_path()
@@ -796,32 +834,44 @@ def run_detection_pipeline(
             (datetime.utcnow() - timedelta(days=days_back)).isoformat(
                 timespec="seconds"
             )
-            if days_back is not None
+            if days_back is not None and analysis_date is None
             else None
         )
+        date_start = None
+        date_end = None
+        if analysis_date:
+            selected_date = datetime.fromisoformat(analysis_date).date()
+            date_start = selected_date.isoformat()
         signature_count, signature_max_created = _pipeline_signature(
-            conn, service_name, cutoff
+            conn, service_name, cutoff, date_start, date_end
         )
         last_rowid = _last_processed_rowid(conn, service_name)
         cache_key = (
             service_name,
             days_back,
+            analysis_date,
             signature_count,
-            last_rowid,
+            0 if analysis_date else last_rowid,
             signature_max_created,
         )
         cached = _PIPELINE_CACHE.get(cache_key)
         if cached is not None:
             return copy.deepcopy(cached)
 
-        where_parts = ["rowid > ?"]
-        params: list[Any] = [last_rowid]
+        where_parts = []
+        params: list[Any] = []
+        if analysis_date is None:
+            where_parts.append("rowid > ?")
+            params.append(last_rowid)
         if service_name:
             where_parts.append("service_name=?")
             params.append(service_name)
         if cutoff:
             where_parts.append("created_at>=?")
             params.append(cutoff)
+        if date_start:
+            where_parts.append("substr(created_at, 1, 10)=?")
+            params.append(date_start)
         where = f"WHERE {' AND '.join(where_parts)}"
         rows = cur.execute(
             f"""
@@ -854,7 +904,13 @@ def run_detection_pipeline(
                 fp,
                 {
                     "fingerprint": fp,
-                    "occurrence_count": int(existing[0] or 0) if existing else 0,
+                    "occurrence_count": (
+                        0
+                        if analysis_date
+                        else int(existing[0] or 0)
+                        if existing
+                        else 0
+                    ),
                     "log_level": level.upper(),
                     "message": str(existing[3] or msg) if existing else msg,
                     "normalized_message": normalized_message,
@@ -872,62 +928,85 @@ def run_detection_pipeline(
             item["occurrence_count"] += 1
             item["first_seen"] = min(item["first_seen"], created)
             item["last_seen"] = max(item["last_seen"], created)
-            for bucket_size in ("day", "hour"):
-                _increment_pattern_metric(
-                    conn,
-                    service_name=svc,
-                    fingerprint=fp,
-                    level=level,
-                    created_at=created,
-                    bucket_size=bucket_size,
+            if analysis_date is None:
+                for bucket_size in ("day", "hour"):
+                    _increment_pattern_metric(
+                        conn,
+                        service_name=svc,
+                        fingerprint=fp,
+                        level=level,
+                        created_at=created,
+                        bucket_size=bucket_size,
+                    )
+                cur.execute(
+                    """
+                    INSERT OR IGNORE INTO processed_log_offsets(service_name, log_rowid, fingerprint)
+                    VALUES (?, ?, ?)
+                    """,
+                    (svc, int(rowid), fp),
                 )
-            cur.execute(
-                """
-                INSERT OR IGNORE INTO processed_log_offsets(service_name, log_rowid, fingerprint)
-                VALUES (?, ?, ?)
-                """,
-                (svc, int(rowid), fp),
+        group_items = list(groups.values())
+        group_contexts = [_pattern_cluster_context(item) for item in group_items]
+        approved_match_groups = find_similar_analysis_documents_batch(
+            queries=group_contexts
+        )
+        observed_match_groups = find_similar_pattern_clusters_batch(
+            queries=group_contexts
+        )
+        for index, g in enumerate(group_items):
+            approved_matches = (
+                approved_match_groups[index]
+                if index < len(approved_match_groups)
+                else []
             )
-        for g in groups.values():
+            observed_matches = (
+                observed_match_groups[index]
+                if index < len(observed_match_groups)
+                else []
+            )
             g.update(
-                _pattern_status(
+                _pattern_status_from_matches(
                     conn=conn,
                     item=g,
                     existing_fingerprints=existing_fingerprints,
+                    approved_matches=approved_matches,
+                    observed_matches=observed_matches,
                 )
             )
-        for g in groups.values():
-            _upsert_pattern_cluster(g)
-            cur.execute(
-                "REPLACE INTO fingerprints VALUES (:fingerprint,:occurrence_count,:log_level,:message,:stacktrace,:service_name,:first_seen,:last_seen)",
-                g,
-            )
-            cat, sub = classify(g["message"], g["stacktrace"])
-            known = g["pattern_status"] in {"known_exact", "known_similar"}
-            cur.execute(
-                """
-                REPLACE INTO log_analysis_results(
-                    fingerprint, category, sub_category, is_known_pattern,
-                    is_new_pattern, pattern_status, match_source,
-                    similar_fingerprint, similarity_score
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    g["fingerprint"],
-                    cat,
-                    sub,
-                    int(known),
-                    int(g["pattern_status"] == "new_pattern"),
-                    g["pattern_status"],
-                    g["match_source"],
-                    g["similar_fingerprint"],
-                    g["similarity_score"],
-                ),
-            )
-        if rows:
+        if analysis_date is None:
+            _upsert_pattern_clusters(group_items)
+        for g in group_items:
+            if analysis_date is None:
+                cur.execute(
+                    "REPLACE INTO fingerprints VALUES (:fingerprint,:occurrence_count,:log_level,:message,:stacktrace,:service_name,:first_seen,:last_seen)",
+                    g,
+                )
+                cat, sub = classify(g["message"], g["stacktrace"])
+                known = g["pattern_status"] in {"known_exact", "known_similar"}
+                cur.execute(
+                    """
+                    REPLACE INTO log_analysis_results(
+                        fingerprint, category, sub_category, is_known_pattern,
+                        is_new_pattern, pattern_status, match_source,
+                        similar_fingerprint, similarity_score
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        g["fingerprint"],
+                        cat,
+                        sub,
+                        int(known),
+                        int(g["pattern_status"] == "new_pattern"),
+                        g["pattern_status"],
+                        g["match_source"],
+                        g["similar_fingerprint"],
+                        g["similarity_score"],
+                    ),
+                )
+        if rows and analysis_date is None:
             _save_processing_state(conn, service_name, max_rowid, max_created)
 
-        all_groups = _load_fingerprint_groups(conn, service_name)
+        all_groups = groups if analysis_date else _load_fingerprint_groups(conn, service_name)
         ignored = {
             r[0]
             for r in cur.execute(
