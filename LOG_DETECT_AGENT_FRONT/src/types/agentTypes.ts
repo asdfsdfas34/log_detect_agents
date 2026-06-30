@@ -80,6 +80,34 @@ export interface KnownPatternSaveResponse {
   fingerprint: string
 }
 
+export interface PatternRuleSuggestRequest {
+  cluster?: string
+  message: string
+}
+
+export interface PatternRuleProposal {
+  name: string
+  match_regex: string
+  template: string
+  confidence: string
+  reason: string
+  sample_before: string
+  sample_after: string
+}
+
+export interface PatternRuleSaveRequest {
+  name: string
+  match_regex: string
+  template: string
+  enabled?: boolean
+  priority?: number
+}
+
+export interface PatternRuleSaveResponse {
+  status: string
+  id: number
+}
+
 export interface RecommendationDeleteResponse {
   status: string
   id: number
@@ -161,6 +189,9 @@ export interface Anomaly {
   severity?: string
   pattern?: string
   message?: string
+  anomaly_type?: string
+  spike_ratio?: number
+  metric?: Record<string, unknown>
 }
 
 export interface Cluster {
@@ -175,6 +206,11 @@ export interface Cluster {
   similarity_score?: number | null
   semantic_similarity?: number
   similar_clusters?: Array<Record<string, unknown>>
+  anomaly_detected?: boolean
+  anomaly_type?: string
+  anomaly_severity?: string
+  anomaly_reason?: string
+  anomaly_metric?: Record<string, unknown>
 }
 
 export interface ScenarioSummary {

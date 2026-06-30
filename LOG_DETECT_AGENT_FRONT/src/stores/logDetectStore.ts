@@ -18,7 +18,6 @@ const stepNames = [
   'LogCollectorAgent',
   'LogAnalysisAgent',
   'AnomalyDetectionAgent',
-  'ImpactEvaluationAgent',
   'KnowledgeBaseRAGAgent',
   'RecommendationAgent'
 ]
@@ -367,14 +366,10 @@ export const useLogDetectStore = defineStore('logDetect', () => {
   ) {
     executionStatus.value = 'running'
     error.value = null
-    currentStage.value = 'ImpactEvaluationAgent'
+    currentStage.value = 'KnowledgeBaseRAGAgent'
     agentTimeline.value = stepNames.map((name) => ({
       name,
-      status: [
-        'ImpactEvaluationAgent',
-        'KnowledgeBaseRAGAgent',
-        'RecommendationAgent'
-      ].includes(name)
+      status: ['KnowledgeBaseRAGAgent', 'RecommendationAgent'].includes(name)
         ? 'running'
         : 'skipped'
     }))
@@ -432,6 +427,39 @@ export const useLogDetectStore = defineStore('logDetect', () => {
     } catch (caught) {
       error.value = (caught as Error).message
       addToast('error', `Known Pattern 저장 실패: ${error.value}`)
+      return false
+    }
+  }
+
+  async function suggestPatternRule(cluster: string, message: string) {
+    try {
+      const { data } = await agentApi.suggestPatternRule({ cluster, message })
+      return data
+    } catch (caught) {
+      error.value = (caught as Error).message
+      addToast('error', `Pattern Rule 제안 실패: ${error.value}`)
+      return null
+    }
+  }
+
+  async function savePatternRule(
+    name: string,
+    matchRegex: string,
+    template: string
+  ) {
+    try {
+      const { data } = await agentApi.savePatternRule({
+        name,
+        match_regex: matchRegex,
+        template,
+        enabled: true,
+        priority: 100
+      })
+      addToast('info', `Pattern Rule 저장 완료: #${data.id}`)
+      return true
+    } catch (caught) {
+      error.value = (caught as Error).message
+      addToast('error', `Pattern Rule 저장 실패: ${error.value}`)
       return false
     }
   }
@@ -548,6 +576,8 @@ export const useLogDetectStore = defineStore('logDetect', () => {
     fetchKnowledgeCards,
     fetchExceptionRegistry,
     saveKnownPattern,
+    suggestPatternRule,
+    savePatternRule,
     saveCurrentRecommendation,
     approveCurrentRecommendation,
     registerCurrentException,

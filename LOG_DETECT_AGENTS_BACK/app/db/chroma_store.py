@@ -144,6 +144,16 @@ def _embed_texts(texts: list[str], *, dimensions: int) -> list[list[float]] | No
     return [list(item.embedding) for item in response.data]
 
 
+def _embed_texts_for_query(
+    texts: list[str], *, dimensions: int
+) -> list[list[float]] | None:
+    try:
+        return _embed_texts(texts, dimensions=dimensions)
+    except Exception as exc:  # noqa: BLE001
+        _backend_logger().warning("Embedding request failed; skipping vector query: %s", exc)
+        return None
+
+
 def _with_embedding_metadata(
     metadata: dict[str, Any] | None,
     *,
@@ -284,7 +294,7 @@ def _query_collection_batch(
         embeddings = (
             query_embeddings
             if query_embeddings is not None
-            else _embed_texts(queries, dimensions=dimensions)
+            else _embed_texts_for_query(queries, dimensions=dimensions)
             if dimensions
             else None
         )
@@ -748,7 +758,7 @@ def find_related_analyses(*, query: str, n_results: int = 3) -> list[str]:
     )
     related: list[str] = []
     query_embedding = (
-        _embed_texts([query], dimensions=dimensions) if dimensions else None
+        _embed_texts_for_query([query], dimensions=dimensions) if dimensions else None
     )
     for collection_name in collection_names:
         matches = _query_results(
@@ -801,7 +811,7 @@ def find_similar_analysis_documents_batch(
         shared_embeddings = []
         batch_size = _embedding_batch_size()
         for start in range(0, len(queries), batch_size):
-            embeddings = _embed_texts(
+            embeddings = _embed_texts_for_query(
                 queries[start : start + batch_size], dimensions=dimensions
             )
             if embeddings is None:

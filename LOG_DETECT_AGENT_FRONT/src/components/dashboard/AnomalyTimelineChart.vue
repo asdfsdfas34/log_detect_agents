@@ -1,7 +1,7 @@
 <template>
   <div class="rounded-xl border bg-white p-4 shadow-sm">
     <h3 class="mb-3 text-lg font-semibold">Anomaly Timeline</h3>
-    <VChart class="h-72" :option="option" autoresize />
+    <VChart class="h-36" :option="option" autoresize />
   </div>
 </template>
 
@@ -28,8 +28,22 @@ const option = computed(() => {
 
   return {
     tooltip: { trigger: 'axis' },
-    xAxis: { type: 'category', data: points.map((p) => p.time) },
-    yAxis: { type: 'value' },
+    grid: { left: 44, right: 16, top: 12, bottom: 28, containLabel: true },
+    xAxis: {
+      type: 'category',
+      data: points.map((p) => p.time),
+      axisLabel: { hideOverlap: true, interval: 'auto' }
+    },
+    yAxis: {
+      type: 'value',
+      min: 0,
+      minInterval: 1,
+      splitNumber: 2,
+      axisLabel: {
+        margin: 8,
+        formatter: (value: number) => `${Math.round(value)}`
+      }
+    },
     series: [{ type: 'line', data: points.map((p) => p.value), smooth: true }]
   }
 })

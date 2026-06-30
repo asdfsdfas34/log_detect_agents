@@ -8,11 +8,6 @@ LOG_ANALYSIS_SYSTEM = (
     "State confidence level and missing evidence."
 )
 
-IMPACT_EVALUATION_SYSTEM = (
-    "You are the Impact Evaluation Agent. Estimate blast radius and user/business impact. "
-    "Provide severity and affected components."
-)
-
 SOURCE_CODE_ANALYSIS_SYSTEM = (
     "You are the Source Code Analysis Agent. Infer likely code areas related to the incident. "
     "Suggest modules/files to inspect and explain why."

@@ -6,7 +6,6 @@ from app.graph.nodes import (
     analyze_logs_node,
     anomaly_detection_node,
     collect_logs_node,
-    evaluate_impact_node,
     orchestrator_node,
 )
 from app.graph.routing import route_from_orchestrator
@@ -21,7 +20,6 @@ def build_graph():
     graph.add_node("log_collector", collect_logs_node)
     graph.add_node("log_analysis", analyze_logs_node)
     graph.add_node("anomaly_detection", anomaly_detection_node)
-    graph.add_node("impact_evaluation", evaluate_impact_node)
 
     graph.add_edge(START, "orchestrator")
     graph.add_conditional_edges(
@@ -31,7 +29,6 @@ def build_graph():
             "LogCollectorAgent": "log_collector",
             "LogAnalysisAgent": "log_analysis",
             "AnomalyDetectionAgent": "anomaly_detection",
-            "ImpactEvaluationAgent": "impact_evaluation",
             "END": END,
         },
     )
@@ -40,7 +37,6 @@ def build_graph():
         "log_collector",
         "log_analysis",
         "anomaly_detection",
-        "impact_evaluation",
     ]:
         graph.add_edge(worker, "orchestrator")
 

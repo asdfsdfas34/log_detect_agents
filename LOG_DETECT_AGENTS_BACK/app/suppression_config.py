@@ -41,9 +41,6 @@ def get_suppression_config() -> dict[str, Any]:
     anomaly = payload.get("anomaly_detection", {})
     if not isinstance(anomaly, dict):
         anomaly = {}
-    impact = payload.get("impact_evaluation", {})
-    if not isinstance(impact, dict):
-        impact = {}
 
     return {
         "known_patterns": patterns,
@@ -52,10 +49,6 @@ def get_suppression_config() -> dict[str, Any]:
                 str(value) for value in _as_list(anomaly.get("suppressed_key_fields"))
             ]
             or ["timestamp", "system", "message"],
-        },
-        "impact_evaluation": {
-            "credit_per_suppressed_log": int(impact.get("credit_per_suppressed_log", 2)),
-            "max_suppression_credit": int(impact.get("max_suppression_credit", 20)),
         },
     }
 

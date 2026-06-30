@@ -13,6 +13,10 @@ import type {
   KnownPatternSaveResponse,
   KnowledgeCardListResponse,
   LangSmithRunsResponse,
+  PatternRuleProposal,
+  PatternRuleSaveRequest,
+  PatternRuleSaveResponse,
+  PatternRuleSuggestRequest,
   RecommendationDeleteResponse,
   RecommendationHistoryResponse,
   RecommendationSaveRequest,
@@ -68,6 +72,12 @@ export const agentApi = {
   },
   saveKnownPattern(payload: KnownPatternSaveRequest) {
     return apiClient.post<KnownPatternSaveResponse>('/known-patterns', payload)
+  },
+  suggestPatternRule(payload: PatternRuleSuggestRequest) {
+    return apiClient.post<PatternRuleProposal>('/pattern-rules/suggest', payload)
+  },
+  savePatternRule(payload: PatternRuleSaveRequest) {
+    return apiClient.post<PatternRuleSaveResponse>('/pattern-rules', payload)
   },
   knowledgeCards(params?: { fingerprint?: string; limit?: number }) {
     return apiClient.get<KnowledgeCardListResponse>('/knowledge-cards', {

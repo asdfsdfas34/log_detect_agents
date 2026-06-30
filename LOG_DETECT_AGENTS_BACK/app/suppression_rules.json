@@ -55,9 +55,5 @@
   ],
   "anomaly_detection": {
     "suppressed_key_fields": ["timestamp", "system", "message"]
-  },
-  "impact_evaluation": {
-    "credit_per_suppressed_log": 2,
-    "max_suppression_credit": 20
   }
 }

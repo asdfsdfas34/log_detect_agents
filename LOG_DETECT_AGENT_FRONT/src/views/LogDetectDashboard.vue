@@ -42,7 +42,7 @@
       </div>
     </template>
 
-    <section class="grid gap-4 lg:grid-cols-2">
+    <section class="space-y-4">
       <div class="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
         <h2
           class="mb-3 text-sm font-semibold uppercase tracking-wide text-slate-500"
@@ -89,6 +89,7 @@
         :clusters="store.state.evidence.clusters"
         @save-known-pattern="handleSaveKnownPattern"
         @request-recommendation="handleRequestRecommendation"
+        @suggest-pattern-rule="handleSuggestPatternRule"
       />
       <RecommendationPanel
         :actions="store.state.final.recommended_actions ?? []"
@@ -261,6 +262,29 @@ async function handleSaveKnownPattern(cluster: Cluster) {
     cluster.pattern_status = 'known_exact'
     cluster.match_source = 'known_patterns'
   }
+}
+
+async function handleSuggestPatternRule(cluster: Cluster) {
+  const message = cluster.message?.trim()
+  if (!message) return
+  const proposal = await store.suggestPatternRule(cluster.cluster, message)
+  if (!proposal) return
+  const approved = window.confirm(
+    [
+      `${cluster.cluster} 패턴 정규화 룰을 저장하시겠습니까?`,
+      '',
+      `Template: ${proposal.template}`,
+      `Regex: ${proposal.match_regex}`,
+      '',
+      proposal.reason
+    ].join('\n')
+  )
+  if (!approved) return
+  await store.savePatternRule(
+    proposal.name,
+    proposal.match_regex,
+    proposal.template
+  )
 }
 
 function handleRefreshRecommendations() {

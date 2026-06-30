@@ -3,7 +3,6 @@
 from collections.abc import Callable
 
 from app.agents.anomaly_detection import AnomalyDetectionAgent
-from app.agents.impact_evaluation import ImpactEvaluationAgent
 from app.agents.knowledge_base_rag import KnowledgeBaseRAGAgent
 from app.agents.log_analysis import LogAnalysisAgent
 from app.agents.log_collector import LogCollectorAgent
@@ -18,7 +17,6 @@ orchestrator_agent = OrchestratorAgent()
 log_collector_agent = LogCollectorAgent()
 log_analysis_agent = LogAnalysisAgent()
 anomaly_detection_agent = AnomalyDetectionAgent()
-impact_evaluation_agent = ImpactEvaluationAgent()
 knowledge_base_rag_agent = KnowledgeBaseRAGAgent()
 
 
@@ -78,10 +76,6 @@ def analyze_logs_node(state: SharedState) -> SharedState:
 
 def anomaly_detection_node(state: SharedState) -> SharedState:
     return _run_with_retry(state, "AnomalyDetectionAgent", anomaly_detection_agent.run)
-
-
-def evaluate_impact_node(state: SharedState) -> SharedState:
-    return _run_with_retry(state, "ImpactEvaluationAgent", impact_evaluation_agent.run)
 
 
 def knowledge_base_rag_node(state: SharedState) -> SharedState:

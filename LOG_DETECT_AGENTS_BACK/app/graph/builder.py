@@ -5,7 +5,6 @@ from datetime import datetime
 from langgraph.graph import END, StateGraph
 
 from app.agents.prompts import (
-    IMPACT_EVALUATION_SYSTEM,
     LOG_ANALYSIS_SYSTEM,
     LOG_COLLECTOR_SYSTEM,
     RECOMMENDATION_SYSTEM,
@@ -52,27 +51,12 @@ def _log_analysis(state: AgentState) -> AgentState:
         temperature=0.2,
     )
     state["log_analysis"] = analysis
-    state["next"] = "impact_evaluation"
-    return state
-
-
-def _impact_evaluation(state: AgentState) -> AgentState:
-    analysis = state.get("log_analysis") or ""
-    impact = generate_text(
-        messages=[
-            {"role": "system", "content": IMPACT_EVALUATION_SYSTEM},
-            {"role": "user", "content": analysis},
-        ],
-        temperature=0.1,
-    )
-    state["impact_evaluation"] = impact
     state["next"] = "recommendation"
     return state
 
 
 def _recommendation(state: AgentState) -> AgentState:
     analysis = state.get("log_analysis") or ""
-    impact = state.get("impact_evaluation") or ""
 
     recommendation = generate_text(
         messages=[
@@ -80,9 +64,8 @@ def _recommendation(state: AgentState) -> AgentState:
             {
                 "role": "user",
                 "content": (
-                    "Impact evaluation 결과를 기반으로 권고안을 한국어로 작성하세요.\n\n"
-                    f"Log analysis:\n{analysis}\n\n"
-                    f"Impact evaluation:\n{impact}"
+                    "로그 분석 결과를 기반으로 권고안을 한국어로 작성하세요.\n\n"
+                    f"Log analysis:\n{analysis}"
                 ),
             },
         ],
@@ -94,8 +77,7 @@ def _recommendation(state: AgentState) -> AgentState:
     save_analysis_document(
         doc_id=doc_id,
         text=(
-            f"Log analysis:\n{analysis}\n\nImpact evaluation:\n{impact}\n\n"
-            f"Recommendation:\n{recommendation}"
+            f"Log analysis:\n{analysis}\n\nRecommendation:\n{recommendation}"
         ),
     )
     state["next"] = "end"
@@ -111,7 +93,6 @@ def build_graph():
 
     g.add_node("log_collector", _log_collector)
     g.add_node("log_analysis", _log_analysis)
-    g.add_node("impact_evaluation", _impact_evaluation)
     g.add_node("recommendation", _recommendation)
 
     g.set_entry_point("log_collector")
@@ -123,11 +104,6 @@ def build_graph():
     )
     g.add_conditional_edges(
         "log_analysis",
-        _route,
-        {"impact_evaluation": "impact_evaluation", "end": END},
-    )
-    g.add_conditional_edges(
-        "impact_evaluation",
         _route,
         {"recommendation": "recommendation", "end": END},
     )

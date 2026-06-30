@@ -67,6 +67,13 @@
               >
                 {{ item.message ?? 'No message captured for this pattern' }}
               </button>
+              <div
+                v-if="activeTab === 'anomaly'"
+                class="mt-1 rounded border border-red-100 bg-red-50 px-2 py-1 text-xs text-red-700"
+              >
+                <span class="font-semibold">{{ anomalyTypeLabel(item) }}</span>
+                <span v-if="anomalyReason(item)"> · {{ anomalyReason(item) }}</span>
+              </div>
             </td>
             <td class="py-2">
               <span
@@ -121,6 +128,13 @@
                   @click="emit('request-recommendation', item)"
                 >
                   Recommendation
+                </button>
+                <button
+                  class="rounded border border-violet-200 px-2 py-1 text-xs font-semibold text-violet-700 hover:bg-violet-50"
+                  type="button"
+                  @click="emit('suggest-pattern-rule', item)"
+                >
+                  Pattern Rule
                 </button>
               </div>
             </td>
@@ -203,6 +217,22 @@
         </div>
 
         <div class="max-h-[calc(85vh-64px)] space-y-4 overflow-y-auto p-4">
+          <section>
+            <h5 class="mb-2 text-sm font-semibold text-slate-700">
+              Detection Reason
+            </h5>
+            <div
+              v-if="selectedCluster.anomaly_detected"
+              class="rounded border border-red-100 bg-red-50 p-3 text-sm text-red-800"
+            >
+              <div class="font-semibold">{{ anomalyTypeLabel(selectedCluster) }}</div>
+              <div class="mt-1">{{ anomalyReason(selectedCluster) || '-' }}</div>
+            </div>
+            <p v-else class="rounded border border-slate-200 p-3 text-sm text-slate-500">
+              No anomaly detection reason recorded for this pattern.
+            </p>
+          </section>
+
           <section>
             <h5 class="mb-2 text-sm font-semibold text-slate-700">
               Error Message
@@ -325,6 +355,7 @@ const props = defineProps<{ clusters: Cluster[] }>()
 const emit = defineEmits<{
   'save-known-pattern': [cluster: Cluster]
   'request-recommendation': [cluster: Cluster]
+  'suggest-pattern-rule': [cluster: Cluster]
 }>()
 
 const currentPage = ref(1)
@@ -359,7 +390,7 @@ const observedClusters = computed(() =>
 )
 
 const anomalyClusters = computed(() =>
-  sortedClusters.value.filter((cluster) => cluster.log_level === 'ERROR')
+  sortedClusters.value.filter((cluster) => cluster.anomaly_detected)
 )
 
 const tabs = computed(() => [
@@ -458,6 +489,34 @@ function statusClass(status?: string): string {
   if (status === 'observed_existing') return 'bg-slate-100 text-slate-700'
   if (status === 'new_pattern') return 'bg-amber-100 text-amber-700'
   return 'bg-slate-100 text-slate-500'
+}
+
+function anomalyTypeLabel(item: Cluster): string {
+  const type = item.anomaly_type || 'ANOMALY'
+  const labels: Record<string, string> = {
+    SPIKE: 'Pattern Increase',
+    INCREASE: 'Pattern Increase',
+    DROP: 'Pattern Decrease',
+    DECREASE: 'Pattern Decrease',
+    ABSENCE: 'Pattern Absence',
+    NEW_ERROR: 'New Error Pattern',
+    NEW_PATTERN: 'New Pattern',
+    PRESENCE: 'New Pattern Presence',
+    RECURRENCE: 'Pattern Recurrence',
+    SIMILAR_CASE_MATCH: 'Similar Case Match'
+  }
+  return labels[type] ?? type
+}
+
+function anomalyReason(item: Cluster): string {
+  if (item.anomaly_reason) return item.anomaly_reason
+  const metric = item.anomaly_metric ?? {}
+  const latest = metric.latest_count
+  const baseline = metric.baseline_count
+  if (latest !== undefined || baseline !== undefined) {
+    return `latest=${latest ?? '-'}, baseline=${baseline ?? '-'}`
+  }
+  return ''
 }
 
 function similarMatchKey(match: Record<string, unknown>, index: number): string {

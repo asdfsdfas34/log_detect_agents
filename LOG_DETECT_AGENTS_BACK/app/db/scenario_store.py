@@ -9,6 +9,7 @@ import math
 import re
 import sqlite3
 from datetime import datetime, timedelta
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlsplit, urlunsplit
@@ -84,6 +85,42 @@ CRITICALITY_SCORE = {"HIGH": 30, "MEDIUM": 15, "LOW": 5}
 LEVEL_SCORE = {"ERROR": 50, "WARN": 20, "INFO": 5}
 _PIPELINE_CACHE: dict[tuple[str | None, int | None, int, str], dict[str, Any]] = {}
 KNOWN_SIMILARITY_THRESHOLD = 0.88
+
+
+@lru_cache(maxsize=1)
+def _normalization_rules() -> tuple[tuple[str, str], ...]:
+    db_path = _resolve_db_path()
+    if not Path(db_path).exists():
+        return ()
+    try:
+        with sqlite3.connect(db_path) as conn:
+            rows = conn.execute(
+                """
+                SELECT match_regex, template
+                FROM pattern_normalization_rules
+                WHERE enabled=1
+                ORDER BY priority DESC, id DESC
+                """
+            ).fetchall()
+    except sqlite3.Error:
+        return ()
+    return tuple((str(row[0]), str(row[1])) for row in rows)
+
+
+def clear_normalization_rule_cache() -> None:
+    """Clear cached pattern normalization rules after rule changes."""
+
+    _normalization_rules.cache_clear()
+
+
+def _apply_normalization_rules(text: str) -> str:
+    for match_regex, template in _normalization_rules():
+        try:
+            if re.search(match_regex, text, flags=re.IGNORECASE):
+                return re.sub(match_regex, template, text, count=1, flags=re.IGNORECASE)
+        except re.error:
+            continue
+    return text
 
 
 def _protect_semantic_values(text: str) -> tuple[str, dict[str, str]]:
@@ -171,6 +208,7 @@ def _normalize_windows_path(match: re.Match[str]) -> str:
 def normalize_log_text(value: str) -> str:
     """Replace volatile values so equal log templates share one fingerprint."""
     text = value or ""
+    text = _apply_normalization_rules(text)
     text = EXCEL_NEWLINE_RE.sub(" ", text)
     text, protected = _protect_semantic_values(text)
     text = URL_RE.sub(_normalize_url, text)
@@ -343,6 +381,15 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             first_seen TEXT NOT NULL,
             last_seen TEXT NOT NULL,
             PRIMARY KEY(service_name, fingerprint, bucket_start, bucket_size)
+        );
+        CREATE TABLE IF NOT EXISTS pattern_normalization_rules (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            match_regex TEXT NOT NULL,
+            template TEXT NOT NULL,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            priority INTEGER NOT NULL DEFAULT 100,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
         """)
 
@@ -736,6 +783,18 @@ def _metric_baseline(
     }
 
 
+def _metric_trend(metric: dict[str, Any]) -> str:
+    latest = int(metric.get("latest_count") or 0)
+    baseline = float(metric.get("baseline_count") or 0)
+    if baseline >= 1 and latest == 0:
+        return "absence"
+    if baseline >= 1 and latest >= baseline * 2:
+        return "increase"
+    if baseline >= 4 and latest <= baseline * 0.5:
+        return "decrease"
+    return "stable"
+
+
 def _anomaly_type_for(
     *,
     group: dict[str, Any],
@@ -743,9 +802,8 @@ def _anomaly_type_for(
     spike_ratio: float,
     metric: dict[str, Any],
 ) -> tuple[bool, str, str]:
-    latest = int(metric.get("latest_count") or 0)
-    baseline = float(metric.get("baseline_count") or 0)
     status = str(group.get("pattern_status") or "")
+    trend = _metric_trend(metric)
     if status == "new_pattern":
         return (
             True,
@@ -766,12 +824,12 @@ def _anomaly_type_for(
                 return True, "RECURRENCE", "MEDIUM"
         except ValueError:
             pass
-    if baseline >= 1 and latest >= baseline * 2:
+    if trend == "absence":
+        return True, "ABSENCE", "MEDIUM"
+    if trend == "increase":
         return True, "SPIKE", "HIGH"
-    if baseline >= 4 and latest <= baseline * 0.5:
+    if trend == "decrease":
         return True, "DROP", "MEDIUM"
-    if spike_ratio >= 200:
-        return True, "SPIKE", "HIGH"
     return False, "NONE", "NONE"
 
 
@@ -1533,6 +1591,35 @@ def save_known_pattern(
         },
     )
     return pattern_id
+
+
+def save_pattern_normalization_rule(
+    *,
+    name: str,
+    match_regex: str,
+    template: str,
+    enabled: bool = True,
+    priority: int = 100,
+) -> int:
+    """Persist an approved normalization rule used before generic fingerprinting."""
+
+    re.compile(match_regex)
+    with sqlite3.connect(_resolve_db_path()) as conn:
+        ensure_schema(conn)
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO pattern_normalization_rules(
+                name, match_regex, template, enabled, priority
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (name, match_regex, template, int(enabled), priority),
+        )
+        conn.commit()
+        rule_id = int(cur.lastrowid)
+    clear_normalization_rule_cache()
+    _PIPELINE_CACHE.clear()
+    return rule_id
 
 
 def fetch_exception_registry(

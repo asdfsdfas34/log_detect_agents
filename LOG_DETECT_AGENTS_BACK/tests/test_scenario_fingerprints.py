@@ -1,8 +1,10 @@
 import sqlite3
 from pathlib import Path
 
+from app.agents.pattern_rule_suggestion import PatternRuleSuggestionAgent
 from app.db.scenario_store import (
     approve_result,
+    clear_normalization_rule_cache,
     ensure_schema,
     fetch_exception_registry,
     fetch_knowledge_cards,
@@ -10,6 +12,7 @@ from app.db.scenario_store import (
     normalize_log_text,
     register_exception,
     run_detection_pipeline,
+    save_pattern_normalization_rule,
 )
 
 
@@ -28,9 +31,41 @@ def test_fingerprint_normalizes_json_payload_values() -> None:
     )
 
     assert normalize_log_text(first) == normalize_log_text(second)
+    clear_normalization_rule_cache()
     assert fingerprint_id("devops-service", "INFO", first, "") == fingerprint_id(
         "devops-service", "INFO", second, ""
     )
+
+
+def test_approved_pattern_rule_groups_request_id_variants(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db_path = tmp_path / "logs.db"
+    monkeypatch.setenv("SQLITE_PATH", str(db_path))
+    clear_normalization_rule_cache()
+    with sqlite3.connect(db_path) as conn:
+        ensure_schema(conn)
+
+    first = (
+        "DelayedApprovalNotiAgent.SendMail. To:test@test.com, "
+        "DelayedApvCount:1, TotalWaitingApvCount:8 request_id=ed55e2346606"
+    )
+    second = (
+        "DelayedApprovalNotiAgent.SendMail. To:test@test.com, "
+        "DelayedApvCount:7, TotalWaitingApvCount:8"
+    )
+    assert normalize_log_text(first) != normalize_log_text(second)
+
+    proposal = PatternRuleSuggestionAgent().propose(
+        cluster="delayed-approval", message=first
+    )
+    save_pattern_normalization_rule(
+        name=proposal.name,
+        match_regex=proposal.match_regex,
+        template=proposal.template,
+    )
+
+    assert normalize_log_text(first) == normalize_log_text(second)
 
 
 def test_fingerprint_normalizes_plain_text_request_values() -> None:

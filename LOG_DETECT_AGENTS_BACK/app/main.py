@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from app.agents.knowledge_base_rag import KnowledgeBaseRAGAgent
+from app.agents.pattern_rule_suggestion import PatternRuleSuggestionAgent
 from app.agents.recommendation import RecommendationAgent
 from app.config import settings
 from app.db.chroma_store import (
@@ -23,6 +24,7 @@ from app.db.scenario_store import (
     register_exception,
     run_detection_pipeline,
     save_known_pattern,
+    save_pattern_normalization_rule,
 )
 from app.db.sqlite_store import (
     delete_recommendation_result,
@@ -110,6 +112,35 @@ class KnownPatternSaveRequest(BaseModel):
     confidence: str = "HIGH"
 
 
+class PatternRuleSuggestRequest(BaseModel):
+    """Request body for normalization rule suggestion."""
+
+    cluster: str = ""
+    message: str = Field(..., min_length=1)
+
+
+class PatternRuleProposalResponse(BaseModel):
+    """Suggested normalization rule proposal."""
+
+    name: str
+    match_regex: str
+    template: str
+    confidence: str
+    reason: str
+    sample_before: str
+    sample_after: str
+
+
+class PatternRuleSaveRequest(BaseModel):
+    """Request body for approved normalization rule registration."""
+
+    name: str
+    match_regex: str
+    template: str
+    enabled: bool = True
+    priority: int = 100
+
+
 class ApprovalRequest(BaseModel):
     """Request body for approved recommendation knowledge capture."""
 
@@ -190,9 +221,16 @@ def _pattern_cluster_context(
 
 
 def _enrich_pattern_clusters(
-    *, service_name: str, fingerprints: list[dict], n_results: int = 5
+    *,
+    service_name: str,
+    fingerprints: list[dict],
+    anomalies: list[dict] | None = None,
+    n_results: int = 5,
 ) -> list[dict]:
     enriched: list[dict] = []
+    anomalies_by_pattern = {
+        str(item.get("pattern")): item for item in anomalies or [] if item.get("pattern")
+    }
     pattern_documents: list[dict] = []
     pattern_contexts: list[dict] = []
     for item in fingerprints:
@@ -252,6 +290,7 @@ def _enrich_pattern_clusters(
             if similar_clusters and similar_clusters[0].get("similarity") is not None
             else 0
         )
+        anomaly = anomalies_by_pattern.get(fingerprint)
         enriched.append(
             {
                 "cluster": fingerprint,
@@ -265,9 +304,36 @@ def _enrich_pattern_clusters(
                 "similarity_score": item.get("similarity_score"),
                 "semantic_similarity": semantic_similarity,
                 "similar_clusters": similar_clusters,
+                "anomaly_detected": anomaly is not None,
+                "anomaly_type": anomaly.get("anomaly_type") if anomaly else "",
+                "anomaly_severity": anomaly.get("severity") if anomaly else "",
+                "anomaly_reason": _anomaly_reason(anomaly) if anomaly else "",
+                "anomaly_metric": anomaly.get("metric") if anomaly else {},
             }
         )
     return enriched
+
+
+def _anomaly_reason(anomaly: dict | None) -> str:
+    if not anomaly:
+        return ""
+    anomaly_type = str(anomaly.get("anomaly_type") or "")
+    metric = anomaly.get("metric") if isinstance(anomaly.get("metric"), dict) else {}
+    latest = metric.get("latest_count")
+    baseline = metric.get("baseline_count")
+    if anomaly_type in {"SPIKE", "INCREASE"}:
+        return f"패턴 발생량 증가: latest={latest}, baseline={baseline}"
+    if anomaly_type in {"DROP", "DECREASE"}:
+        return f"패턴 발생량 감소: latest={latest}, baseline={baseline}"
+    if anomaly_type == "ABSENCE":
+        return f"기준선에 있던 패턴 부재: latest={latest}, baseline={baseline}"
+    if anomaly_type in {"NEW_ERROR", "NEW_PATTERN", "PRESENCE"}:
+        return "신규 패턴이 관측되었습니다."
+    if anomaly_type == "RECURRENCE":
+        return "과거 관측된 패턴이 재발했습니다."
+    if anomaly_type == "SIMILAR_CASE_MATCH":
+        return "유사한 승인/지식 사례와 매칭되었습니다."
+    return str(anomaly.get("message") or anomaly_type or "Anomaly detected")
 
 
 def build_generated_answer(
@@ -393,7 +459,9 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
     result["evidence"]["recommendation"] = scenario["recommendation"]
     if scenario["fingerprints"]:
         result["evidence"]["clusters"] = _enrich_pattern_clusters(
-            service_name=req.service_name, fingerprints=scenario["fingerprints"]
+            service_name=req.service_name,
+            fingerprints=scenario["fingerprints"],
+            anomalies=scenario.get("anomalies", []),
         )
         result["evidence"]["anomalies"] = scenario["anomalies"]
         result["evidence"]["stack_traces"] = [
@@ -520,7 +588,6 @@ def recommend_for_fingerprint(req: FingerprintRecommendationRequest) -> AnalyzeR
     )
     # Mark only the downstream agents requested by cluster selection as executed.
     state["decisions"]["agents_run"] = [
-        "ImpactEvaluationAgent",
         "KnowledgeBaseRAGAgent",
     ]
     state["decisions"]["skipped_agents"] = [
@@ -531,7 +598,9 @@ def recommend_for_fingerprint(req: FingerprintRecommendationRequest) -> AnalyzeR
     ]
     if selected:
         state["evidence"]["clusters"] = _enrich_pattern_clusters(
-            service_name=req.service_name, fingerprints=[selected]
+            service_name=req.service_name,
+            fingerprints=[selected],
+            anomalies=scenario.get("anomalies", []),
         )
         state["evidence"]["stack_traces"] = [selected["stacktrace"]]
         state["evidence"]["normalized_logs"] = [
@@ -624,6 +693,30 @@ def create_known_pattern(req: KnownPatternSaveRequest) -> dict[str, int | str]:
         confidence=req.confidence,
     )
     return {"status": "saved", "id": pattern_id, "fingerprint": req.fingerprint}
+
+
+@app.post("/pattern-rules/suggest", response_model=PatternRuleProposalResponse)
+def suggest_pattern_rule(req: PatternRuleSuggestRequest) -> PatternRuleProposalResponse:
+    """Suggest a deterministic normalization regex/template for a cluster."""
+
+    proposal = PatternRuleSuggestionAgent().propose(
+        cluster=req.cluster, message=req.message
+    )
+    return PatternRuleProposalResponse(**proposal.__dict__)
+
+
+@app.post("/pattern-rules")
+def create_pattern_rule(req: PatternRuleSaveRequest) -> dict[str, int | str]:
+    """Register an approved pattern normalization rule."""
+
+    rule_id = save_pattern_normalization_rule(
+        name=req.name,
+        match_regex=req.match_regex,
+        template=req.template,
+        enabled=req.enabled,
+        priority=req.priority,
+    )
+    return {"status": "saved", "id": rule_id}
 
 
 @app.post("/approvals")
