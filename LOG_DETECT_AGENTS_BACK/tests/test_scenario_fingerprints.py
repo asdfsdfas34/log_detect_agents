@@ -1,18 +1,24 @@
+import re
 import sqlite3
 from pathlib import Path
 
 from app.agents.pattern_rule_suggestion import PatternRuleSuggestionAgent
+from app.db import scenario_store
 from app.db.scenario_store import (
     approve_result,
     clear_normalization_rule_cache,
+    detect_duplicate_pattern_candidates,
     ensure_schema,
+    fetch_duplicate_pattern_candidates,
     fetch_exception_registry,
     fetch_knowledge_cards,
     fingerprint_id,
+    merge_duplicate_pattern_candidate,
     normalize_log_text,
     register_exception,
     run_detection_pipeline,
     save_pattern_normalization_rule,
+    update_duplicate_pattern_candidate_status,
 )
 
 
@@ -66,6 +72,537 @@ def test_approved_pattern_rule_groups_request_id_variants(
     )
 
     assert normalize_log_text(first) == normalize_log_text(second)
+
+
+def test_detection_pipeline_suggests_duplicate_pattern_candidates(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db_path = tmp_path / "logs.db"
+    monkeypatch.setenv("SQLITE_PATH", str(db_path))
+    clear_normalization_rule_cache()
+    messages = [
+        (
+            "SetImpersonation() userID:1111393, deptID:, "
+            "CurrentUserInfo.UserID:1108366, CurrentUserInfo.ImpersonationAdminID"
+        ),
+        (
+            "SetImpersonation() userID:1103450, deptID:, "
+            "CurrentUserInfo.UserID:, CurrentUserInfo.ImpersonationAdminID"
+        ),
+        (
+            "SetImpersonation() userID:1112074, deptID:00004787, "
+            "CurrentUserInfo.UserID:, CurrentUserInfo.ImpersonationAdminID"
+        ),
+    ]
+    with sqlite3.connect(db_path) as conn:
+        ensure_schema(conn)
+        conn.executemany(
+            """
+            INSERT INTO service_logs(service_name, level, message, stack_trace, created_at)
+            VALUES ('test_appl', 'information', ?, ?, ?)
+            """,
+            [
+                (message, "", f"2026-06-16T10:0{index}:00")
+                for index, message in enumerate(messages)
+            ],
+        )
+        conn.commit()
+
+    result = run_detection_pipeline("test_appl")
+
+    candidates = result["duplicate_pattern_candidates"]
+    assert len(result["fingerprints"]) == 3
+    assert len(candidates) == 1
+    assert len(candidates[0]["fingerprints"]) == 3
+    assert candidates[0]["suggested_regex"].startswith("^SetImpersonation")
+    assert candidates[0]["suggested_template"] == (
+        "SetImpersonation() userID:* deptID:* "
+        "CurrentUserInfo.UserID:* CurrentUserInfo.ImpersonationAdminID"
+    )
+    assert all(
+        re.search(candidates[0]["suggested_regex"], message, flags=re.IGNORECASE)
+        for message in messages
+    )
+    assert fetch_duplicate_pattern_candidates()[0]["candidate_key"] == candidates[0][
+        "candidate_key"
+    ]
+    rule_id = save_pattern_normalization_rule(
+        name="set-impersonation-merge",
+        match_regex=candidates[0]["suggested_regex"],
+        template=candidates[0]["suggested_template"],
+    )
+    update_duplicate_pattern_candidate_status(candidates[0]["candidate_key"], "approved")
+    merge_result = merge_duplicate_pattern_candidate(
+        candidates[0]["candidate_key"], rule_id=rule_id
+    )
+
+    assert merge_result["merged"] is True
+    assert len(merge_result["merged_fingerprints"]) == 3
+    with sqlite3.connect(db_path) as conn:
+        fingerprint_rows = conn.execute(
+            "SELECT fingerprint, occurrence_count FROM fingerprints"
+        ).fetchall()
+        alias_count = conn.execute("SELECT COUNT(*) FROM fingerprint_aliases").fetchone()[
+            0
+        ]
+        known_count = conn.execute(
+            "SELECT COUNT(*) FROM known_patterns WHERE fingerprint=?",
+            (merge_result["canonical_fingerprint"],),
+        ).fetchone()[0]
+        result_row = conn.execute(
+            """
+            SELECT is_known_pattern, is_new_pattern, pattern_status, match_source
+            FROM log_analysis_results
+            WHERE fingerprint=?
+            """,
+            (merge_result["canonical_fingerprint"],),
+        ).fetchone()
+    assert fingerprint_rows == [
+        (merge_result["canonical_fingerprint"], 3),
+    ]
+    assert alias_count == 3
+    assert known_count == 1
+    assert result_row == (1, 0, "known_exact", "known_patterns")
+    assert all(
+        fingerprint_id("test_appl", "INFORMATION", message, "")
+        == merge_result["canonical_fingerprint"]
+        for message in messages
+    )
+    legacy_wrong_fingerprint = fingerprint_id(
+        "test_appl",
+        "INFORMATION",
+        candidates[0]["suggested_template"],
+        candidates[0]["suggested_template"],
+    )
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "UPDATE known_patterns SET fingerprint=? WHERE fingerprint=?",
+            (legacy_wrong_fingerprint, merge_result["canonical_fingerprint"]),
+        )
+        conn.execute(
+            "UPDATE fingerprints SET fingerprint=? WHERE fingerprint=?",
+            (legacy_wrong_fingerprint, merge_result["canonical_fingerprint"]),
+        )
+        conn.execute(
+            "UPDATE log_analysis_results SET fingerprint=? WHERE fingerprint=?",
+            (legacy_wrong_fingerprint, merge_result["canonical_fingerprint"]),
+        )
+        conn.commit()
+    rerun = run_detection_pipeline("test_appl", analysis_date="2026-06-16")
+    assert rerun["summary"]["total_fingerprints"] == 1
+    assert rerun["summary"]["known_patterns"] == 1
+    assert rerun["summary"]["new_patterns"] == 0
+    assert rerun["fingerprints"][0]["fingerprint"] == merge_result["canonical_fingerprint"]
+    assert rerun["fingerprints"][0]["pattern_status"] == "known_exact"
+    with sqlite3.connect(db_path) as conn:
+        repaired_known_count = conn.execute(
+            "SELECT COUNT(*) FROM known_patterns WHERE fingerprint=?",
+            (merge_result["canonical_fingerprint"],),
+        ).fetchone()[0]
+    assert repaired_known_count == 1
+
+
+def test_duplicate_candidates_use_chroma_similarity_for_near_patterns(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db_path = tmp_path / "logs.db"
+    monkeypatch.setenv("SQLITE_PATH", str(db_path))
+    with sqlite3.connect(db_path) as conn:
+        ensure_schema(conn)
+    groups = [
+        {
+            "fingerprint": "FP-EBF7E1",
+            "service_name": "test_appl",
+            "log_level": "INFORMATION",
+            "message": (
+                "FTP 다운로드(FtpClient) 시도(0) / "
+                "/TEST_/erp_user/EA/NEW/WORKFLOW/WTR202606000007.TXT => "
+                "E:\\Test.Appl.Solutions\\Storage\\Disk_FU_Temporary\\EDMS\\ERP\\hash\\a.file"
+            ),
+            "stacktrace": "",
+            "occurrence_count": 1,
+        },
+        {
+            "fingerprint": "FP-6D1E73",
+            "service_name": "test_appl",
+            "log_level": "INFORMATION",
+            "message": (
+                "FTP 다운로드(FtpClient) 시도(0) / "
+                "/TEST_/erp_user/EA/NEW/CONTENTS/TR202606000007_IND.xml => "
+                "E:\\Test.Appl.Solutions\\Storage\\Disk_FU_Temporary\\EDMS\\ERP\\hash\\b.file"
+            ),
+            "stacktrace": "",
+            "occurrence_count": 1,
+        },
+    ]
+
+    def fake_similar_batches(queries: list[str], n_results: int = 5):
+        return [
+            [{"metadata": {"fingerprint": "FP-6D1E73"}, "similarity": 0.98}],
+            [{"metadata": {"fingerprint": "FP-EBF7E1"}, "similarity": 0.98}],
+        ]
+
+    monkeypatch.setattr(
+        scenario_store, "find_similar_pattern_clusters_batch", fake_similar_batches
+    )
+
+    candidates = detect_duplicate_pattern_candidates(groups)
+
+    assert len(candidates) == 1
+    assert candidates[0]["fingerprints"] == ["FP-6D1E73", "FP-EBF7E1"]
+    assert "/TEST_/erp_user/EA/NEW/*/*" in candidates[0]["suggested_template"]
+    assert all(
+        re.search(
+            candidates[0]["suggested_regex"],
+            str(group["message"]),
+            flags=re.IGNORECASE,
+        )
+        for group in groups
+    )
+    assert candidates[0]["confidence"] > 0.87
+
+
+def test_approved_semantic_duplicate_aliases_are_known_on_date_rerun(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db_path = tmp_path / "logs.db"
+    monkeypatch.setenv("SQLITE_PATH", str(db_path))
+    clear_normalization_rule_cache()
+    messages = [
+        (
+            "FTP ?ㅼ슫濡쒕뱶(FtpClient) ?쒕룄(0) / "
+            "/TEST_/erp_user/EA/NEW/WORKFLOW/WTR202606000007.TXT => "
+            "E:\\Test.Appl.Solutions\\Storage\\Disk_FU_Temporary\\EDMS\\ERP\\hash\\a.file"
+        ),
+        (
+            "FTP ?ㅼ슫濡쒕뱶(FtpClient) ?쒕룄(0) / "
+            "/TEST_/erp_user/EA/NEW/CONTENTS/TR202606000007_IND.xml => "
+            "E:\\Test.Appl.Solutions\\Storage\\Disk_FU_Temporary\\EDMS\\ERP\\hash\\b.file"
+        ),
+        (
+            "FTP ?ㅼ슫濡쒕뱶(FtpClient) ?쒕룄(0) / "
+            "/TEST_/erp_user/EA/NEW/APPROVAL/APV202606000007.TXT => "
+            "E:\\Test.Appl.Solutions\\Storage\\Disk_FU_Temporary\\EDMS\\ERP\\hash\\c.file"
+        ),
+        (
+            "FTP ?ㅼ슫濡쒕뱶(FtpClient) ?쒕룄(0) / "
+            "/TEST_/erp_user/EA/NEW/BOARD/BD202606000007.xml => "
+            "E:\\Test.Appl.Solutions\\Storage\\Disk_FU_Temporary\\EDMS\\ERP\\hash\\d.file"
+        ),
+    ]
+
+    with sqlite3.connect(db_path) as conn:
+        ensure_schema(conn)
+        conn.executemany(
+            """
+            INSERT INTO service_logs(service_name, level, message, stack_trace, created_at)
+            VALUES ('test_appl', 'information', ?, '', ?)
+            """,
+            [
+                (message, f"2026-06-30T09:0{index}:00")
+                for index, message in enumerate(messages)
+            ],
+        )
+        conn.commit()
+
+    def fake_similar_batches(queries: list[str], n_results: int = 5):
+        fingerprints = [
+            fingerprint_id("test_appl", "INFORMATION", message, "")
+            for message in messages
+        ]
+        return [
+            [
+                {
+                    "id": f"test_appl:{other}",
+                    "metadata": {"fingerprint": other},
+                    "similarity": 0.98,
+                }
+                for other in fingerprints
+                if other != fingerprints[index]
+            ][:n_results]
+            for index, _query in enumerate(queries)
+        ]
+
+    monkeypatch.setattr(
+        scenario_store, "find_similar_pattern_clusters_batch", fake_similar_batches
+    )
+
+    result = run_detection_pipeline("test_appl", analysis_date="2026-06-30")
+    candidate = result["duplicate_pattern_candidates"][0]
+    rule_id = save_pattern_normalization_rule(
+        name="ftp-semantic-duplicate",
+        match_regex=candidate["suggested_regex"],
+        template=candidate["suggested_template"],
+    )
+    update_duplicate_pattern_candidate_status(candidate["candidate_key"], "approved")
+    merge_result = merge_duplicate_pattern_candidate(
+        candidate["candidate_key"], rule_id=rule_id
+    )
+
+    assert merge_result["merged"] is True
+    assert len(merge_result["merged_fingerprints"]) == 4
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            UPDATE pattern_duplicate_candidates
+            SET suggested_regex='a^'
+            WHERE candidate_key=?
+            """,
+            (candidate["candidate_key"],),
+        )
+        conn.execute(
+            "UPDATE pattern_normalization_rules SET enabled=0 WHERE id=?",
+            (rule_id,),
+        )
+        conn.commit()
+    clear_normalization_rule_cache()
+
+    rerun = run_detection_pipeline("test_appl", analysis_date="2026-06-30")
+
+    assert rerun["summary"]["total_fingerprints"] == 1
+    assert rerun["summary"]["known_patterns"] == 1
+    assert rerun["summary"]["new_patterns"] == 0
+    assert rerun["fingerprints"][0]["fingerprint"] == merge_result["canonical_fingerprint"]
+    assert rerun["fingerprints"][0]["pattern_status"] == "known_exact"
+
+
+def test_known_pattern_signature_absorbs_new_raw_fingerprints_on_date_analysis(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db_path = tmp_path / "logs.db"
+    monkeypatch.setenv("SQLITE_PATH", str(db_path))
+    clear_normalization_rule_cache()
+    canonical_fp = "FP-E0F041"
+    canonical_message = (
+        "FTP 다운로드(FtpClient) 시도(*) / /TEST_/erp_user/EA/NEW/*/* = * PATH\\*.file"
+    )
+    messages = [
+        (
+            "FTP 다운로드(FtpClient) 시도(0) / "
+            "/TEST_/erp_user/EA/NEW/WORKFLOW/WMM202606000001.TXT => "
+            "E:\\Test.Appl.Solutions\\Storage\\Disk_FU_Temporary\\EDMS\\ERP\\hash\\a.file"
+        ),
+        (
+            "FTP 다운로드(FtpClient) 시도(0) / "
+            "/TEST_/erp_user/EA/NEW/APPROVAL/AMM202606000001.TXT => "
+            "E:\\Test.Appl.Solutions\\Storage\\Disk_FU_Temporary\\EDMS\\ERP\\hash\\b.file"
+        ),
+        (
+            "FTP 다운로드(FtpClient) 시도(0) / "
+            "/TEST_/erp_user/EA/NEW/CONTENTS/MM202606000001_IND.xml => "
+            "E:\\Test.Appl.Solutions\\Storage\\Disk_FU_Temporary\\EDMS\\ERP\\hash\\c.file"
+        ),
+    ]
+    raw_fingerprints = {
+        fingerprint_id("test_appl", "INFORMATION", message, "") for message in messages
+    }
+    assert canonical_fp not in raw_fingerprints
+    assert len(raw_fingerprints) == len(messages)
+
+    with sqlite3.connect(db_path) as conn:
+        ensure_schema(conn)
+        conn.execute(
+            """
+            INSERT INTO fingerprints(
+                fingerprint, occurrence_count, log_level, message, stacktrace,
+                service_name, first_seen, last_seen
+            ) VALUES (?, 4, 'INFORMATION', ?, '', 'test_appl',
+                      '2026-06-27T00:00:00', '2026-06-27T00:00:00')
+            """,
+            (canonical_fp, canonical_message),
+        )
+        conn.execute(
+            """
+            INSERT INTO known_patterns(
+                fingerprint, category, sub_category, cause, recommendation, confidence
+            ) VALUES (?, 'Manual', 'Merged Duplicate Pattern',
+                      'Approved duplicate pattern candidate DUP-FTP',
+                      'Pattern normalization rule groups duplicate fingerprints.', 'HIGH')
+            """,
+            (canonical_fp,),
+        )
+        conn.executemany(
+            """
+            INSERT INTO service_logs(service_name, level, message, stack_trace, created_at)
+            VALUES ('test_appl', 'information', ?, '', ?)
+            """,
+            [
+                (message, f"2026-06-28T10:0{index}:00")
+                for index, message in enumerate(messages)
+            ],
+        )
+        conn.commit()
+
+    monkeypatch.setattr(
+        scenario_store,
+        "find_similar_analysis_documents_batch",
+        lambda queries: [[] for _ in queries],
+    )
+    monkeypatch.setattr(
+        scenario_store,
+        "find_similar_pattern_clusters_batch",
+        lambda queries: [[] for _ in queries],
+    )
+
+    result = run_detection_pipeline("test_appl", analysis_date="2026-06-28")
+
+    assert result["summary"]["total_fingerprints"] == 1
+    assert result["summary"]["known_patterns"] == 1
+    assert result["summary"]["new_patterns"] == 0
+    assert result["fingerprints"][0]["fingerprint"] == canonical_fp
+    assert result["fingerprints"][0]["occurrence_count"] == len(messages)
+    assert result["fingerprints"][0]["pattern_status"] == "known_exact"
+    assert result["fingerprints"][0]["match_source"] == "known_patterns"
+
+
+def test_approved_duplicate_candidate_rerun_uses_raw_stacktrace(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db_path = tmp_path / "logs.db"
+    monkeypatch.setenv("SQLITE_PATH", str(db_path))
+    clear_normalization_rule_cache()
+    messages = [
+        (
+            "SetImpersonation() userID:1111393, deptID:, "
+            "CurrentUserInfo.UserID:1108366, CurrentUserInfo.ImpersonationAdminID"
+        ),
+        (
+            "SetImpersonation() userID:1103450, deptID:, "
+            "CurrentUserInfo.UserID:, CurrentUserInfo.ImpersonationAdminID"
+        ),
+    ]
+    with sqlite3.connect(db_path) as conn:
+        ensure_schema(conn)
+        conn.executemany(
+            """
+            INSERT INTO service_logs(service_name, level, message, stack_trace, created_at)
+            VALUES ('test_appl', 'information', ?, ?, ?)
+            """,
+            [
+                (message, message, f"2026-06-16T11:0{index}:00")
+                for index, message in enumerate(messages)
+            ],
+        )
+        conn.commit()
+
+    result = run_detection_pipeline("test_appl")
+    candidate = result["duplicate_pattern_candidates"][0]
+    rule_id = save_pattern_normalization_rule(
+        name="set-impersonation-stack-merge",
+        match_regex=candidate["suggested_regex"],
+        template=candidate["suggested_template"],
+    )
+    update_duplicate_pattern_candidate_status(candidate["candidate_key"], "approved")
+    merge_result = merge_duplicate_pattern_candidate(
+        candidate["candidate_key"], rule_id=rule_id
+    )
+
+    assert merge_result["merged"] is True
+    assert all(
+        fingerprint_id("test_appl", "INFORMATION", message, message)
+        == merge_result["canonical_fingerprint"]
+        for message in messages
+    )
+    rerun = run_detection_pipeline("test_appl", analysis_date="2026-06-16")
+    assert rerun["summary"]["total_fingerprints"] == 1
+    assert rerun["summary"]["known_patterns"] == 1
+    assert rerun["summary"]["new_patterns"] == 0
+    assert rerun["fingerprints"][0]["fingerprint"] == merge_result["canonical_fingerprint"]
+    assert rerun["fingerprints"][0]["pattern_status"] == "known_exact"
+
+
+def test_approved_duplicate_candidate_from_date_analysis_becomes_known(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db_path = tmp_path / "logs.db"
+    monkeypatch.setenv("SQLITE_PATH", str(db_path))
+    clear_normalization_rule_cache()
+    messages = [
+        (
+            "SetImpersonation() userID:1111393, deptID:, "
+            "CurrentUserInfo.UserID:1108366, CurrentUserInfo.ImpersonationAdminID"
+        ),
+        (
+            "SetImpersonation() userID:1103450, deptID:, "
+            "CurrentUserInfo.UserID:, CurrentUserInfo.ImpersonationAdminID"
+        ),
+        (
+            "SetImpersonation() userID:1112074, deptID:00004787, "
+            "CurrentUserInfo.UserID:, CurrentUserInfo.ImpersonationAdminID"
+        ),
+    ]
+    suffixed_messages = [
+        f"{messages[0]} request_id=abc123",
+        f"{messages[1]} sample_seq=42",
+    ]
+    with sqlite3.connect(db_path) as conn:
+        ensure_schema(conn)
+        conn.executemany(
+            """
+            INSERT INTO service_logs(service_name, level, message, stack_trace, created_at)
+            VALUES ('test_appl', 'information', ?, '', ?)
+            """,
+            [
+                (message, f"2026-06-16T12:0{index}:00")
+                for index, message in enumerate(messages)
+            ],
+        )
+        conn.commit()
+
+    result = run_detection_pipeline("test_appl", analysis_date="2026-06-16")
+    candidate = result["duplicate_pattern_candidates"][0]
+    with sqlite3.connect(db_path) as conn:
+        persisted_fingerprint_count = conn.execute(
+            "SELECT COUNT(*) FROM fingerprints"
+        ).fetchone()[0]
+    assert persisted_fingerprint_count == 0
+
+    rule_id = save_pattern_normalization_rule(
+        name="date-analysis-duplicate",
+        match_regex=candidate["suggested_regex"],
+        template=candidate["suggested_template"],
+    )
+    update_duplicate_pattern_candidate_status(candidate["candidate_key"], "approved")
+    merge_result = merge_duplicate_pattern_candidate(
+        candidate["candidate_key"], rule_id=rule_id
+    )
+
+    assert merge_result["merged"] is True
+    assert merge_result["occurrence_count"] == 3
+    with sqlite3.connect(db_path) as conn:
+        known_count = conn.execute(
+            "SELECT COUNT(*) FROM known_patterns WHERE fingerprint=?",
+            (merge_result["canonical_fingerprint"],),
+        ).fetchone()[0]
+    assert known_count == 1
+
+    save_pattern_normalization_rule(
+        name="older-broad-conflicting-rule",
+        match_regex=r"^SetImpersonation\(\).*$",
+        template="SetImpersonation() legacy:*",
+        priority=9999,
+    )
+    with sqlite3.connect(db_path) as conn:
+        conn.executemany(
+            """
+            INSERT INTO service_logs(service_name, level, message, stack_trace, created_at)
+            VALUES ('test_appl', 'information', ?, '', ?)
+            """,
+            [
+                (message, f"2026-06-16T12:1{index}:00")
+                for index, message in enumerate(suffixed_messages)
+            ],
+        )
+        conn.commit()
+    rerun = run_detection_pipeline("test_appl", analysis_date="2026-06-16")
+    assert rerun["duplicate_pattern_candidates"] == []
+    assert rerun["summary"]["total_fingerprints"] == 1
+    assert rerun["summary"]["known_patterns"] == 1
+    assert rerun["summary"]["new_patterns"] == 0
+    assert rerun["fingerprints"][0]["fingerprint"] == merge_result["canonical_fingerprint"]
+    assert rerun["fingerprints"][0]["pattern_status"] == "known_exact"
+    assert rerun["fingerprints"][0]["match_source"] == "known_patterns"
 
 
 def test_fingerprint_normalizes_plain_text_request_values() -> None:
@@ -182,6 +719,19 @@ def test_detection_pipeline_filters_service_logs_by_analysis_date(
     assert result["summary"]["total_logs"] == 1
     assert result["summary"]["processed_new_logs"] == 1
     assert result["fingerprints"][0]["message"] == "target day failure"
+
+
+def test_known_similar_is_not_reported_as_anomaly() -> None:
+    anomaly, anomaly_type, severity = scenario_store._anomaly_type_for(
+        group={"pattern_status": "known_similar", "log_level": "ERROR"},
+        known=True,
+        spike_ratio=100.0,
+        metric={"latest_count": 1, "baseline_count": 0.0},
+    )
+
+    assert anomaly is False
+    assert anomaly_type == "NONE"
+    assert severity == "NONE"
 
 
 def test_fingerprint_normalizes_urls_paths_and_quoted_runtime_values() -> None:

@@ -6,6 +6,8 @@ from typing import Any
 
 from openai import AzureOpenAI, OpenAI
 
+from app.config import settings
+
 try:
     import chromadb
 except Exception:  # pragma: no cover - optional runtime dependency
@@ -45,37 +47,52 @@ def _client():
 def _embedding_api_key() -> str:
     """Resolve the dedicated API key used only for vector embeddings."""
 
-    if _azure_embedding_endpoint():
+    if _embedding_provider() == "azure_openai":
         return _azure_embedding_api_key()
-    return os.getenv("OPENAI_EMBEDDING_API_KEY", "").strip()
+    return os.getenv("OPENAI_EMBEDDING_API_KEY", settings.openai_embedding_api_key).strip()
 
 
 def _azure_embedding_api_key() -> str:
-    return os.getenv("AZURE_OPENAI_EMBEDDING_API_KEY", "").strip()
+    return os.getenv(
+        "AZURE_OPENAI_EMBEDDING_API_KEY", settings.azure_openai_embedding_api_key
+    ).strip()
 
 
 def _embedding_model() -> str:
-    azure_deployment = os.getenv("AZURE_OPENAI_EMBEDDING_DEPLOYMENT", "").strip()
-    if azure_deployment:
-        return azure_deployment
-    return os.getenv("OPENAI_EMBEDDING_MODEL", _DEFAULT_EMBEDDING_MODEL).strip()
+    if _embedding_provider() == "azure_openai":
+        return os.getenv(
+            "AZURE_OPENAI_EMBEDDING_DEPLOYMENT",
+            settings.azure_openai_embedding_deployment,
+        ).strip()
+    return os.getenv("OPENAI_EMBEDDING_MODEL", settings.openai_embedding_model).strip()
 
 
 def _embedding_provider() -> str:
-    return "azure_openai" if _azure_embedding_endpoint() else "openai"
+    provider = os.getenv(
+        "EMBEDDING_PROVIDER",
+        os.getenv("OPENAI_EMBEDDING_PROVIDER", settings.embedding_provider),
+    )
+    normalized = provider.strip().lower().replace("-", "_")
+    if normalized in {"azure", "azure_openai"}:
+        return "azure_openai"
+    return "openai"
 
 
 def _azure_embedding_endpoint() -> str:
     return (
-        os.getenv("AZURE_OPENAI_EMBEDDING_ENDPOINT", "").strip()
+        os.getenv(
+            "AZURE_OPENAI_EMBEDDING_ENDPOINT",
+            settings.azure_openai_embedding_endpoint,
+        ).strip()
         or os.getenv("AZURE_OPENAI_ENDPOINT", "").strip()
     )
 
 
 def _azure_embedding_api_version() -> str:
-    return os.getenv("AZURE_OPENAI_EMBEDDING_API_VERSION", "").strip() or os.getenv(
-        "AZURE_OPENAI_API_VERSION", "2024-02-01"
-    ).strip()
+    return os.getenv(
+        "AZURE_OPENAI_EMBEDDING_API_VERSION",
+        settings.azure_openai_embedding_api_version,
+    ).strip() or os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-01").strip()
 
 
 def _positive_int_env(name: str, default: int) -> int:
@@ -101,14 +118,21 @@ def _embedding_batch_size() -> int:
 def _pattern_dimensions() -> int:
     return _positive_int_env(
         "OPENAI_PATTERN_EMBEDDING_DIMENSIONS",
-        _positive_int_env("OPENAI_EMBEDDING_DIMENSIONS", _DEFAULT_PATTERN_DIMENSIONS),
+        _positive_int_env(
+            "OPENAI_EMBEDDING_DIMENSIONS",
+            settings.openai_pattern_embedding_dimensions or _DEFAULT_PATTERN_DIMENSIONS,
+        ),
     )
 
 
 def _case_card_dimensions() -> int:
     return _positive_int_env(
         "OPENAI_CASE_CARD_EMBEDDING_DIMENSIONS",
-        _positive_int_env("OPENAI_EMBEDDING_DIMENSIONS", _DEFAULT_CASE_CARD_DIMENSIONS),
+        _positive_int_env(
+            "OPENAI_EMBEDDING_DIMENSIONS",
+            settings.openai_case_card_embedding_dimensions
+            or _DEFAULT_CASE_CARD_DIMENSIONS,
+        ),
     )
 
 
@@ -116,8 +140,10 @@ def _embedding_client() -> OpenAI | AzureOpenAI | None:
     api_key = _embedding_api_key()
     if not api_key:
         return None
-    azure_endpoint = _azure_embedding_endpoint()
-    if azure_endpoint:
+    if _embedding_provider() == "azure_openai":
+        azure_endpoint = _azure_embedding_endpoint()
+        if not azure_endpoint or not _embedding_model():
+            return None
         return AzureOpenAI(
             api_key=api_key,
             azure_endpoint=azure_endpoint,
@@ -220,6 +246,34 @@ def _upsert_documents(
         return True
     except Exception:
         return False
+
+
+def _delete_documents(*, collection_name: str, ids: list[str]) -> int:
+    client = _client()
+    if client is None or not ids:
+        return 0
+    try:
+        collection = client.get_or_create_collection(name=collection_name)
+        out = collection.get(ids=ids)
+        existing_ids = [str(item) for item in out.get("ids", [])]
+        if not existing_ids:
+            return 0
+        collection.delete(ids=existing_ids)
+        return len(existing_ids)
+    except Exception:
+        return 0
+
+
+def delete_pattern_clusters(doc_ids: list[str]) -> dict[str, int]:
+    """Delete old pattern cluster documents from ChromaDB collections."""
+
+    ids = [str(doc_id) for doc_id in doc_ids if doc_id]
+    v1_deleted = _delete_documents(collection_name=_PATTERN_COLLECTION_V1, ids=ids)
+    v2_deleted = _delete_documents(
+        collection_name=_PATTERN_COLLECTION_V2,
+        ids=[f"pattern-template-v2:{doc_id}" for doc_id in ids],
+    )
+    return {"v1_deleted": v1_deleted, "v2_deleted": v2_deleted}
 
 
 def _existing_collection_ids(*, collection_name: str, ids: list[str]) -> set[str]:

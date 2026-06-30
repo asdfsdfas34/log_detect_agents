@@ -4,6 +4,8 @@ import type {
   ApprovalResponse,
   AnalyzeRequest,
   AnalyzeResponse,
+  DuplicatePatternCandidateActionResponse,
+  DuplicatePatternCandidatesResponse,
   ExceptionRegisterRequest,
   ExceptionRegisterResponse,
   ExceptionRegistryResponse,
@@ -78,6 +80,22 @@ export const agentApi = {
   },
   savePatternRule(payload: PatternRuleSaveRequest) {
     return apiClient.post<PatternRuleSaveResponse>('/pattern-rules', payload)
+  },
+  duplicatePatternCandidates(params?: { status?: string; limit?: number }) {
+    return apiClient.get<DuplicatePatternCandidatesResponse>(
+      '/pattern-duplicates',
+      { params }
+    )
+  },
+  approveDuplicatePatternCandidate(candidateKey: string) {
+    return apiClient.post<DuplicatePatternCandidateActionResponse>(
+      `/pattern-duplicates/${candidateKey}/approve`
+    )
+  },
+  rejectDuplicatePatternCandidate(candidateKey: string) {
+    return apiClient.post<DuplicatePatternCandidateActionResponse>(
+      `/pattern-duplicates/${candidateKey}/reject`
+    )
   },
   knowledgeCards(params?: { fingerprint?: string; limit?: number }) {
     return apiClient.get<KnowledgeCardListResponse>('/knowledge-cards', {

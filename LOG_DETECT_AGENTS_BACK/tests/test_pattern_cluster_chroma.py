@@ -3,6 +3,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+import pytest
+
 from app import main
 from app.db import chroma_store
 
@@ -10,6 +12,7 @@ from app.db import chroma_store
 class FakeCollection:
     def __init__(self) -> None:
         self.upserts: list[dict[str, Any]] = []
+        self.deletes: list[dict[str, Any]] = []
         self.existing_ids: set[str] = set()
 
     def upsert(self, **kwargs: Any) -> None:
@@ -19,6 +22,10 @@ class FakeCollection:
     def get(self, **kwargs: Any) -> dict[str, Any]:
         ids = [str(item) for item in kwargs.get("ids", [])]
         return {"ids": [item for item in ids if item in self.existing_ids]}
+
+    def delete(self, **kwargs: Any) -> None:
+        self.deletes.append(kwargs)
+        self.existing_ids.difference_update(str(item) for item in kwargs.get("ids", []))
 
     def query(self, **kwargs: Any) -> dict[str, Any]:
         queries = kwargs.get("query_embeddings") or kwargs.get("query_texts") or []
@@ -78,6 +85,14 @@ class FakeOpenAIClient:
         self.embeddings = FakeEmbeddings()
 
 
+class FakeOpenAIClientWithKwargs(FakeOpenAIClient):
+    calls: list[dict[str, Any]] = []
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__()
+        self.calls.append(kwargs)
+
+
 class FailingOpenAIClient:
     def __init__(self) -> None:
         self.embeddings = FailingEmbeddings()
@@ -89,6 +104,23 @@ class FakeAzureOpenAIClient(FakeOpenAIClient):
     def __init__(self, **kwargs: Any) -> None:
         super().__init__()
         self.calls.append(kwargs)
+
+
+@pytest.fixture(autouse=True)
+def _clear_embedding_provider_env(monkeypatch) -> None:
+    for name in [
+        "EMBEDDING_PROVIDER",
+        "OPENAI_EMBEDDING_PROVIDER",
+        "AZURE_OPENAI_EMBEDDING_API_KEY",
+        "AZURE_OPENAI_EMBEDDING_ENDPOINT",
+        "AZURE_OPENAI_ENDPOINT",
+        "AZURE_OPENAI_EMBEDDING_API_VERSION",
+        "AZURE_OPENAI_API_VERSION",
+        "AZURE_OPENAI_EMBEDDING_DEPLOYMENT",
+        "OPENAI_BASE_URL",
+        "OPENAI_EMBEDDING_BASE_URL",
+    ]:
+        monkeypatch.delenv(name, raising=False)
 
 
 def test_pattern_cluster_chroma_uses_dedicated_collection(monkeypatch) -> None:
@@ -108,6 +140,29 @@ def test_pattern_cluster_chroma_uses_dedicated_collection(monkeypatch) -> None:
     ]
     assert matches[0]["id"] == "checkout-api:FP-OLD"
     assert matches[0]["similarity"] == 0.8200000000000001
+
+
+def test_delete_pattern_clusters_skips_missing_ids(monkeypatch) -> None:
+    client = FakeClient()
+    monkeypatch.setattr(chroma_store, "_client", lambda: client)
+    client.get_or_create_collection("pattern_clusters").existing_ids.add(
+        "checkout-api:FP-EXISTS"
+    )
+    client.get_or_create_collection("pattern_templates_v2").existing_ids.add(
+        "pattern-template-v2:checkout-api:FP-EXISTS"
+    )
+
+    result = chroma_store.delete_pattern_clusters(
+        ["checkout-api:FP-EXISTS", "checkout-api:FP-MISSING"]
+    )
+
+    assert result == {"v1_deleted": 1, "v2_deleted": 1}
+    assert client.collections["pattern_clusters"].deletes == [
+        {"ids": ["checkout-api:FP-EXISTS"]}
+    ]
+    assert client.collections["pattern_templates_v2"].deletes == [
+        {"ids": ["pattern-template-v2:checkout-api:FP-EXISTS"]}
+    ]
 
 
 def test_pattern_cluster_v2_uses_dedicated_openai_embedding_key(monkeypatch) -> None:
@@ -328,9 +383,10 @@ def test_find_related_analyses_reuses_one_embedding_call_across_collections(
     assert embedding_client.embeddings.calls[0]["input"] == ["incident query"]
 
 
-def test_embedding_client_prefers_azure_openai_settings(monkeypatch) -> None:
+def test_embedding_client_uses_azure_openai_when_configured(monkeypatch) -> None:
     FakeAzureOpenAIClient.calls = []
     monkeypatch.setattr(chroma_store, "AzureOpenAI", FakeAzureOpenAIClient)
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "azure_openai")
     monkeypatch.setenv("AZURE_OPENAI_EMBEDDING_API_KEY", "azure-embedding-key")
     monkeypatch.setenv(
         "AZURE_OPENAI_EMBEDDING_ENDPOINT",
@@ -351,6 +407,30 @@ def test_embedding_client_prefers_azure_openai_settings(monkeypatch) -> None:
     }
     assert chroma_store._embedding_model() == "embedding-deployment"
     assert chroma_store._embedding_provider() == "azure_openai"
+
+
+def test_embedding_client_uses_openai_when_provider_is_openai(monkeypatch) -> None:
+    FakeOpenAIClientWithKwargs.calls = []
+    monkeypatch.setattr(chroma_store, "OpenAI", FakeOpenAIClientWithKwargs)
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_EMBEDDING_API_KEY", "openai-embedding-key")
+    monkeypatch.setenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-large")
+    monkeypatch.setenv("AZURE_OPENAI_EMBEDDING_API_KEY", "azure-embedding-key")
+    monkeypatch.setenv(
+        "AZURE_OPENAI_EMBEDDING_ENDPOINT",
+        "https://example-resource.openai.azure.com",
+    )
+    monkeypatch.setenv("AZURE_OPENAI_EMBEDDING_DEPLOYMENT", "embedding-deployment")
+
+    client = chroma_store._embedding_client()
+
+    assert isinstance(client, FakeOpenAIClientWithKwargs)
+    assert FakeOpenAIClientWithKwargs.calls[0] == {
+        "api_key": "openai-embedding-key",
+        "base_url": None,
+    }
+    assert chroma_store._embedding_model() == "text-embedding-3-large"
+    assert chroma_store._embedding_provider() == "openai"
 
 
 def test_analysis_documents_route_to_v2_collections(monkeypatch) -> None:

@@ -108,6 +108,53 @@ export interface PatternRuleSaveResponse {
   id: number
 }
 
+export interface DuplicatePatternCandidate {
+  candidate_key: string
+  service_name: string
+  log_level: string
+  signature: string
+  fingerprints: string[]
+  fingerprint_details?: Record<
+    string,
+    {
+      fingerprint: string
+      service_name?: string
+      log_level?: string
+      message?: string
+      normalized_message?: string
+      stacktrace?: string
+      occurrence_count?: number
+      first_seen?: string
+      last_seen?: string
+    }
+  >
+  suggested_regex: string
+  suggested_template: string
+  confidence: number
+  reason: string
+  status: string
+  created_at?: string
+  updated_at?: string
+}
+
+export interface DuplicatePatternCandidatesResponse {
+  candidates: DuplicatePatternCandidate[]
+}
+
+export interface DuplicatePatternCandidateActionResponse {
+  status: string
+  rule_id?: number
+  candidate?: DuplicatePatternCandidate | null
+  merge?: {
+    merged: boolean
+    canonical_fingerprint?: string
+    merged_fingerprints?: string[]
+    occurrence_count?: number
+    reason?: string
+    chroma?: Record<string, number>
+  }
+}
+
 export interface RecommendationDeleteResponse {
   status: string
   id: number
@@ -253,6 +300,7 @@ export interface SharedState {
     stack_traces: string[]
     incident_candidates?: Array<Record<string, unknown>>
     new_pattern_candidates?: Array<Record<string, unknown>>
+    duplicate_pattern_candidates?: DuplicatePatternCandidate[]
     summary?: ScenarioSummary
     recommendation?: Record<string, unknown>
   }

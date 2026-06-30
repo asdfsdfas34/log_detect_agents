@@ -85,6 +85,14 @@
     <ErrorState v-else-if="store.error" :message="store.error" />
 
     <template v-if="store.state">
+      <DuplicatePatternCandidatePanel
+        :candidates="store.duplicatePatternCandidates"
+        :loading="store.loadingDuplicatePatternCandidates"
+        :busy-key="duplicateCandidateBusyKey"
+        @refresh="store.fetchDuplicatePatternCandidates"
+        @approve="handleApproveDuplicateCandidate"
+        @reject="handleRejectDuplicateCandidate"
+      />
       <PatternClusterTable
         :clusters="store.state.evidence.clusters"
         @save-known-pattern="handleSaveKnownPattern"
@@ -190,6 +198,7 @@
 import { computed, onMounted, ref } from 'vue'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import OverviewCard from '@/components/dashboard/OverviewCard.vue'
+import DuplicatePatternCandidatePanel from '@/components/dashboard/DuplicatePatternCandidatePanel.vue'
 import PatternClusterTable from '@/components/dashboard/PatternClusterTable.vue'
 import AnomalyTimelineChart from '@/components/dashboard/AnomalyTimelineChart.vue'
 import RecommendationPanel from '@/components/dashboard/RecommendationPanel.vue'
@@ -200,12 +209,13 @@ import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
 import ErrorState from '@/components/common/ErrorState.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import { useLogDetectStore } from '@/stores/logDetectStore'
-import type { Cluster } from '@/types/agentTypes'
+import type { Cluster, DuplicatePatternCandidate } from '@/types/agentTypes'
 
 const store = useLogDetectStore()
 const serviceName = ref('')
 const analysisDate = ref(new Date().toISOString().slice(0, 10))
 const showServiceLayer = ref(false)
+const duplicateCandidateBusyKey = ref<string | null>(null)
 const canModerateRecommendation = computed(
   () =>
     Boolean(store.state?.final.generated_answer) &&
@@ -287,6 +297,41 @@ async function handleSuggestPatternRule(cluster: Cluster) {
   )
 }
 
+async function handleApproveDuplicateCandidate(
+  candidate: DuplicatePatternCandidate
+) {
+  const approved = window.confirm(
+    [
+      `${candidate.fingerprints.join(', ')} 후보를 하나의 pattern rule로 승인하시겠습니까?`,
+      '',
+      `Template: ${candidate.suggested_template}`,
+      `Regex: ${candidate.suggested_regex}`
+    ].join('\n')
+  )
+  if (!approved) return
+  duplicateCandidateBusyKey.value = candidate.candidate_key
+  try {
+    await store.approveDuplicatePatternCandidate(candidate.candidate_key)
+  } finally {
+    duplicateCandidateBusyKey.value = null
+  }
+}
+
+async function handleRejectDuplicateCandidate(
+  candidate: DuplicatePatternCandidate
+) {
+  const approved = window.confirm(
+    `${candidate.candidate_key} duplicate 후보를 거절하시겠습니까?`
+  )
+  if (!approved) return
+  duplicateCandidateBusyKey.value = candidate.candidate_key
+  try {
+    await store.rejectDuplicatePatternCandidate(candidate.candidate_key)
+  } finally {
+    duplicateCandidateBusyKey.value = null
+  }
+}
+
 function handleRefreshRecommendations() {
   const trimmed = serviceName.value.trim()
   void store.fetchRecommendations(trimmed || undefined)
@@ -346,6 +391,7 @@ onMounted(async () => {
   await store.fetchRecommendations()
   await store.fetchKnowledgeCards()
   await store.fetchExceptionRegistry()
+  await store.fetchDuplicatePatternCandidates()
   await store.fetchLangSmithRuns()
 })
 </script>

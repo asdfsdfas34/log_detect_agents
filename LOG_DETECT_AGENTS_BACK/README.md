@@ -41,6 +41,26 @@ OPENAI_PATTERN_EMBEDDING_DIMENSIONS=1024
 OPENAI_CASE_CARD_EMBEDDING_DIMENSIONS=1536
 ```
 
+Embedding provider can be selected with `EMBEDDING_PROVIDER`.
+
+OpenAI:
+
+```bash
+EMBEDDING_PROVIDER=openai
+OPENAI_EMBEDDING_API_KEY=...
+OPENAI_EMBEDDING_MODEL=text-embedding-3-large
+```
+
+Azure OpenAI:
+
+```bash
+EMBEDDING_PROVIDER=azure_openai
+AZURE_OPENAI_EMBEDDING_API_KEY=...
+AZURE_OPENAI_EMBEDDING_ENDPOINT=https://<resource>.openai.azure.com
+AZURE_OPENAI_EMBEDDING_API_VERSION=2024-02-01
+AZURE_OPENAI_EMBEDDING_DEPLOYMENT=<embedding-deployment-name>
+```
+
 ### 테스트 데이터 생성
 
 ```bash

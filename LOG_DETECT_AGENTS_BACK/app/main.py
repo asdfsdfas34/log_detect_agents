@@ -4,7 +4,7 @@ import logging
 from datetime import date
 from uuid import uuid4
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -18,13 +18,16 @@ from app.db.chroma_store import (
 )
 from app.db.scenario_store import (
     approve_result,
+    fetch_duplicate_pattern_candidates,
     fetch_exception_registry,
     fetch_knowledge_cards,
+    merge_duplicate_pattern_candidate,
     normalize_log_text,
     register_exception,
     run_detection_pipeline,
     save_known_pattern,
     save_pattern_normalization_rule,
+    update_duplicate_pattern_candidate_status,
 )
 from app.db.sqlite_store import (
     delete_recommendation_result,
@@ -139,6 +142,10 @@ class PatternRuleSaveRequest(BaseModel):
     template: str
     enabled: bool = True
     priority: int = 100
+
+
+class DuplicatePatternCandidatesResponse(BaseModel):
+    candidates: list[dict]
 
 
 class ApprovalRequest(BaseModel):
@@ -485,6 +492,9 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
         result["evidence"]["known_pattern_matches"] = scenario.get(
             "recommendations", []
         )[:5]
+        result["evidence"]["duplicate_pattern_candidates"] = scenario.get(
+            "duplicate_pattern_candidates", []
+        )
         result["evidence"]["incident_candidates"] = [
             {
                 "fingerprint": scenario["recommendation"].get("fingerprint"),
@@ -717,6 +727,62 @@ def create_pattern_rule(req: PatternRuleSaveRequest) -> dict[str, int | str]:
         priority=req.priority,
     )
     return {"status": "saved", "id": rule_id}
+
+
+@app.get(
+    "/pattern-duplicates",
+    response_model=DuplicatePatternCandidatesResponse,
+)
+def list_duplicate_pattern_candidates(
+    status: str = "pending", limit: int = 50
+) -> DuplicatePatternCandidatesResponse:
+    """Return duplicate fingerprint candidates found after analysis."""
+
+    return DuplicatePatternCandidatesResponse(
+        candidates=fetch_duplicate_pattern_candidates(status=status, limit=limit)
+    )
+
+
+@app.post("/pattern-duplicates/{candidate_key}/approve")
+def approve_duplicate_pattern_candidate(candidate_key: str) -> dict[str, object]:
+    """Approve a duplicate candidate and register its suggested normalization rule."""
+
+    candidates = fetch_duplicate_pattern_candidates(status="", limit=500)
+    candidate = next(
+        (
+            item
+            for item in candidates
+            if str(item.get("candidate_key")) == candidate_key
+        ),
+        None,
+    )
+    if candidate is None:
+        raise HTTPException(status_code=404, detail="Duplicate candidate not found")
+    rule_id = save_pattern_normalization_rule(
+        name=f"duplicate:{candidate_key}",
+        match_regex=str(candidate["suggested_regex"]),
+        template=str(candidate["suggested_template"]),
+        enabled=True,
+        priority=120,
+    )
+    updated = update_duplicate_pattern_candidate_status(candidate_key, "approved")
+    merge_result = merge_duplicate_pattern_candidate(candidate_key, rule_id=rule_id)
+    return {
+        "status": "approved",
+        "rule_id": rule_id,
+        "candidate": updated,
+        "merge": merge_result,
+    }
+
+
+@app.post("/pattern-duplicates/{candidate_key}/reject")
+def reject_duplicate_pattern_candidate(candidate_key: str) -> dict[str, object]:
+    """Reject a duplicate candidate so it is not proposed again."""
+
+    updated = update_duplicate_pattern_candidate_status(candidate_key, "rejected")
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Duplicate candidate not found")
+    return {"status": "rejected", "candidate": updated}
 
 
 @app.post("/approvals")

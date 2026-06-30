@@ -5,6 +5,7 @@ import { connectExecutionStream } from '@/services/streamingService'
 import type {
   AgentStepStatus,
   AnalyzeRequest,
+  DuplicatePatternCandidate,
   ExceptionRegistryItem,
   ExecutionStatus,
   KnowledgeCardItem,
@@ -47,12 +48,14 @@ export const useLogDetectStore = defineStore('logDetect', () => {
   const loadingKnowledgeCards = ref(false)
   const loadingExceptions = ref(false)
   const loadingLangSmithRuns = ref(false)
+  const loadingDuplicatePatternCandidates = ref(false)
   const error = ref<string | null>(null)
   const serviceOptions = ref<string[]>([])
   const state = ref<SharedState | null>(null)
   const recommendationHistory = ref<RecommendationHistoryItem[]>([])
   const knowledgeCards = ref<KnowledgeCardItem[]>([])
   const exceptionRegistry = ref<ExceptionRegistryItem[]>([])
+  const duplicatePatternCandidates = ref<DuplicatePatternCandidate[]>([])
   const langSmithRuns = ref<LangSmithRunItem[]>([])
   const langSmithStatus = ref<{
     enabled: boolean
@@ -294,6 +297,57 @@ export const useLogDetectStore = defineStore('logDetect', () => {
     }
   }
 
+  async function fetchDuplicatePatternCandidates() {
+    loadingDuplicatePatternCandidates.value = true
+    try {
+      const { data } = await agentApi.duplicatePatternCandidates({
+        status: 'pending',
+        limit: 50
+      })
+      duplicatePatternCandidates.value = data.candidates
+    } catch {
+      addToast('error', 'Duplicate pattern 후보를 불러오지 못했습니다.')
+    } finally {
+      loadingDuplicatePatternCandidates.value = false
+    }
+  }
+
+  async function approveDuplicatePatternCandidate(candidateKey: string) {
+    try {
+      const { data } = await agentApi.approveDuplicatePatternCandidate(candidateKey)
+      duplicatePatternCandidates.value = duplicatePatternCandidates.value.filter(
+        (candidate) => candidate.candidate_key !== candidateKey
+      )
+      const canonical = data.merge?.canonical_fingerprint
+      addToast(
+        'info',
+        canonical
+          ? `Duplicate pattern 승인 완료: ${canonical}`
+          : `Duplicate pattern 승인 완료: ${candidateKey}`
+      )
+      return true
+    } catch (caught) {
+      error.value = (caught as Error).message
+      addToast('error', `Duplicate pattern 승인 실패: ${error.value}`)
+      return false
+    }
+  }
+
+  async function rejectDuplicatePatternCandidate(candidateKey: string) {
+    try {
+      await agentApi.rejectDuplicatePatternCandidate(candidateKey)
+      duplicatePatternCandidates.value = duplicatePatternCandidates.value.filter(
+        (candidate) => candidate.candidate_key !== candidateKey
+      )
+      addToast('info', `Duplicate pattern 거절 완료: ${candidateKey}`)
+      return true
+    } catch (caught) {
+      error.value = (caught as Error).message
+      addToast('error', `Duplicate pattern 거절 실패: ${error.value}`)
+      return false
+    }
+  }
+
   function startPollingHealth() {
     closeStreamAndPolling()
     pollTimer = setInterval(async () => {
@@ -343,12 +397,15 @@ export const useLogDetectStore = defineStore('logDetect', () => {
     try {
       const { data } = await agentApi.analyze(request)
       state.value = data.result
+      duplicatePatternCandidates.value =
+        data.result.evidence.duplicate_pattern_candidates ?? []
       markTimelineFromState(data.result)
       executionStatus.value =
         data.result.decisions.failures.length > 0 ? 'failed' : 'completed'
       lastExecutionAt.value = new Date().toISOString()
       await fetchHealth()
       await fetchRecommendations(serviceName)
+      await fetchDuplicatePatternCandidates()
       await fetchLangSmithRuns()
     } catch (caught) {
       executionStatus.value = 'failed'
@@ -554,11 +611,13 @@ export const useLogDetectStore = defineStore('logDetect', () => {
     loadingKnowledgeCards,
     loadingExceptions,
     loadingLangSmithRuns,
+    loadingDuplicatePatternCandidates,
     error,
     state,
     recommendationHistory,
     knowledgeCards,
     exceptionRegistry,
+    duplicatePatternCandidates,
     langSmithRuns,
     langSmithStatus,
     serviceOptions,
@@ -575,6 +634,9 @@ export const useLogDetectStore = defineStore('logDetect', () => {
     deleteSavedRecommendation,
     fetchKnowledgeCards,
     fetchExceptionRegistry,
+    fetchDuplicatePatternCandidates,
+    approveDuplicatePatternCandidate,
+    rejectDuplicatePatternCandidate,
     saveKnownPattern,
     suggestPatternRule,
     savePatternRule,

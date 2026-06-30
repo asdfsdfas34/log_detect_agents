@@ -1,0 +1,20 @@
+Mini-AIOps 
+log parsing/template extraction -> embedding -> clustering -> incident pattern catalog
+event -> time-window aggrigation 과 시스템 상태 백터로 trajectory modeling 가능 
+recursive Flow Matching (RecFM) 
+Agent 역할 구분 및 workflow 생성 - 현재는 로그분석자동화 pipeline + rag 입니다.  관찰을 쌓고, 
+지식화하는 과정의 workflow 흐름이 보이면 좋겠습니다. 
+
+| Agent                 | 역할                    |
+| --------------------- | --------------------- |
+| Collector/Normalizer  | 로그 수집·정규화        |
+| Fingerprint Agent     | 템플릿화·중복 집계       |
+| Pattern Agent         | Known/New 분류          |
+| Anomaly Agent         | spike/new/silence 탐지  |
+| Recommendation Agent  | LLM + RAG 기반 원인/조치 후보 생성    |
+| Feedback/Memory Agent | 승인·반려·예외·Case Card 등록 |
+
+PatternOps Registry(skillOpt 차용) https://github.com/Hik289/SkillOps
+로그/에러/대응 패턴을 운영 가능한 지식 자산으로 관리하는 Ops 레이어로 변환하는 게 핵심
+Known Pattern Registry가 커질수록 생기는 기술부채를 관리할 수 있습니다.
+Registry Maintenance Loop를 만들 수 있습니다.  실시간 탐지 루프와 지식관리 루프를 분리

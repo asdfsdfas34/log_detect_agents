@@ -2,8 +2,8 @@
 
 import os
 from dataclasses import dataclass
-
 from pathlib import Path
+
 from dotenv import load_dotenv
 
 # config.py 파일 기준 경로
@@ -35,6 +35,13 @@ def _resolve_positive_int(value: str, default: int) -> int:
     return parsed if parsed > 0 else default
 
 
+def _resolve_embedding_provider(value: str) -> str:
+    normalized = value.strip().lower().replace("-", "_")
+    if normalized in {"azure", "azure_openai"}:
+        return "azure_openai"
+    return "openai"
+
+
 @dataclass(frozen=True)
 class Settings:
     """Environment-driven runtime settings."""
@@ -46,6 +53,11 @@ class Settings:
     openai_embedding_dimensions: int
     openai_pattern_embedding_dimensions: int
     openai_case_card_embedding_dimensions: int
+    embedding_provider: str
+    azure_openai_embedding_api_key: str
+    azure_openai_embedding_endpoint: str
+    azure_openai_embedding_api_version: str
+    azure_openai_embedding_deployment: str
     sqlite_path: str
     chromadb_path: str
     log_lookback_days: int
@@ -74,6 +86,20 @@ settings = Settings(
     openai_case_card_embedding_dimensions=_resolve_positive_int(
         os.getenv("OPENAI_CASE_CARD_EMBEDDING_DIMENSIONS", ""),
         _resolve_positive_int(os.getenv("OPENAI_EMBEDDING_DIMENSIONS", ""), 1536),
+    ),
+    embedding_provider=_resolve_embedding_provider(
+        os.getenv("EMBEDDING_PROVIDER", os.getenv("OPENAI_EMBEDDING_PROVIDER", "openai"))
+    ),
+    azure_openai_embedding_api_key=os.getenv("AZURE_OPENAI_EMBEDDING_API_KEY", ""),
+    azure_openai_embedding_endpoint=os.getenv(
+        "AZURE_OPENAI_EMBEDDING_ENDPOINT", os.getenv("AZURE_OPENAI_ENDPOINT", "")
+    ),
+    azure_openai_embedding_api_version=os.getenv(
+        "AZURE_OPENAI_EMBEDDING_API_VERSION",
+        os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-01"),
+    ),
+    azure_openai_embedding_deployment=os.getenv(
+        "AZURE_OPENAI_EMBEDDING_DEPLOYMENT", ""
     ),
     sqlite_path=_resolve_project_path(
         os.getenv("SQLITE_PATH", ""), os.getenv("POSTGRESQL_URL", "")
