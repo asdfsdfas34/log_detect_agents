@@ -34,6 +34,36 @@
       </button>
     </div>
 
+    <div
+      v-if="activeTab === 'anomaly'"
+      class="mb-4 flex flex-wrap gap-2 rounded border border-slate-200 bg-slate-50 p-2"
+    >
+      <button
+        v-for="tab in anomalyTabs"
+        :key="tab.key"
+        class="rounded px-3 py-1.5 text-xs font-semibold"
+        type="button"
+        :class="
+          activeAnomalyTab === tab.key
+            ? 'bg-red-600 text-white'
+            : 'bg-white text-slate-600 hover:text-slate-900'
+        "
+        @click="activeAnomalyTab = tab.key"
+      >
+        {{ tab.label }}
+        <span
+          class="ml-1 rounded px-1.5 py-0.5 text-[11px]"
+          :class="
+            activeAnomalyTab === tab.key
+              ? 'bg-white/20 text-white'
+              : 'bg-slate-100 text-slate-500'
+          "
+        >
+          {{ tab.count }}
+        </span>
+      </button>
+    </div>
+
     <div class="overflow-x-auto">
       <table class="min-w-full table-fixed text-left text-sm">
         <thead class="text-xs uppercase text-slate-500">
@@ -89,7 +119,7 @@
                 class="rounded px-2 py-1 text-xs font-semibold hover:ring-2 hover:ring-cyan-200"
                 :class="statusClass(item.pattern_status)"
                 type="button"
-                @click="selectedSimilarCluster = item"
+                @click="openSimilarCluster(item)"
               >
                 {{ statusLabel(item.pattern_status) }}
               </button>
@@ -106,12 +136,18 @@
               <div class="font-semibold text-slate-700">
                 {{ similarity(item) }}%
               </div>
-              <div
-                v-if="item.similar_clusters?.length"
-                class="text-xs text-slate-400"
+              <button
+                class="text-xs font-semibold text-cyan-700 hover:text-cyan-900 hover:underline"
+                type="button"
+                :disabled="!props.serviceName || similarLoadingKey === item.cluster"
+                @click="openSimilarCluster(item)"
               >
-                {{ item.similar_clusters.length }} matches
-              </div>
+                <span v-if="similarLoadingKey === item.cluster">Loading...</span>
+                <span v-else-if="item.similar_clusters?.length">
+                  {{ item.similar_clusters.length }} matches
+                </span>
+                <span v-else>Load matches</span>
+              </button>
             </td>
             <td class="py-2 text-right">
               <div class="flex justify-end gap-2">
@@ -295,8 +331,20 @@
             <h5 class="mb-2 text-sm font-semibold text-slate-700">
               Matched Patterns
             </h5>
+            <p
+              v-if="similarLoadingKey === selectedSimilarCluster.cluster"
+              class="rounded border border-slate-200 p-4 text-sm text-slate-500"
+            >
+              Loading similar pattern details...
+            </p>
+            <p
+              v-else-if="similarError"
+              class="rounded border border-red-100 bg-red-50 p-4 text-sm text-red-700"
+            >
+              {{ similarError }}
+            </p>
             <div
-              v-if="selectedSimilarCluster.similar_clusters?.length"
+              v-else-if="selectedSimilarCluster.similar_clusters?.length"
               class="space-y-3"
             >
               <article
@@ -346,12 +394,14 @@
 
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
+import { agentApi } from '@/api/agentApi'
 import type { Cluster } from '@/types/agentTypes'
 
 const PAGE_SIZE = 10
 type PatternTab = 'similar' | 'new' | 'known' | 'observed' | 'anomaly'
+type AnomalyTab = 'all' | 'decrease' | 'increase' | 'absence' | 'recurrence'
 
-const props = defineProps<{ clusters: Cluster[] }>()
+const props = defineProps<{ clusters: Cluster[]; serviceName: string }>()
 const emit = defineEmits<{
   'save-known-pattern': [cluster: Cluster]
   'request-recommendation': [cluster: Cluster]
@@ -361,7 +411,10 @@ const emit = defineEmits<{
 const currentPage = ref(1)
 const selectedCluster = ref<Cluster | null>(null)
 const selectedSimilarCluster = ref<Cluster | null>(null)
+const similarLoadingKey = ref<string | null>(null)
+const similarError = ref('')
 const activeTab = ref<PatternTab>('similar')
+const activeAnomalyTab = ref<AnomalyTab>('all')
 
 const sortedClusters = computed(() =>
   [...props.clusters].sort((a, b) => b.count - a.count)
@@ -390,8 +443,46 @@ const observedClusters = computed(() =>
 )
 
 const anomalyClusters = computed(() =>
-  sortedClusters.value.filter((cluster) => cluster.anomaly_detected)
+  sortedClusters.value.filter(
+    (cluster) =>
+      cluster.anomaly_detected && cluster.pattern_status !== 'new_pattern'
+  )
 )
+
+const filteredAnomalyClusters = computed(() => {
+  if (activeAnomalyTab.value === 'all') return anomalyClusters.value
+  return anomalyClusters.value.filter(
+    (cluster) => anomalyTabFor(cluster) === activeAnomalyTab.value
+  )
+})
+
+const anomalyTabs = computed(() => [
+  {
+    key: 'all' as const,
+    label: 'ALL',
+    count: anomalyClusters.value.length
+  },
+  {
+    key: 'decrease' as const,
+    label: 'Pattern Decrease',
+    count: anomalyCountByTab('decrease')
+  },
+  {
+    key: 'increase' as const,
+    label: 'Pattern Increase',
+    count: anomalyCountByTab('increase')
+  },
+  {
+    key: 'absence' as const,
+    label: 'Pattern Absence',
+    count: anomalyCountByTab('absence')
+  },
+  {
+    key: 'recurrence' as const,
+    label: 'Pattern Reccur',
+    count: anomalyCountByTab('recurrence')
+  }
+])
 
 const tabs = computed(() => [
   {
@@ -425,7 +516,7 @@ const activeClusters = computed(() => {
   if (activeTab.value === 'similar') return similarClusters.value
   if (activeTab.value === 'new') return newClusters.value
   if (activeTab.value === 'observed') return observedClusters.value
-  if (activeTab.value === 'anomaly') return anomalyClusters.value
+  if (activeTab.value === 'anomaly') return filteredAnomalyClusters.value
   return knownClusters.value
 })
 
@@ -455,6 +546,11 @@ watch(
 
 watch(activeTab, () => {
   currentPage.value = 1
+  activeAnomalyTab.value = 'all'
+})
+
+watch(activeAnomalyTab, () => {
+  currentPage.value = 1
 })
 
 watch(pageCount, (count) => {
@@ -462,7 +558,15 @@ watch(pageCount, (count) => {
 })
 
 function similarity(item: Cluster): number {
-  return item.semantic_similarity ?? 0
+  if (item.semantic_similarity && item.semantic_similarity > 0) {
+    return item.semantic_similarity
+  }
+  if (item.similarity_score === null || item.similarity_score === undefined) {
+    return 0
+  }
+  const score = Number(item.similarity_score)
+  if (!Number.isFinite(score)) return 0
+  return Math.round(score <= 1 ? score * 100 : score)
 }
 
 function isErrorLevel(item: Cluster): boolean {
@@ -508,6 +612,20 @@ function anomalyTypeLabel(item: Cluster): string {
   return labels[type] ?? type
 }
 
+function anomalyTabFor(item: Cluster): AnomalyTab | 'other' {
+  const type = (item.anomaly_type || '').toUpperCase()
+  if (['DROP', 'DECREASE'].includes(type)) return 'decrease'
+  if (['SPIKE', 'INCREASE'].includes(type)) return 'increase'
+  if (type === 'ABSENCE') return 'absence'
+  if (['RECURRENCE', 'RECUR', 'REOCCURRENCE'].includes(type)) return 'recurrence'
+  return 'other'
+}
+
+function anomalyCountByTab(tab: AnomalyTab): number {
+  return anomalyClusters.value.filter((cluster) => anomalyTabFor(cluster) === tab)
+    .length
+}
+
 function anomalyReason(item: Cluster): string {
   if (item.anomaly_reason) return item.anomaly_reason
   const metric = item.anomaly_metric ?? {}
@@ -517,6 +635,29 @@ function anomalyReason(item: Cluster): string {
     return `latest=${latest ?? '-'}, baseline=${baseline ?? '-'}`
   }
   return ''
+}
+
+async function openSimilarCluster(item: Cluster) {
+  selectedSimilarCluster.value = item
+  similarError.value = ''
+  if (item.similar_clusters?.length) return
+  if (!props.serviceName) {
+    similarError.value = 'Select a service before loading similar matches.'
+    return
+  }
+  similarLoadingKey.value = item.cluster
+  try {
+    const { data } = await agentApi.similarPatternClusters(item.cluster, {
+      service_name: props.serviceName,
+      limit: 5
+    })
+    item.semantic_similarity = data.semantic_similarity
+    item.similar_clusters = data.similar_clusters
+  } catch (caught) {
+    similarError.value = `Failed to load similar matches: ${(caught as Error).message}`
+  } finally {
+    similarLoadingKey.value = null
+  }
 }
 
 function similarMatchKey(match: Record<string, unknown>, index: number): string {

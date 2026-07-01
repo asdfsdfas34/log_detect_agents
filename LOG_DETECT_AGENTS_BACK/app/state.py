@@ -17,6 +17,7 @@ class Evidence(TypedDict):
     known_pattern_matches: list[dict]
     new_pattern_candidates: list[dict]
     anomalies: list[dict]
+    anomaly_daily_counts: list[dict]
     clusters: list[dict]
     stack_traces: list[str]
     incident_candidates: list[dict]
@@ -95,6 +96,7 @@ def create_initial_state(
             "known_pattern_matches": [],
             "new_pattern_candidates": [],
             "anomalies": [],
+            "anomaly_daily_counts": [],
             "clusters": [],
             "stack_traces": [],
             "incident_candidates": [],

@@ -35,7 +35,7 @@
 
     <div v-else class="space-y-3">
       <article
-        v-for="candidate in candidates"
+        v-for="candidate in pagedCandidates"
         :key="candidate.candidate_key"
         class="rounded border border-slate-200 p-3"
       >
@@ -124,6 +124,47 @@
     </div>
 
     <div
+      v-if="!loading && candidates.length > 0 && pageCount > 1"
+      class="mt-3 flex flex-wrap items-center justify-between gap-3 border-t pt-3 text-sm"
+    >
+      <p class="text-xs text-slate-500">
+        Page {{ currentPage }} of {{ pageCount }}
+      </p>
+      <div class="flex items-center gap-2">
+        <button
+          class="rounded border border-slate-300 px-3 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+          type="button"
+          :disabled="currentPage === 1"
+          @click="currentPage -= 1"
+        >
+          Previous
+        </button>
+        <button
+          v-for="page in visiblePages"
+          :key="page"
+          class="h-8 w-8 rounded border text-xs font-semibold"
+          type="button"
+          :class="
+            page === currentPage
+              ? 'border-blue-600 bg-blue-600 text-white'
+              : 'border-slate-300 text-slate-700 hover:bg-slate-50'
+          "
+          @click="currentPage = page"
+        >
+          {{ page }}
+        </button>
+        <button
+          class="rounded border border-slate-300 px-3 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+          type="button"
+          :disabled="currentPage === pageCount"
+          @click="currentPage += 1"
+        >
+          Next
+        </button>
+      </div>
+    </div>
+
+    <div
       v-if="selectedFingerprint"
       class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
       @click.self="selectedFingerprint = null"
@@ -202,14 +243,16 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import type { DuplicatePatternCandidate } from '@/types/agentTypes'
+
+const PAGE_SIZE = 10
 
 type FingerprintDetail = NonNullable<
   DuplicatePatternCandidate['fingerprint_details']
 >[string]
 
-defineProps<{
+const props = defineProps<{
   candidates: DuplicatePatternCandidate[]
   loading: boolean
   busyKey?: string | null
@@ -222,6 +265,35 @@ const emit = defineEmits<{
 }>()
 
 const selectedFingerprint = ref<FingerprintDetail | null>(null)
+const currentPage = ref(1)
+
+const pageCount = computed(() =>
+  Math.max(1, Math.ceil(props.candidates.length / PAGE_SIZE))
+)
+
+const pagedCandidates = computed(() => {
+  const start = (currentPage.value - 1) * PAGE_SIZE
+  return props.candidates.slice(start, start + PAGE_SIZE)
+})
+
+const visiblePages = computed(() => {
+  const pages: number[] = []
+  const start = Math.max(1, currentPage.value - 2)
+  const end = Math.min(pageCount.value, start + 4)
+  for (let page = start; page <= end; page += 1) pages.push(page)
+  return pages
+})
+
+watch(
+  () => props.candidates,
+  () => {
+    currentPage.value = 1
+  }
+)
+
+watch(pageCount, (count) => {
+  if (currentPage.value > count) currentPage.value = count
+})
 
 function confidencePercent(confidence: number): number {
   return Math.round((confidence || 0) * 100)

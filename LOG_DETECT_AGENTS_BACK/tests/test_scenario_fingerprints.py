@@ -9,6 +9,7 @@ from app.db.scenario_store import (
     clear_normalization_rule_cache,
     detect_duplicate_pattern_candidates,
     ensure_schema,
+    fetch_anomaly_daily_counts,
     fetch_duplicate_pattern_candidates,
     fetch_exception_registry,
     fetch_knowledge_cards,
@@ -556,7 +557,12 @@ def test_approved_duplicate_candidate_from_date_analysis_becomes_known(
         persisted_fingerprint_count = conn.execute(
             "SELECT COUNT(*) FROM fingerprints"
         ).fetchone()[0]
-    assert persisted_fingerprint_count == 0
+    assert persisted_fingerprint_count == 3
+    fetched_candidate = fetch_duplicate_pattern_candidates()[0]
+    assert all(
+        fetched_candidate["fingerprint_details"][fingerprint].get("message")
+        for fingerprint in candidate["fingerprints"]
+    )
 
     rule_id = save_pattern_normalization_rule(
         name="date-analysis-duplicate",
@@ -719,6 +725,16 @@ def test_detection_pipeline_filters_service_logs_by_analysis_date(
     assert result["summary"]["total_logs"] == 1
     assert result["summary"]["processed_new_logs"] == 1
     assert result["fingerprints"][0]["message"] == "target day failure"
+    assert result["anomaly_daily_counts"] == [
+        {
+            "service_name": "payment-api",
+            "analysis_date": "2026-06-16",
+            "anomaly_count": result["summary"]["anomalies_detected"],
+        }
+    ]
+    assert fetch_anomaly_daily_counts("payment-api") == result[
+        "anomaly_daily_counts"
+    ]
 
 
 def test_known_similar_is_not_reported_as_anomaly() -> None:
@@ -732,6 +748,49 @@ def test_known_similar_is_not_reported_as_anomaly() -> None:
     assert anomaly is False
     assert anomaly_type == "NONE"
     assert severity == "NONE"
+
+
+def test_observed_existing_keeps_similarity_score_for_display() -> None:
+    with sqlite3.connect(":memory:") as conn:
+        ensure_schema(conn)
+        result = scenario_store._pattern_status_from_matches(
+            conn=conn,
+            item={
+                "service_name": "payment-api",
+                "fingerprint": "FP-NEW",
+            },
+            existing_fingerprints={"FP-NEW"},
+            approved_matches=[],
+            observed_matches=[
+                {
+                    "id": "payment-api:FP-OLD",
+                    "metadata": {"fingerprint": "FP-OLD"},
+                    "similarity": 0.72,
+                }
+            ],
+        )
+
+    assert result["pattern_status"] == "observed_existing"
+    assert result["similar_fingerprint"] == "FP-OLD"
+    assert result["similarity_score"] == 0.72
+
+
+def test_observed_existing_exact_rerun_defaults_similarity_to_full_match() -> None:
+    with sqlite3.connect(":memory:") as conn:
+        ensure_schema(conn)
+        result = scenario_store._pattern_status_from_matches(
+            conn=conn,
+            item={
+                "service_name": "payment-api",
+                "fingerprint": "FP-EXISTING",
+            },
+            existing_fingerprints={"FP-EXISTING"},
+            approved_matches=[],
+            observed_matches=[],
+        )
+
+    assert result["pattern_status"] == "observed_existing"
+    assert result["similarity_score"] == 1.0
 
 
 def test_fingerprint_normalizes_urls_paths_and_quoted_runtime_values() -> None:

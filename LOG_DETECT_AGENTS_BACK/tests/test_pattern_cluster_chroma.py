@@ -6,7 +6,7 @@ from typing import Any
 import pytest
 
 from app import main
-from app.db import chroma_store
+from app.db import chroma_store, scenario_store
 
 
 class FakeCollection:
@@ -510,19 +510,15 @@ def test_analysis_documents_v2_batch_by_collection_and_skip_existing(
     ]
 
 
-def test_enrich_pattern_clusters_adds_backend_semantic_similarity(monkeypatch) -> None:
-    client = FakeClient()
-    monkeypatch.setattr(chroma_store, "_client", lambda: client)
+def test_enrich_pattern_clusters_skips_similarity_by_default(monkeypatch) -> None:
+    called = False
 
-    monkeypatch.setattr(
-        main,
-        "find_similar_pattern_clusters_batch",
-        chroma_store.find_similar_pattern_clusters_batch,
-    )
-    monkeypatch.setattr(
-        main, "save_pattern_clusters", chroma_store.save_pattern_clusters
-    )
+    def fake_similar_batches(**kwargs: Any) -> list[list[dict[str, Any]]]:
+        nonlocal called
+        called = True
+        return []
 
+    monkeypatch.setattr(main, "find_similar_pattern_clusters_batch", fake_similar_batches)
     clusters = main._enrich_pattern_clusters(
         service_name="checkout-api",
         fingerprints=[
@@ -537,8 +533,104 @@ def test_enrich_pattern_clusters_adds_backend_semantic_similarity(monkeypatch) -
     )
 
     assert clusters[0]["cluster"] == "FP-NEW"
+    assert clusters[0]["semantic_similarity"] == 0
+    assert clusters[0]["similar_clusters"] == []
+    assert called is False
+
+
+def test_enrich_pattern_clusters_adds_backend_semantic_similarity(monkeypatch) -> None:
+    def fake_similar_batches(**kwargs: Any) -> list[list[dict[str, Any]]]:
+        return [
+            [
+                {
+                    "id": "checkout-api:FP-OLD",
+                    "document": "service=checkout-api\nfingerprint=FP-OLD",
+                    "metadata": {"fingerprint": "FP-OLD"},
+                    "similarity": 0.82,
+                }
+            ]
+        ]
+
+    monkeypatch.setattr(main, "find_similar_pattern_clusters_batch", fake_similar_batches)
+    clusters = main._enrich_pattern_clusters(
+        service_name="checkout-api",
+        fingerprints=[
+            {
+                "fingerprint": "FP-NEW",
+                "occurrence_count": 3,
+                "message": "Payment failed for order 123",
+                "log_level": "ERROR",
+                "stacktrace": "PaymentException",
+            }
+        ],
+        include_similar_clusters=True,
+    )
+
+    assert clusters[0]["cluster"] == "FP-NEW"
     assert clusters[0]["semantic_similarity"] == 82
     assert clusters[0]["similar_clusters"][0]["metadata"]["fingerprint"] == "FP-OLD"
-    assert client.collections["pattern_clusters"].upserts[0]["ids"] == [
-        "checkout-api:FP-NEW"
-    ]
+
+
+def test_save_new_pattern_clusters_only_persists_new_patterns(monkeypatch) -> None:
+    saved_documents: list[dict[str, Any]] = []
+
+    def fake_save_pattern_clusters(patterns: list[dict[str, Any]]) -> dict[str, Any]:
+        saved_documents.extend(patterns)
+        return {"v1_saved": len(patterns), "v2_saved": 0, "v2_skipped": 0, "v2_failed": []}
+
+    monkeypatch.setattr(scenario_store, "save_pattern_clusters", fake_save_pattern_clusters)
+    result = scenario_store.save_new_pattern_clusters(
+        [
+            {
+                "service_name": "checkout-api",
+                "fingerprint": "FP-NEW",
+                "normalized_message": "payment failed",
+                "message": "Payment failed",
+                "log_level": "ERROR",
+                "stacktrace": "",
+                "occurrence_count": 3,
+                "pattern_status": "new_pattern",
+            },
+            {
+                "service_name": "checkout-api",
+                "fingerprint": "FP-OLD",
+                "normalized_message": "payment failed",
+                "message": "Payment failed",
+                "log_level": "ERROR",
+                "stacktrace": "",
+                "occurrence_count": 9,
+                "pattern_status": "known_exact",
+            },
+        ]
+    )
+
+    assert result is not None
+    assert [doc["doc_id"] for doc in saved_documents] == ["checkout-api:FP-NEW"]
+
+
+def test_save_new_pattern_clusters_skips_empty_save(monkeypatch) -> None:
+    called = False
+
+    def fake_save_pattern_clusters(patterns: list[dict[str, Any]]) -> dict[str, Any]:
+        nonlocal called
+        called = True
+        return {"v1_saved": len(patterns), "v2_saved": 0, "v2_skipped": 0, "v2_failed": []}
+
+    monkeypatch.setattr(scenario_store, "save_pattern_clusters", fake_save_pattern_clusters)
+    result = scenario_store.save_new_pattern_clusters(
+        [
+            {
+                "service_name": "checkout-api",
+                "fingerprint": "FP-OLD",
+                "normalized_message": "payment failed",
+                "message": "Payment failed",
+                "log_level": "ERROR",
+                "stacktrace": "",
+                "occurrence_count": 9,
+                "pattern_status": "known_exact",
+            }
+        ]
+    )
+
+    assert result is None
+    assert called is False

@@ -15,11 +15,13 @@ export interface AnalyzeRequest {
   scope?: Scope
   save_to_chromadb?: boolean
   analysis_date?: string
+  include_similar_clusters?: boolean
 }
 
 export interface FingerprintRecommendationRequest {
   service_name: string
   fingerprint: string
+  analysis_date?: string
 }
 
 
@@ -232,6 +234,7 @@ export interface NormalizedLog {
 }
 
 export interface Anomaly {
+  timestamp?: string
   system?: string
   severity?: string
   pattern?: string
@@ -239,6 +242,12 @@ export interface Anomaly {
   anomaly_type?: string
   spike_ratio?: number
   metric?: Record<string, unknown>
+}
+
+export interface AnomalyDailyCount {
+  service_name: string
+  analysis_date: string
+  anomaly_count: number
 }
 
 export interface Cluster {
@@ -258,6 +267,13 @@ export interface Cluster {
   anomaly_severity?: string
   anomaly_reason?: string
   anomaly_metric?: Record<string, unknown>
+}
+
+export interface SimilarPatternClustersResponse {
+  fingerprint: string
+  service_name: string
+  semantic_similarity: number
+  similar_clusters: Array<Record<string, unknown>>
 }
 
 export interface ScenarioSummary {
@@ -301,6 +317,7 @@ export interface SharedState {
     incident_candidates?: Array<Record<string, unknown>>
     new_pattern_candidates?: Array<Record<string, unknown>>
     duplicate_pattern_candidates?: DuplicatePatternCandidate[]
+    anomaly_daily_counts?: AnomalyDailyCount[]
     summary?: ScenarioSummary
     recommendation?: Record<string, unknown>
   }

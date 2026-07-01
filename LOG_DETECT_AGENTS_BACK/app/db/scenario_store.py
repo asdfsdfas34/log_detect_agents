@@ -356,6 +356,14 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             anomaly_type TEXT NOT NULL,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
+        CREATE TABLE IF NOT EXISTS anomaly_daily_counts (
+            service_name TEXT NOT NULL,
+            analysis_date TEXT NOT NULL,
+            anomaly_count INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY(service_name, analysis_date)
+        );
         CREATE TABLE IF NOT EXISTS impact_evaluations (
             fingerprint TEXT PRIMARY KEY,
             risk_score INTEGER NOT NULL,
@@ -1394,11 +1402,19 @@ def _pattern_status_from_matches(
         }
 
     if fp in existing_fingerprints:
+        metadata = best_match.get("metadata") if best_match else {}
+        similar_fp = (
+            str((metadata or {}).get("fingerprint") or best_match.get("id") or "")
+            if best_match
+            else ""
+        )
         return {
             "pattern_status": "observed_existing",
             "match_source": "fingerprints",
-            "similar_fingerprint": "",
-            "similarity_score": None,
+            "similar_fingerprint": similar_fp,
+            "similarity_score": (
+                float(best_match.get("similarity") or 0) if best_match else 1.0
+            ),
         }
 
     return {
@@ -1409,28 +1425,54 @@ def _pattern_status_from_matches(
     }
 
 
+def _build_pattern_documents(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "doc_id": f"{item.get('service_name')}:{item.get('fingerprint')}",
+            "text": _pattern_cluster_context(item),
+            "metadata": {
+                "service_name": str(item.get("service_name") or ""),
+                "fingerprint": str(item.get("fingerprint") or ""),
+                "log_level": str(item.get("log_level") or ""),
+                "normalized_message": str(item.get("normalized_message") or ""),
+                "occurrence_count": int(item.get("occurrence_count") or 0),
+                "pattern_status": str(item.get("pattern_status") or ""),
+            },
+        }
+        for item in items
+    ]
+
+
 def _upsert_pattern_cluster(item: dict[str, Any]) -> None:
     _upsert_pattern_clusters([item])
 
 
 def _upsert_pattern_clusters(items: list[dict[str, Any]]) -> None:
-    save_pattern_clusters(
-        [
-            {
-                "doc_id": f"{item.get('service_name')}:{item.get('fingerprint')}",
-                "text": _pattern_cluster_context(item),
-                "metadata": {
-                    "service_name": str(item.get("service_name") or ""),
-                    "fingerprint": str(item.get("fingerprint") or ""),
-                    "log_level": str(item.get("log_level") or ""),
-                    "normalized_message": str(item.get("normalized_message") or ""),
-                    "occurrence_count": int(item.get("occurrence_count") or 0),
-                    "pattern_status": str(item.get("pattern_status") or ""),
-                },
-            }
-            for item in items
-        ]
-    )
+    documents = _build_pattern_documents(items)
+    if documents:
+        save_pattern_clusters(documents)
+
+
+def save_new_pattern_clusters(items: list[dict[str, Any]]) -> dict[str, Any] | None:
+    new_items = [
+        item for item in items if str(item.get("pattern_status") or "") == "new_pattern"
+    ]
+    documents = _build_pattern_documents(new_items)
+    if not documents:
+        return None
+    return save_pattern_clusters(documents)
+
+
+def fetch_pattern_cluster(
+    *, fingerprint: str, service_name: str | None = None
+) -> dict[str, Any] | None:
+    db_path = _resolve_db_path()
+    if not Path(db_path).exists():
+        return None
+    with sqlite3.connect(db_path) as conn:
+        ensure_schema(conn)
+        groups = _load_fingerprint_groups(conn, service_name)
+    return groups.get(fingerprint)
 
 
 def recommendation_for(
@@ -1598,6 +1640,62 @@ def _metric_baseline(
         "latest_count": latest_count,
         "baseline_count": baseline,
     }
+
+
+def _upsert_anomaly_daily_count(
+    conn: sqlite3.Connection,
+    *,
+    service_name: str,
+    analysis_date: str,
+    anomaly_count: int,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO anomaly_daily_counts(
+            service_name, analysis_date, anomaly_count, created_at, updated_at
+        )
+        VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        ON CONFLICT(service_name, analysis_date) DO UPDATE SET
+            anomaly_count=excluded.anomaly_count,
+            updated_at=CURRENT_TIMESTAMP
+        """,
+        (service_name, analysis_date, anomaly_count),
+    )
+
+
+def fetch_anomaly_daily_counts(
+    service_name: str = "", *, limit: int = 30
+) -> list[dict[str, Any]]:
+    """Return recent persisted anomaly counts grouped by analysis date."""
+    db_path = _resolve_db_path()
+    if not Path(db_path).exists():
+        return []
+    with sqlite3.connect(db_path) as conn:
+        ensure_schema(conn)
+        params: list[Any] = []
+        where = ""
+        if service_name:
+            where = "WHERE service_name=?"
+            params.append(service_name)
+        params.append(limit)
+        rows = conn.execute(
+            f"""
+            SELECT service_name, analysis_date, anomaly_count
+            FROM anomaly_daily_counts
+            {where}
+            ORDER BY analysis_date DESC
+            LIMIT ?
+            """,
+            params,
+        ).fetchall()
+    return [
+        {
+            "service_name": str(row[0]),
+            "analysis_date": str(row[1]),
+            "anomaly_count": int(row[2] or 0),
+        }
+        for row in reversed(rows)
+    ]
 
 
 def _metric_trend(metric: dict[str, Any]) -> str:
@@ -1960,23 +2058,50 @@ def run_detection_pipeline(
                         else 0
                     ),
                     "log_level": level.upper(),
-                    "message": str(existing[3] or msg) if existing else msg,
+                    "message": (
+                        msg
+                        if analysis_date
+                        else str(existing[3] or msg)
+                        if existing
+                        else msg
+                    ),
                     "normalized_message": normalized_message,
                     "stacktrace": (
-                        str(existing[4] or normalize_stacktrace(stack))
+                        normalize_stacktrace(stack)
+                        if analysis_date
+                        else str(existing[4] or normalize_stacktrace(stack))
                         if existing
                         else normalize_stacktrace(stack)
                     ),
                     "service_name": svc,
-                    "first_seen": str(existing[1] or created) if existing else created,
-                    "last_seen": str(existing[2] or created) if existing else created,
+                    "first_seen": (
+                        created
+                        if analysis_date
+                        else str(existing[1] or created)
+                        if existing
+                        else created
+                    ),
+                    "last_seen": (
+                        created
+                        if analysis_date
+                        else str(existing[2] or created)
+                        if existing
+                        else created
+                    ),
                     "previous_last_seen": str(existing[2] or "") if existing else "",
                 },
             )
             item["occurrence_count"] += 1
             item["first_seen"] = min(item["first_seen"], created)
             item["last_seen"] = max(item["last_seen"], created)
-            if analysis_date is None:
+            cur.execute(
+                """
+                INSERT OR IGNORE INTO processed_log_offsets(service_name, log_rowid, fingerprint)
+                VALUES (?, ?, ?)
+                """,
+                (svc, int(rowid), fp),
+            )
+            if cur.rowcount:
                 for bucket_size in ("day", "hour"):
                     _increment_pattern_metric(
                         conn,
@@ -1986,13 +2111,6 @@ def run_detection_pipeline(
                         created_at=created,
                         bucket_size=bucket_size,
                     )
-                cur.execute(
-                    """
-                    INSERT OR IGNORE INTO processed_log_offsets(service_name, log_rowid, fingerprint)
-                    VALUES (?, ?, ?)
-                    """,
-                    (svc, int(rowid), fp),
-                )
         group_items = list(groups.values())
         group_contexts = [_pattern_cluster_context(item) for item in group_items]
         approved_match_groups = find_similar_analysis_documents_batch(
@@ -2021,36 +2139,34 @@ def run_detection_pipeline(
                     observed_matches=observed_matches,
                 )
             )
-        if analysis_date is None:
-            _upsert_pattern_clusters(group_items)
+        save_new_pattern_clusters(group_items)
         for g in group_items:
-            if analysis_date is None:
-                cur.execute(
-                    "REPLACE INTO fingerprints VALUES (:fingerprint,:occurrence_count,:log_level,:message,:stacktrace,:service_name,:first_seen,:last_seen)",
-                    g,
-                )
-                cat, sub = classify(g["message"], g["stacktrace"])
-                known = g["pattern_status"] in {"known_exact", "known_similar"}
-                cur.execute(
-                    """
-                    REPLACE INTO log_analysis_results(
-                        fingerprint, category, sub_category, is_known_pattern,
-                        is_new_pattern, pattern_status, match_source,
-                        similar_fingerprint, similarity_score
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        g["fingerprint"],
-                        cat,
-                        sub,
-                        int(known),
-                        int(g["pattern_status"] == "new_pattern"),
-                        g["pattern_status"],
-                        g["match_source"],
-                        g["similar_fingerprint"],
-                        g["similarity_score"],
-                    ),
-                )
+            cur.execute(
+                "REPLACE INTO fingerprints VALUES (:fingerprint,:occurrence_count,:log_level,:message,:stacktrace,:service_name,:first_seen,:last_seen)",
+                g,
+            )
+            cat, sub = classify(g["message"], g["stacktrace"])
+            known = g["pattern_status"] in {"known_exact", "known_similar"}
+            cur.execute(
+                """
+                REPLACE INTO log_analysis_results(
+                    fingerprint, category, sub_category, is_known_pattern,
+                    is_new_pattern, pattern_status, match_source,
+                    similar_fingerprint, similarity_score
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    g["fingerprint"],
+                    cat,
+                    sub,
+                    int(known),
+                    int(g["pattern_status"] == "new_pattern"),
+                    g["pattern_status"],
+                    g["match_source"],
+                    g["similar_fingerprint"],
+                    g["similarity_score"],
+                ),
+            )
         if rows and analysis_date is None:
             _save_processing_state(conn, service_name, max_rowid, max_created)
 
@@ -2215,9 +2331,22 @@ def run_detection_pipeline(
         if visible_recs
         else {"cause": "-", "recommendation": "-", "confidence": "LOW"}
     )
+    daily_analysis_date = date_start or datetime.utcnow().date().isoformat()
+    if service_name:
+        with sqlite3.connect(db_path) as daily_conn:
+            ensure_schema(daily_conn)
+            _upsert_anomaly_daily_count(
+                daily_conn,
+                service_name=service_name,
+                analysis_date=daily_analysis_date,
+                anomaly_count=len(anomalies),
+            )
+            daily_conn.commit()
+    anomaly_daily_counts = fetch_anomaly_daily_counts(service_name)
     result = {
         "fingerprints": visible_groups,
         "anomalies": anomalies,
+        "anomaly_daily_counts": anomaly_daily_counts,
         "impacts": visible_impacts,
         "recommendations": visible_recs,
         "recommendation": top_rec,

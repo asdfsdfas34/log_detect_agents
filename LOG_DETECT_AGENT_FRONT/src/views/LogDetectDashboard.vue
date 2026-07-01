@@ -77,6 +77,7 @@
       <AnomalyTimelineChart
         v-if="store.state"
         :anomalies="store.state.evidence.anomalies"
+        :daily-counts="store.state.evidence.anomaly_daily_counts"
         :logs="store.state.evidence.normalized_logs"
       />
     </section>
@@ -95,6 +96,7 @@
       />
       <PatternClusterTable
         :clusters="store.state.evidence.clusters"
+        :service-name="serviceName"
         @save-known-pattern="handleSaveKnownPattern"
         @request-recommendation="handleRequestRecommendation"
         @suggest-pattern-rule="handleSuggestPatternRule"
@@ -246,7 +248,7 @@ function handleRequestRecommendation(cluster: Cluster) {
     `${cluster.cluster} 패턴에 대한 Recommendation을 생성하시겠습니까?`
   )
   if (!approved) return
-  void store.runClusterRecommendation(trimmed, cluster.cluster)
+  void store.runClusterRecommendation(trimmed, cluster.cluster, analysisDate.value)
 }
 
 async function handleSaveKnownPattern(cluster: Cluster) {

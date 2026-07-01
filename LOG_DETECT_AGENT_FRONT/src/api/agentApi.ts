@@ -23,7 +23,8 @@ import type {
   RecommendationHistoryResponse,
   RecommendationSaveRequest,
   RecommendationSaveResponse,
-  ServiceListResponse
+  ServiceListResponse,
+  SimilarPatternClustersResponse
 } from '@/types/agentTypes'
 
 const apiClient = axios.create({
@@ -84,6 +85,15 @@ export const agentApi = {
   duplicatePatternCandidates(params?: { status?: string; limit?: number }) {
     return apiClient.get<DuplicatePatternCandidatesResponse>(
       '/pattern-duplicates',
+      { params }
+    )
+  },
+  similarPatternClusters(
+    fingerprint: string,
+    params: { service_name: string; limit?: number }
+  ) {
+    return apiClient.get<SimilarPatternClustersResponse>(
+      `/pattern-clusters/${encodeURIComponent(fingerprint)}/similar`,
       { params }
     )
   },

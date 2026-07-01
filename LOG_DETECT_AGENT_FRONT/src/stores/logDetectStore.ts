@@ -31,7 +31,8 @@ function buildDefaultRequest(
     service_name: serviceName,
     goal: `${serviceName} service log anomaly investigation`,
     save_to_chromadb: true,
-    analysis_date: analysisDate || undefined
+    analysis_date: analysisDate || undefined,
+    include_similar_clusters: false
   }
 }
 
@@ -419,7 +420,8 @@ export const useLogDetectStore = defineStore('logDetect', () => {
 
   async function runClusterRecommendation(
     serviceName: string,
-    fingerprint: string
+    fingerprint: string,
+    analysisDate?: string
   ) {
     executionStatus.value = 'running'
     error.value = null
@@ -435,7 +437,8 @@ export const useLogDetectStore = defineStore('logDetect', () => {
       // Request the backend to execute the downstream recommendation slice for the selected fingerprint.
       const { data } = await agentApi.recommendationForFingerprint({
         service_name: serviceName,
-        fingerprint
+        fingerprint,
+        analysis_date: analysisDate || undefined
       })
       if (state.value) {
         state.value = {

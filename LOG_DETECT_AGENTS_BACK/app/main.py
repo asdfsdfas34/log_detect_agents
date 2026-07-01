@@ -14,13 +14,13 @@ from app.agents.recommendation import RecommendationAgent
 from app.config import settings
 from app.db.chroma_store import (
     find_similar_pattern_clusters_batch,
-    save_pattern_clusters,
 )
 from app.db.scenario_store import (
     approve_result,
     fetch_duplicate_pattern_candidates,
     fetch_exception_registry,
     fetch_knowledge_cards,
+    fetch_pattern_cluster,
     merge_duplicate_pattern_candidate,
     normalize_log_text,
     register_exception,
@@ -88,6 +88,10 @@ class AnalyzeRequest(BaseModel):
     )
     analysis_date: date | None = Field(
         default=None, description="Only analyze service_logs from this date"
+    )
+    include_similar_clusters: bool = Field(
+        default=False,
+        description="Include ChromaDB similar pattern matches in the analyze response",
     )
 
 
@@ -181,6 +185,7 @@ class FingerprintRecommendationRequest(BaseModel):
 
     service_name: str
     fingerprint: str
+    analysis_date: date | None = None
 
 
 class ServiceListResponse(BaseModel):
@@ -233,12 +238,12 @@ def _enrich_pattern_clusters(
     fingerprints: list[dict],
     anomalies: list[dict] | None = None,
     n_results: int = 5,
+    include_similar_clusters: bool = False,
 ) -> list[dict]:
     enriched: list[dict] = []
     anomalies_by_pattern = {
         str(item.get("pattern")): item for item in anomalies or [] if item.get("pattern")
     }
-    pattern_documents: list[dict] = []
     pattern_contexts: list[dict] = []
     for item in fingerprints:
         fingerprint = str(item.get("fingerprint", ""))
@@ -252,20 +257,6 @@ def _enrich_pattern_clusters(
             log_level=log_level,
             stacktrace=stacktrace,
         )
-        pattern_documents.append(
-            {
-                "doc_id": f"{service_name}:{fingerprint}",
-                "text": context,
-                "metadata": {
-                    "service_name": service_name,
-                    "fingerprint": fingerprint,
-                    "log_level": log_level,
-                    "normalized_message": normalize_log_text(message),
-                    "occurrence_count": int(item.get("occurrence_count") or 0),
-                    "pattern_status": str(item.get("pattern_status", "")),
-                },
-            }
-        )
         pattern_contexts.append(
             {
                 "item": item,
@@ -273,15 +264,18 @@ def _enrich_pattern_clusters(
                 "query": context,
             }
         )
-    save_pattern_clusters(pattern_documents)
-    similar_cluster_groups = find_similar_pattern_clusters_batch(
-        queries=[str(item["query"]) for item in pattern_contexts],
-        n_results=n_results + 1,
-    )
+    similar_cluster_groups: list[list[dict]] = []
+    if include_similar_clusters:
+        similar_cluster_groups = find_similar_pattern_clusters_batch(
+            queries=[str(item["query"]) for item in pattern_contexts],
+            n_results=n_results + 1,
+        )
     for index, pattern_context in enumerate(pattern_contexts):
         item = pattern_context["item"]
         similar_group = (
-            similar_cluster_groups[index] if index < len(similar_cluster_groups) else []
+            similar_cluster_groups[index]
+            if include_similar_clusters and index < len(similar_cluster_groups)
+            else []
         )
         similar_clusters = [
             match
@@ -419,12 +413,12 @@ def list_langsmith_runs(limit: int = 20) -> LangSmithRunsResponse:
 @app.post("/analyze", response_model=AnalyzeResponse)
 def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
     graph = build_graph()
+    analysis_date = req.analysis_date or date.today()
     time_range = {"from": "", "to": ""}
-    if req.analysis_date is not None:
-        time_range = {
-            "from": req.analysis_date.isoformat(),
-            "to": req.analysis_date.isoformat(),
-        }
+    time_range = {
+        "from": analysis_date.isoformat(),
+        "to": analysis_date.isoformat(),
+    }
     effective_scope: Scope = req.scope or {
         "systems": [req.service_name],
         "time_range": time_range,
@@ -444,31 +438,31 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
     # Run deterministic scenario analysis for dashboard evidence. Final
     # recommendations are generated only through the explicit recommendation API.
     try:
-        if req.analysis_date is not None:
-            scenario = run_detection_pipeline(
-                req.service_name, analysis_date=req.analysis_date.isoformat()
-            )
-        else:
-            scenario = run_detection_pipeline(
-                req.service_name, days_back=settings.log_lookback_days
-            )
+        scenario = run_detection_pipeline(
+            req.service_name, analysis_date=analysis_date.isoformat()
+        )
     except TypeError:
         scenario = run_detection_pipeline(req.service_name)
     except ValueError:
         scenario = {
             "fingerprints": [],
             "anomalies": [],
+            "anomaly_daily_counts": [],
             "summary": {},
             "recommendation": {},
             "recommendations": [],
         }
     result["evidence"]["summary"] = scenario["summary"]
     result["evidence"]["recommendation"] = scenario["recommendation"]
+    result["evidence"]["anomaly_daily_counts"] = scenario.get(
+        "anomaly_daily_counts", []
+    )
     if scenario["fingerprints"]:
         result["evidence"]["clusters"] = _enrich_pattern_clusters(
             service_name=req.service_name,
             fingerprints=scenario["fingerprints"],
             anomalies=scenario.get("anomalies", []),
+            include_similar_clusters=req.include_similar_clusters,
         )
         result["evidence"]["anomalies"] = scenario["anomalies"]
         result["evidence"]["stack_traces"] = [
@@ -483,11 +477,7 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
         result["assessment"]["rationale"] = [
             f"Risk Level: {scenario['summary']['risk_level']}",
             f"Detection Status: {scenario['summary']['detection_status']}",
-            (
-                f"Analysis date: {req.analysis_date.isoformat()}"
-                if req.analysis_date is not None
-                else f"Recent window: {settings.log_lookback_days} days"
-            ),
+            f"Analysis date: {analysis_date.isoformat()}",
         ]
         result["evidence"]["known_pattern_matches"] = scenario.get(
             "recommendations", []
@@ -559,8 +549,9 @@ def delete_recommendation(recommendation_id: int) -> dict[str, int | str]:
 @app.post("/recommendations/fingerprint", response_model=AnalyzeResponse)
 def recommend_for_fingerprint(req: FingerprintRecommendationRequest) -> AnalyzeResponse:
     """Build a recommendation preview for one selected fingerprint without persisting it."""
+    analysis_date = req.analysis_date or date.today()
     scenario = run_detection_pipeline(
-        req.service_name, days_back=settings.log_lookback_days
+        req.service_name, analysis_date=analysis_date.isoformat()
     )
     selected = next(
         (
@@ -611,6 +602,7 @@ def recommend_for_fingerprint(req: FingerprintRecommendationRequest) -> AnalyzeR
             service_name=req.service_name,
             fingerprints=[selected],
             anomalies=scenario.get("anomalies", []),
+            include_similar_clusters=True,
         )
         state["evidence"]["stack_traces"] = [selected["stacktrace"]]
         state["evidence"]["normalized_logs"] = [
@@ -682,6 +674,41 @@ def list_knowledge_cards(
     return KnowledgeCardListResponse(
         knowledge_cards=fetch_knowledge_cards(fingerprint=fingerprint, limit=limit)
     )
+
+
+@app.get("/pattern-clusters/{fingerprint}/similar")
+def get_similar_pattern_clusters(
+    fingerprint: str, service_name: str, limit: int = 5
+) -> dict[str, object]:
+    """Return similar pattern matches for one fingerprint on demand."""
+
+    cluster = fetch_pattern_cluster(fingerprint=fingerprint, service_name=service_name)
+    if cluster is None:
+        raise HTTPException(status_code=404, detail="Pattern cluster not found")
+    doc_id = f"{service_name}:{fingerprint}"
+    query = _pattern_cluster_context(
+        service_name=service_name,
+        fingerprint=fingerprint,
+        message=str(cluster.get("message") or ""),
+        log_level=str(cluster.get("log_level") or ""),
+        stacktrace=str(cluster.get("stacktrace") or ""),
+    )
+    groups = find_similar_pattern_clusters_batch(
+        queries=[query], n_results=max(1, limit) + 1
+    )
+    matches = [
+        match for match in (groups[0] if groups else []) if match.get("id") != doc_id
+    ][:limit]
+    return {
+        "fingerprint": fingerprint,
+        "service_name": service_name,
+        "semantic_similarity": (
+            round(float(matches[0]["similarity"]) * 100)
+            if matches and matches[0].get("similarity") is not None
+            else 0
+        ),
+        "similar_clusters": matches,
+    }
 
 
 @app.post("/exceptions")

@@ -60,7 +60,6 @@ class Settings:
     azure_openai_embedding_deployment: str
     sqlite_path: str
     chromadb_path: str
-    log_lookback_days: int
     log_level: str
     llm_stub_mode: bool
     langsmith_tracing: bool
@@ -105,7 +104,6 @@ settings = Settings(
         os.getenv("SQLITE_PATH", ""), os.getenv("POSTGRESQL_URL", "")
     ),
     chromadb_path=_resolve_project_path(os.getenv("CHROMADB_PATH", "./.chroma")),
-    log_lookback_days=_resolve_positive_int(os.getenv("LOG_LOOKBACK_DAYS", ""), 21),
     log_level=os.getenv("LOG_LEVEL", "INFO"),
     llm_stub_mode=os.getenv("LLM_STUB_MODE", "true").lower() != "false",
     langsmith_tracing=os.getenv(
