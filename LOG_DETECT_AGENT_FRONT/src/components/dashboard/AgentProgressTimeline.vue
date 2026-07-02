@@ -8,7 +8,7 @@
         compact ? 'mb-2 text-sm font-semibold' : 'mb-3 text-lg font-semibold'
       "
     >
-      Agent Execution Timeline
+      Skill Execution Timeline
     </h3>
     <ol :class="compact ? 'space-y-2' : 'space-y-3'">
       <li
@@ -28,6 +28,12 @@
           :class="compact ? 'text-xs' : 'text-sm'"
         >
           {{ step.name }}
+          <span
+            v-if="skillSummary(step.name)"
+            class="ml-1 font-normal text-slate-500"
+          >
+            · {{ skillSummary(step.name) }}
+          </span>
         </span>
         <span
           class="shrink-0 uppercase text-slate-500"
@@ -41,11 +47,21 @@
 </template>
 
 <script setup lang="ts">
-import type { AgentStepStatus } from '@/types/agentTypes'
+import type {
+  AgentStepStatus,
+  PatternOpsSkillExecution
+} from '@/types/agentTypes'
 
-withDefaults(defineProps<{ steps: AgentStepStatus[]; compact?: boolean }>(), {
+const props = withDefaults(
+  defineProps<{
+    steps: AgentStepStatus[]
+    compact?: boolean
+    skillExecutions?: PatternOpsSkillExecution[]
+  }>(),
+  {
   compact: false
-})
+  }
+)
 
 function statusColor(status: AgentStepStatus['status']): string {
   if (status === 'completed') return 'bg-green-500'
@@ -53,5 +69,22 @@ function statusColor(status: AgentStepStatus['status']): string {
   if (status === 'failed') return 'bg-red-500'
   if (status === 'skipped') return 'bg-amber-500'
   return 'bg-slate-300'
+}
+
+function skillSummary(agentName: string): string {
+  const executions = props.skillExecutions?.filter(
+    (item) => item.agent_name === agentName
+  )
+  if (!executions?.length) return ''
+  const success = executions.filter((item) => item.status === 'success').length
+  const failed = executions.filter((item) => item.status === 'failed').length
+  const selected = executions.filter((item) =>
+    ['selected', 'planned'].includes(item.status)
+  ).length
+  const parts = []
+  if (success) parts.push(`${success} ok`)
+  if (selected) parts.push(`${selected} selected`)
+  if (failed) parts.push(`${failed} failed`)
+  return parts.join(' / ')
 }
 </script>

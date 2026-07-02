@@ -207,6 +207,95 @@ export interface LangSmithRunsResponse {
   error?: string | null
 }
 
+export interface PatternOpsSkill {
+  skill_id: string
+  name: string
+  category: string
+  lifecycle: string
+  priority: number
+  graph?: Record<string, unknown>
+  precondition?: Record<string, unknown>
+  operation?: Record<string, unknown>
+  artifact?: Record<string, unknown>
+  validators?: Array<Record<string, unknown>>
+}
+
+export interface PatternOpsSkillEdge {
+  edge_id: string
+  from_skill_id: string
+  to_skill_id: string
+  edge_type: string
+  weight: number
+  reason?: string
+}
+
+export interface PatternOpsSkillExecution {
+  execution_id: string
+  request_id: string
+  agent_name: string
+  scope: string
+  skill_id: string
+  status: 'success' | 'failed' | 'selected' | 'planned' | string
+  score: number
+  reason: string
+  input_refs?: string[]
+  output_refs?: string[]
+}
+
+export interface PatternOpsSkillPlanItem {
+  skill_id: string
+  name: string
+  category: string
+  score: number
+  reasons: string[]
+  graph?: Record<string, unknown>
+  operation?: Record<string, unknown>
+  artifact?: Record<string, unknown>
+  validators?: Array<Record<string, unknown>>
+}
+
+export interface PatternOpsSkillScopedPlan {
+  agent_name?: string
+  scope?: string
+  selected_skills?: PatternOpsSkillPlanItem[]
+  skipped_skills?: PatternOpsSkillPlanItem[]
+  skill_edges?: PatternOpsSkillEdge[]
+  excluded_skills?: string[]
+}
+
+export interface PatternOpsSkillPlan {
+  scope?: string
+  selected_skills?: PatternOpsSkillPlanItem[]
+  skipped_skills?: PatternOpsSkillPlanItem[]
+  skill_edges?: PatternOpsSkillEdge[]
+  excluded_skills?: string[]
+  scoped_plans?: Record<string, PatternOpsSkillScopedPlan>
+}
+
+export interface PatternOpsContract {
+  pattern_id: string
+  name: string
+  category: string
+  sub_category: string
+  lifecycle: string
+  confidence: string
+  precondition?: Record<string, unknown>
+  operation?: Record<string, unknown>
+  artifact?: Record<string, unknown>
+  validators?: Array<Record<string, unknown>>
+  failure_modes?: string[]
+  source?: string
+}
+
+export interface PatternOpsSkillsResponse {
+  skills: PatternOpsSkill[]
+  edges: PatternOpsSkillEdge[]
+}
+
+export interface PatternOpsContractsResponse {
+  contracts: PatternOpsContract[]
+}
+
 export interface KnowledgeCardItem {
   card_id: string
   fingerprint: string
@@ -351,6 +440,7 @@ export interface ScenarioSummary {
   new_patterns: number
   anomalies_detected: number
   exception_registered_count: number
+  exception_excluded_logs?: number
   risk_score: number
   risk_level: string
   detection_status: string
@@ -360,6 +450,7 @@ export interface FailureRecord {
   node: string
   error: string
   retry_count: number
+  skill_id?: string
 }
 
 export interface RecommendedAction {
@@ -385,6 +476,11 @@ export interface SharedState {
     incident_candidates?: Array<Record<string, unknown>>
     new_pattern_candidates?: Array<Record<string, unknown>>
     duplicate_pattern_candidates?: DuplicatePatternCandidate[]
+    pattern_ops_matches?: Array<Record<string, unknown>>
+    pattern_ops_contracts?: PatternOpsContract[]
+    pattern_ops_skill_graphs?: PatternOpsSkill[]
+    pattern_ops_skill_plan?: PatternOpsSkillPlan
+    pattern_ops_skill_executions?: PatternOpsSkillExecution[]
     fingerprint_merge_groups?: FingerprintMergeGroup[]
     event_time_windows?: EventTimeWindow[]
     system_state_vectors?: SystemStateVector[]
@@ -431,6 +527,10 @@ export interface SharedState {
       fingerprint_merge_groups?: FingerprintMergeGroup[]
       event_time_windows?: EventTimeWindow[]
       system_state_vectors?: SystemStateVector[]
+      pattern_ops_skill_plan?: PatternOpsSkillPlan
+      pattern_ops_skill_executions?: PatternOpsSkillExecution[]
+      pattern_ops_contracts?: PatternOpsContract[]
+      pattern_ops_matches?: Array<Record<string, unknown>>
     } | null
   }
 }

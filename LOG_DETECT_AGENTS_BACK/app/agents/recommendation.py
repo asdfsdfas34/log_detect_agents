@@ -7,6 +7,7 @@ import re
 from typing import Any
 
 from app.mcp import get_mcp_client
+from app.patternops.runner import pattern_skill_runner
 from app.state import SharedState
 
 _REQUIRED_ACTION_KEYS = {"priority", "action", "owner"}
@@ -20,12 +21,26 @@ class RecommendationAgent:
     name = "RecommendationAgent"
 
     def run(self, state: SharedState) -> SharedState:
+        return pattern_skill_runner.run_for_agent(
+            state,
+            agent_name=self.name,
+            scope="recommendation",
+            operations={"recommendation_generation": self._generate_recommendation},
+        )
+
+    def _generate_recommendation(self, state: SharedState) -> SharedState:
         risk = state["assessment"]["risk_score"] or 0
         anomalies = state["evidence"]["anomalies"]
         impact_text = "\n".join(state["assessment"]["rationale"])
         metrics = state["metrics"]
         source_evidence = state["evidence"].get("source_code_evidence", [])
         known_matches = state["evidence"].get("known_pattern_matches", [])
+        pattern_ops_matches = state["evidence"].get("pattern_ops_matches", [])
+        pattern_ops_contracts = state["evidence"].get("pattern_ops_contracts", [])
+        pattern_ops_skill_plan = state["evidence"].get("pattern_ops_skill_plan", {})
+        pattern_ops_skill_executions = state["evidence"].get(
+            "pattern_ops_skill_executions", []
+        )
         related = state.get("rag", {}).get("related_knowledge", [])
 
         needs_data = any(
@@ -50,9 +65,17 @@ class RecommendationAgent:
             "risk_score": risk,
             "source_code_evidence": source_evidence[:5],
             "known_pattern_matches": known_matches[:5],
+            "pattern_ops_matches": pattern_ops_matches[:5],
+            "pattern_ops_contracts": pattern_ops_contracts[:10],
+            "pattern_ops_skill_plan": pattern_ops_skill_plan,
+            "pattern_ops_skill_executions": pattern_ops_skill_executions,
             "known_pattern_summary": {
                 "total_matches": len(known_matches),
                 "suppressed": len(state["evidence"].get("suppressed_logs", [])),
+            },
+            "pattern_ops_summary": {
+                "matched_contracts": len(pattern_ops_matches),
+                "loaded_contracts": len(pattern_ops_contracts),
             },
             "summary": state["evidence"].get("summary", {}),
             "recommendation": state["evidence"].get("recommendation", {}),

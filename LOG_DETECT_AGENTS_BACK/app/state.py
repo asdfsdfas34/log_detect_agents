@@ -17,6 +17,12 @@ class Evidence(TypedDict):
     known_pattern_matches: list[dict]
     new_pattern_candidates: list[dict]
     duplicate_pattern_candidates: list[dict]
+    pattern_ops_matches: list[dict]
+    pattern_ops_contracts: list[dict]
+    pattern_ops_actions: list[dict]
+    pattern_ops_skill_graphs: list[dict]
+    pattern_ops_skill_plan: dict
+    pattern_ops_skill_executions: list[dict]
     fingerprint_merge_groups: list[dict]
     event_time_windows: list[dict]
     system_state_vectors: list[dict]
@@ -100,6 +106,12 @@ def create_initial_state(
             "known_pattern_matches": [],
             "new_pattern_candidates": [],
             "duplicate_pattern_candidates": [],
+            "pattern_ops_matches": [],
+            "pattern_ops_contracts": [],
+            "pattern_ops_actions": [],
+            "pattern_ops_skill_graphs": [],
+            "pattern_ops_skill_plan": {},
+            "pattern_ops_skill_executions": [],
             "fingerprint_merge_groups": [],
             "event_time_windows": [],
             "system_state_vectors": [],

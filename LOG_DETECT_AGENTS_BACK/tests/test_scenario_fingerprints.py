@@ -1,3 +1,4 @@
+import json
 import re
 import sqlite3
 from pathlib import Path
@@ -389,6 +390,64 @@ def test_duplicate_candidates_use_chroma_similarity_for_near_patterns(
     assert candidates[0]["confidence"] > 0.87
 
 
+def test_duplicate_candidates_accept_balanced_semantic_similarity(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db_path = tmp_path / "logs.db"
+    monkeypatch.setenv("SQLITE_PATH", str(db_path))
+    clear_normalization_rule_cache()
+    groups = [
+        {
+            "fingerprint": "FP-2AC59D",
+            "service_name": "test_appl",
+            "log_level": "INFORMATION",
+            "message": (
+                "FTP download(FtpClient) attempt(0) / "
+                "/TEST_/erp_user/EA/NEW/WORKFLOW/WTR202606000007.TXT => "
+                "E:\\Test.Appl.Solutions\\Storage\\Disk_FU_Temporary\\EDMS\\ERP\\hash\\a.file"
+            ),
+            "stacktrace": "",
+            "occurrence_count": 1,
+        },
+        {
+            "fingerprint": "FP-451DF2",
+            "service_name": "test_appl",
+            "log_level": "INFORMATION",
+            "message": (
+                "FTP download(FtpClient) try(0) / "
+                "/TEST_/erp_user/EA/NEW/CONTENTS/TR202606000007_IND.xml => "
+                "E:\\Test.Appl.Solutions\\Storage\\Disk_FU_Temporary\\EDMS\\ERP\\hash\\b.file"
+            ),
+            "stacktrace": "",
+            "occurrence_count": 1,
+        },
+    ]
+
+    def fake_similar_batches(queries: list[str], n_results: int = 5):
+        return [
+            [{"metadata": {"fingerprint": "FP-451DF2"}, "similarity": 0.94}],
+            [{"metadata": {"fingerprint": "FP-2AC59D"}, "similarity": 0.94}],
+        ]
+
+    monkeypatch.setattr(
+        scenario_store, "find_similar_pattern_clusters_batch", fake_similar_batches
+    )
+
+    candidates = detect_duplicate_pattern_candidates(groups)
+
+    assert len(candidates) == 1
+    assert candidates[0]["fingerprints"] == ["FP-2AC59D", "FP-451DF2"]
+    assert candidates[0]["confidence"] > 0.87
+    assert all(
+        re.search(
+            candidates[0]["suggested_regex"],
+            str(group["message"]),
+            flags=re.IGNORECASE,
+        )
+        for group in groups
+    )
+
+
 def test_approved_semantic_duplicate_aliases_are_known_on_date_rerun(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -650,6 +709,89 @@ def test_approved_duplicate_candidate_rerun_uses_raw_stacktrace(
     assert rerun["summary"]["known_patterns"] == 1
     assert rerun["summary"]["new_patterns"] == 0
     assert rerun["fingerprints"][0]["fingerprint"] == merge_result["canonical_fingerprint"]
+    assert rerun["fingerprints"][0]["pattern_status"] == "known_exact"
+
+
+def test_manual_merge_rescues_unmatched_regex_with_raw_logs(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db_path = tmp_path / "logs.db"
+    monkeypatch.setenv("SQLITE_PATH", str(db_path))
+    clear_normalization_rule_cache()
+    first_message = (
+        'Test.Appl.InterfaceWeb.ApvInterfaceException: 결재선(Line)의 사용자(1103853) '
+        '정보가 존재하지 않습니다. 수신된 데이터: {"LineType":"1000","ApvType":"9000",'
+        '"StepOrder":"0001","UserId":"1103853","DeptId":"00004791"} _x000D_'
+    )
+    second_message = (
+        'Test.Appl.InterfaceWeb.ApvInterfaceException: 결재선(Line)의 사용자(5205701) '
+        '정보가 존재하지 않습니다. 수신된 데이터: {"LineType":"1000","ApvType":"1000",'
+        '"StepOrder":"0001","UserId":"5205701","DeptId":""} _x000D_'
+    )
+    first_stack = "위치: Test.Appl.InterfaceWeb.Filters.DocumentCreationValidationActionFilter"
+    second_stack = "위치: Test.Appl.InterfaceWeb.Filters.DocumentCreationValidationFilter"
+    with sqlite3.connect(db_path) as conn:
+        ensure_schema(conn)
+        conn.executemany(
+            """
+            INSERT INTO service_logs(service_name, level, message, stack_trace, created_at)
+            VALUES ('test_appl', 'information', ?, ?, ?)
+            """,
+            [
+                (first_message, first_stack, "2026-06-18T10:00:00"),
+                *[
+                    (second_message, second_stack, f"2026-06-18T10:0{index}:00")
+                    for index in range(1, 8)
+                ],
+            ],
+        )
+        conn.commit()
+
+    result = run_detection_pipeline("test_appl", analysis_date="2026-06-18")
+    selected = sorted(item["fingerprint"] for item in result["fingerprints"])
+    assert len(selected) == 2
+    assert sorted(item["occurrence_count"] for item in result["fingerprints"]) == [1, 7]
+    candidate_key = "DUP-MANUAL-RAW-RESCUE"
+    template = (
+        'Test.Appl.InterfaceWeb.ApvInterfaceException:* 사용자(*) 정보가 존재하지 않습니다. '
+        '수신된 데이터:{"LineType":"*" "ApvType":"*" "StepOrder":"*" '
+        '"UserId":"*" "DeptId":"*"} *'
+    )
+    with sqlite3.connect(db_path) as conn:
+        ensure_schema(conn)
+        conn.execute(
+            """
+            INSERT INTO pattern_duplicate_candidates(
+                candidate_key, service_name, log_level, signature,
+                fingerprints_json, suggested_regex, suggested_template,
+                confidence, reason, status
+            ) VALUES (?, 'test_appl', 'INFORMATION', ?, ?, '^does-not-match$',
+                      ?, 0.99, 'manual rescue test', 'approved')
+            """,
+            (candidate_key, template, json.dumps(selected), template),
+        )
+        conn.commit()
+    rule_id = save_pattern_normalization_rule(
+        name="manual-raw-rescue",
+        match_regex="^does-not-match$",
+        template=template,
+    )
+
+    merge_result = merge_duplicate_pattern_candidate(candidate_key, rule_id=rule_id)
+
+    assert merge_result["merged"] is True
+    assert merge_result["occurrence_count"] == 8
+    assert len(merge_result["merged_fingerprints"]) == 2
+    with sqlite3.connect(db_path) as conn:
+        saved_regex = conn.execute(
+            "SELECT match_regex FROM pattern_normalization_rules WHERE id=?",
+            (rule_id,),
+        ).fetchone()[0]
+    assert saved_regex != "^does-not-match$"
+    rerun = run_detection_pipeline("test_appl", analysis_date="2026-06-18")
+    assert rerun["summary"]["total_fingerprints"] == 1
+    assert rerun["fingerprints"][0]["fingerprint"] == merge_result["canonical_fingerprint"]
+    assert rerun["fingerprints"][0]["occurrence_count"] == 8
     assert rerun["fingerprints"][0]["pattern_status"] == "known_exact"
 
 

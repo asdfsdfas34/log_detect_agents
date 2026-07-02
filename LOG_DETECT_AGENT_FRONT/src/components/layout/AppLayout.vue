@@ -5,6 +5,22 @@
         <div>
           <p class="text-xs font-medium uppercase tracking-wider text-slate-500">Enterprise Monitoring</p>
           <h1 class="text-xl font-semibold text-slate-900">LogDetect Dashboard</h1>
+          <nav class="mt-2 flex gap-3 text-sm">
+            <RouterLink
+              to="/"
+              class="font-medium text-slate-600 hover:text-blue-600"
+              active-class="text-blue-700"
+            >
+              Log Dashboard
+            </RouterLink>
+            <RouterLink
+              to="/skills"
+              class="font-medium text-slate-600 hover:text-blue-600"
+              active-class="text-blue-700"
+            >
+              Skill Dashboard
+            </RouterLink>
+          </nav>
         </div>
         <slot name="header-right" />
       </div>

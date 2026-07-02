@@ -10,6 +10,11 @@ from typing import Any
 
 from app.db.scenario_store import fetch_known_patterns_for_agents
 from app.mcp import get_mcp_client
+from app.patternops.registry import (
+    fetch_pattern_contracts_for_agents,
+    lookup_pattern_contracts,
+)
+from app.patternops.runner import pattern_skill_runner
 from app.state import SharedState
 from app.suppression_config import get_suppression_config
 
@@ -40,6 +45,7 @@ class LogAnalysisAgent:
         return [
             *get_suppression_config()["known_patterns"],
             *cls._db_known_pattern_registry(),
+            *cls._patternops_known_pattern_registry(),
         ]
 
     @staticmethod
@@ -71,11 +77,61 @@ class LogAnalysisAgent:
             )
         return entries
 
+    @staticmethod
+    def _patternops_known_pattern_registry() -> list[dict[str, Any]]:
+        """Adapt PatternOps contracts to the deterministic matcher schema."""
+
+        entries = []
+        for contract in fetch_pattern_contracts_for_agents():
+            artifact = contract.artifact
+            precondition = contract.precondition
+            fingerprint = str(artifact.get("fingerprint") or "")
+            keywords = [
+                str(item)
+                for item in precondition.get("keywords", [])
+                if str(item).strip()
+            ]
+            template = str(precondition.get("message_template") or "")
+            patterns = [value for value in [template, *keywords] if value]
+            if not fingerprint and not patterns:
+                continue
+            entries.append(
+                {
+                    "pattern_id": contract.pattern_id,
+                    "pattern": contract.name,
+                    "patterns": patterns or [fingerprint],
+                    "classification": contract.category or "patternops",
+                    "suppression": False,
+                    "level_scope": [
+                        str(item).upper()
+                        for item in precondition.get("level_scope", [])
+                    ],
+                    "stack_tokens": precondition.get("stack_tokens", []),
+                    "fingerprint": fingerprint,
+                    "source": "patternops",
+                    "db_confidence": contract.confidence,
+                    "operation": contract.operation,
+                    "validators": contract.validators,
+                    "failure_modes": contract.failure_modes,
+                    "lifecycle": contract.lifecycle,
+                }
+            )
+        return entries
+
     def run(self, state: SharedState) -> SharedState:
+        return pattern_skill_runner.run_for_agent(
+            state,
+            agent_name=self.name,
+            scope="log_analysis",
+            operations={"known_pattern_match": self._analyze_logs},
+        )
+
+    def _analyze_logs(self, state: SharedState) -> SharedState:
         logs = state["evidence"]["normalized_logs"]
         anomalies: list[dict] = []
         suppressed_logs: list[dict] = []
         known_pattern_matches: list[dict] = []
+        pattern_ops_matches: list[dict] = []
         new_pattern_candidates: list[dict] = []
         cluster_counter: Counter[str] = Counter()
 
@@ -90,6 +146,23 @@ class LogAnalysisAgent:
             level = str(log.get("level", "INFO")).upper()
             stack_trace = str(log.get("stack_trace", "") or "")
             fingerprint = self._fingerprint(normalized_message)
+            contract_matches = lookup_pattern_contracts(
+                message=message,
+                normalized_message=normalized_message,
+                level=level,
+                fingerprint=fingerprint,
+                service_name=str(log.get("system") or ""),
+            )
+            pattern_ops_matches.extend(
+                {
+                    **contract_match,
+                    "system": log.get("system"),
+                    "fingerprint": fingerprint,
+                    "message_template": normalized_message,
+                    "message": message,
+                }
+                for contract_match in contract_matches
+            )
 
             match = self._match_known_pattern(
                 message=message,
@@ -113,6 +186,10 @@ class LogAnalysisAgent:
                         "matched_by": match["matched_by"],
                         "suppression": match["suppression"],
                         "source": match.get("source", "config"),
+                        "operation": match.get("operation", {}),
+                        "validators": match.get("validators", []),
+                        "failure_modes": match.get("failure_modes", []),
+                        "lifecycle": match.get("lifecycle", ""),
                         "fingerprint": fingerprint,
                         "message_template": normalized_message,
                         "message": message,
@@ -160,6 +237,23 @@ class LogAnalysisAgent:
         state["evidence"]["anomalies"] = anomalies
         state["evidence"]["suppressed_logs"] = suppressed_logs
         state["evidence"]["known_pattern_matches"] = known_pattern_matches
+        state["evidence"]["pattern_ops_matches"] = self._dedupe_pattern_ops_matches(
+            pattern_ops_matches
+        )
+        state["evidence"]["pattern_ops_contracts"] = [
+            {
+                "pattern_id": contract.pattern_id,
+                "name": contract.name,
+                "category": contract.category,
+                "sub_category": contract.sub_category,
+                "lifecycle": contract.lifecycle,
+                "confidence": contract.confidence,
+                "artifact": contract.artifact,
+                "validator_count": len(contract.validators),
+                "source": contract.source,
+            }
+            for contract in fetch_pattern_contracts_for_agents(limit=50)
+        ]
         state["evidence"]["new_pattern_candidates"] = self._dedupe_by_fingerprint(
             new_pattern_candidates
         )
@@ -170,7 +264,8 @@ class LogAnalysisAgent:
         state["decisions"]["assumptions"].append(
             "Known Pattern Registry deterministic check "
             f"match={len(known_pattern_matches)}, suppressed={len(suppressed_logs)}, "
-            f"new_candidates={len(state['evidence']['new_pattern_candidates'])}"
+            f"new_candidates={len(state['evidence']['new_pattern_candidates'])}, "
+            f"pattern_ops_matches={len(state['evidence']['pattern_ops_matches'])}"
         )
 
         analysis_text = self._build_analysis_summary(
@@ -288,6 +383,10 @@ class LogAnalysisAgent:
             "confidence": confidence,
             "matched_by": best_reasons,
             "source": best_match.get("source", "config"),
+            "operation": best_match.get("operation", {}),
+            "validators": best_match.get("validators", []),
+            "failure_modes": best_match.get("failure_modes", []),
+            "lifecycle": best_match.get("lifecycle", ""),
         }
 
     @staticmethod
@@ -333,6 +432,21 @@ class LogAnalysisAgent:
             fingerprint = str(candidate.get("fingerprint", ""))
             if fingerprint not in deduped:
                 deduped[fingerprint] = candidate
+        return list(deduped.values())
+
+    @staticmethod
+    def _dedupe_pattern_ops_matches(matches: list[dict]) -> list[dict]:
+        deduped: dict[tuple[str, str], dict] = {}
+        for match in matches:
+            key = (
+                str(match.get("pattern_id", "")),
+                str(match.get("fingerprint", "")),
+            )
+            existing = deduped.get(key)
+            if existing is None or float(match.get("confidence", 0)) > float(
+                existing.get("confidence", 0)
+            ):
+                deduped[key] = match
         return list(deduped.values())
 
     @staticmethod

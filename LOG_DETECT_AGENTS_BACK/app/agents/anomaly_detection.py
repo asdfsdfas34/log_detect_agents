@@ -3,6 +3,7 @@
 from collections import Counter
 import re
 
+from app.patternops.runner import pattern_skill_runner
 from app.state import SharedState
 from app.suppression_config import get_suppression_config
 
@@ -19,6 +20,14 @@ class AnomalyDetectionAgent:
     name = "AnomalyDetectionAgent"
 
     def run(self, state: SharedState) -> SharedState:
+        return pattern_skill_runner.run_for_agent(
+            state,
+            agent_name=self.name,
+            scope="anomaly_detection",
+            operations={"anomaly_detection": self._detect_anomalies},
+        )
+
+    def _detect_anomalies(self, state: SharedState) -> SharedState:
         logs = state["evidence"]["normalized_logs"]
         suppressed_logs = state["evidence"].get("suppressed_logs", [])
         key_fields = get_suppression_config()["anomaly_detection"]["suppressed_key_fields"]

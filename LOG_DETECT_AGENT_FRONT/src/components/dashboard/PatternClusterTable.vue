@@ -7,8 +7,9 @@
           Select a pattern action explicitly from the table.
         </p>
       </div>
-      <div class="text-xs text-slate-500">
-        {{ activeClusters.length }} patterns
+      <div class="text-right text-xs text-slate-500">
+        {{ formatCount(activeClusters.length) }} patterns /
+        {{ formatCount(activeLogCount) }} logs
       </div>
     </div>
     <div
@@ -30,7 +31,7 @@
           class="rounded bg-emerald-600 px-3 py-1 text-xs font-semibold text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:bg-slate-300"
           type="button"
           :disabled="selectedFingerprints.length < 2"
-          @click="emit('manual-merge-known', selectedFingerprints)"
+          @click="requestManualMergeKnown"
         >
           Merge + Known
         </button>
@@ -87,6 +88,31 @@
           {{ tab.count }}
         </span>
       </button>
+    </div>
+
+    <div class="mb-3 flex flex-wrap items-center justify-between gap-3">
+      <div class="relative w-full sm:max-w-md">
+        <input
+          v-model="searchQuery"
+          type="search"
+          class="w-full rounded border border-slate-300 bg-white px-3 py-2 pr-9 text-sm text-slate-700 placeholder:text-slate-400 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-100"
+          placeholder="Search cluster, message, level, status"
+          aria-label="Search pattern clusters"
+        />
+        <button
+          v-if="searchQuery"
+          class="absolute right-2 top-1/2 h-6 w-6 -translate-y-1/2 rounded text-sm font-semibold text-slate-400 hover:bg-slate-100 hover:text-slate-700"
+          type="button"
+          aria-label="Clear pattern cluster search"
+          @click="searchQuery = ''"
+        >
+          x
+        </button>
+      </div>
+      <p v-if="searchQuery" class="text-xs text-slate-500">
+        {{ formatCount(activeClusters.length) }} of
+        {{ formatCount(tabClusters.length) }} patterns
+      </p>
     </div>
 
     <div class="overflow-x-auto">
@@ -459,6 +485,7 @@ const similarError = ref('')
 const activeTab = ref<PatternTab>('similar')
 const activeAnomalyTab = ref<AnomalyTab>('all')
 const selectedFingerprints = ref<string[]>([])
+const searchQuery = ref('')
 
 const sortedClusters = computed(() =>
   [...props.clusters].sort((a, b) => b.count - a.count)
@@ -556,13 +583,25 @@ const tabs = computed(() => [
   }
 ])
 
-const activeClusters = computed(() => {
+const tabClusters = computed(() => {
   if (activeTab.value === 'similar') return similarClusters.value
   if (activeTab.value === 'new') return newClusters.value
   if (activeTab.value === 'observed') return observedClusters.value
   if (activeTab.value === 'anomaly') return filteredAnomalyClusters.value
   return knownClusters.value
 })
+
+const normalizedSearchQuery = computed(() => searchQuery.value.trim().toLowerCase())
+
+const activeClusters = computed(() => {
+  const query = normalizedSearchQuery.value
+  if (!query) return tabClusters.value
+  return tabClusters.value.filter((cluster) => clusterMatchesSearch(cluster, query))
+})
+
+const activeLogCount = computed(() =>
+  activeClusters.value.reduce((total, cluster) => total + Number(cluster.count || 0), 0)
+)
 
 const pageCount = computed(() =>
   Math.max(1, Math.ceil(activeClusters.value.length / PAGE_SIZE))
@@ -612,6 +651,10 @@ watch(activeAnomalyTab, () => {
   currentPage.value = 1
 })
 
+watch(searchQuery, () => {
+  currentPage.value = 1
+})
+
 watch(pageCount, (count) => {
   if (currentPage.value > count) currentPage.value = count
 })
@@ -626,6 +669,25 @@ function similarity(item: Cluster): number {
   const score = Number(item.similarity_score)
   if (!Number.isFinite(score)) return 0
   return Math.round(score <= 1 ? score * 100 : score)
+}
+
+function formatCount(value: number): string {
+  return new Intl.NumberFormat().format(value)
+}
+
+function clusterMatchesSearch(cluster: Cluster, query: string): boolean {
+  return [
+    cluster.cluster,
+    cluster.message,
+    cluster.stacktrace,
+    cluster.log_level,
+    statusLabel(cluster.pattern_status),
+    cluster.pattern_status,
+    cluster.anomaly_type,
+    cluster.anomaly_reason
+  ]
+    .filter(Boolean)
+    .some((value) => String(value).toLowerCase().includes(query))
 }
 
 function toggleFingerprint(fingerprint: string) {
@@ -653,6 +715,10 @@ function togglePageSelection() {
 
 function clearSelectedFingerprints() {
   selectedFingerprints.value = []
+}
+
+function requestManualMergeKnown() {
+  emit('manual-merge-known', [...selectedFingerprints.value])
 }
 
 defineExpose({ clearSelectedFingerprints })

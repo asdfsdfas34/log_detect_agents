@@ -89,10 +89,10 @@ CRITICALITY_SCORE = {"HIGH": 30, "MEDIUM": 15, "LOW": 5}
 LEVEL_SCORE = {"ERROR": 50, "WARN": 20, "INFO": 5}
 _PIPELINE_CACHE: dict[tuple[Any, ...], dict[str, Any]] = {}
 KNOWN_SIMILARITY_THRESHOLD = 0.88
-DUPLICATE_SIMILARITY_THRESHOLD = 0.95
+DUPLICATE_SIMILARITY_THRESHOLD = 0.93
 DUPLICATE_MIN_TOTAL_OCCURRENCE = 2
-DUPLICATE_MIN_STRUCTURE_SIMILARITY = 0.80
-DUPLICATE_MAX_VARIABLE_TOKEN_RATIO = 0.25
+DUPLICATE_MIN_STRUCTURE_SIMILARITY = 0.74
+DUPLICATE_MAX_VARIABLE_TOKEN_RATIO = 0.35
 
 
 @lru_cache(maxsize=1)
@@ -563,6 +563,9 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
                 f"ALTER TABLE exception_registry ADD COLUMN {column} {definition}"
             )
     conn.commit()
+    from app.patternops.registry import ensure_patternops_schema
+
+    ensure_patternops_schema(conn)
 
 
 def classify(message: str, stacktrace: str) -> tuple[str, str]:
@@ -758,6 +761,101 @@ def _candidate_items_allowed(items: list[dict[str, Any]]) -> bool:
         structure_score >= DUPLICATE_MIN_STRUCTURE_SIMILARITY
         and variable_ratio <= DUPLICATE_MAX_VARIABLE_TOKEN_RATIO
     )
+
+
+def _regex_matches_all_messages(regex: str, messages: list[str]) -> bool:
+    try:
+        return all(re.search(regex, message, flags=re.IGNORECASE) for message in messages)
+    except re.error:
+        return False
+
+
+def _relax_regex_trailing_context(regex: str) -> str:
+    if regex.endswith("$"):
+        return f"{regex[:-1]}[\\s\\S]*$"
+    return f"{regex}[\\s\\S]*$"
+
+
+def _rescue_regex_from_raw_rows(
+    signature: str, rows: list[sqlite3.Row | tuple[Any, ...]]
+) -> str:
+    items = [
+        {
+            "message": str(row[3] or ""),
+            "fingerprint": "",
+            "service_name": str(row[1] or ""),
+            "log_level": str(row[2] or "").upper(),
+            "occurrence_count": 1,
+        }
+        for row in rows
+    ]
+    messages = [str(item["message"]) for item in items]
+    candidates = [
+        _suggest_regex_from_duplicate_items(signature, items),
+        _suggest_regex_from_duplicate_signature(signature),
+    ]
+    for regex in candidates:
+        if _regex_matches_all_messages(regex, messages):
+            return regex
+        relaxed = _relax_regex_trailing_context(regex)
+        if _regex_matches_all_messages(relaxed, messages):
+            return relaxed
+    unique_messages = list(dict.fromkeys(messages))
+    if unique_messages:
+        escaped_messages = [
+            re.escape(message).replace(r"\ ", r"\s+") for message in unique_messages
+        ]
+        return f"^(?:{'|'.join(escaped_messages)})[\\s\\S]*$"
+    return ""
+
+
+def _raw_log_rows_for_fingerprints(
+    conn: sqlite3.Connection,
+    *,
+    fingerprints: list[str],
+    service_name: str,
+    log_level: str,
+) -> list[sqlite3.Row | tuple[Any, ...]]:
+    if not fingerprints or not service_name or not log_level:
+        return []
+    placeholders = ",".join("?" for _ in fingerprints)
+    rows = conn.execute(
+        f"""
+        SELECT sl.rowid, sl.service_name, sl.level, sl.message,
+               COALESCE(sl.stack_trace, ''), sl.created_at
+        FROM processed_log_offsets po
+        JOIN service_logs sl
+          ON sl.service_name=po.service_name AND sl.rowid=po.log_rowid
+        WHERE po.fingerprint IN ({placeholders})
+          AND sl.service_name=?
+          AND upper(sl.level)=?
+        ORDER BY sl.rowid ASC
+        """,
+        [*fingerprints, service_name, log_level],
+    ).fetchall()
+    deduped: dict[int, sqlite3.Row | tuple[Any, ...]] = {
+        int(row[0]): row for row in rows
+    }
+    service_rows = conn.execute(
+        """
+        SELECT rowid, service_name, level, message, COALESCE(stack_trace, ''), created_at
+        FROM service_logs
+        WHERE service_name=? AND upper(level)=?
+        ORDER BY rowid ASC
+        """,
+        (service_name, log_level),
+    ).fetchall()
+    fingerprint_set = set(fingerprints)
+    for row in service_rows:
+        fp = fingerprint_id(
+            str(row[1]),
+            str(row[2]).upper(),
+            str(row[3] or ""),
+            str(row[4] or ""),
+        )
+        if fp in fingerprint_set:
+            deduped[int(row[0])] = row
+    return list(deduped.values())
 
 
 def detect_duplicate_pattern_candidates(
@@ -1126,6 +1224,7 @@ def merge_duplicate_pattern_candidate(candidate_key: str, *, rule_id: int) -> di
         canonical_template = str(candidate.get("suggested_template") or "")
         suggested_regex = str(candidate.get("suggested_regex") or "")
         raw_rows: list[sqlite3.Row | tuple[Any, ...]] = []
+        force_canonical_from_raw = False
         try:
             matcher = re.compile(suggested_regex, flags=re.IGNORECASE)
         except re.error:
@@ -1146,7 +1245,78 @@ def merge_duplicate_pattern_candidate(candidate_key: str, *, rule_id: int) -> di
                 for row in service_rows
                 if matcher.search(str(row[3] or ""))
             ]
-        if raw_rows:
+        if not raw_rows and candidate_service and candidate_level:
+            rescued_rows = _raw_log_rows_for_fingerprints(
+                conn,
+                fingerprints=fingerprints,
+                service_name=candidate_service,
+                log_level=candidate_level,
+            )
+            if len(rescued_rows) >= 2:
+                raw_rows = rescued_rows
+                force_canonical_from_raw = True
+                raw_signature_items = [
+                    {
+                        "message": str(row[3] or ""),
+                        "fingerprint": "",
+                        "service_name": str(row[1] or ""),
+                        "log_level": str(row[2] or "").upper(),
+                        "occurrence_count": 1,
+                    }
+                    for row in raw_rows
+                ]
+                signature = _common_duplicate_signature(raw_signature_items) or str(
+                    candidate.get("signature") or ""
+                )
+                rescued_regex = _rescue_regex_from_raw_rows(signature, raw_rows)
+                if rescued_regex:
+                    suggested_regex = rescued_regex
+                    conn.execute(
+                        """
+                        UPDATE pattern_duplicate_candidates
+                        SET suggested_regex=?, updated_at=CURRENT_TIMESTAMP
+                        WHERE candidate_key=?
+                        """,
+                        (suggested_regex, candidate_key),
+                    )
+                    conn.execute(
+                        """
+                        UPDATE pattern_normalization_rules
+                        SET match_regex=?
+                        WHERE id=?
+                        """,
+                        (suggested_regex, rule_id),
+                    )
+        if raw_rows and force_canonical_from_raw:
+            canonical_log_rows = raw_rows
+            representative_log = canonical_log_rows[0]
+            representative_service = str(representative_log[1] or "")
+            representative_level = str(representative_log[2]).upper()
+            representative_message = str(representative_log[3] or "")
+            representative_stack = ""
+            canonical_fingerprint = fingerprint_id(
+                representative_service,
+                representative_level,
+                canonical_template or representative_message,
+                "",
+            )
+            occurrence_count = len(canonical_log_rows)
+            first_seen = min(str(row[5] or "") for row in canonical_log_rows)
+            last_seen = max(str(row[5] or "") for row in canonical_log_rows)
+            old_fingerprints = list(fingerprints)
+            existing_canonical = conn.execute(
+                """
+                SELECT occurrence_count, first_seen, last_seen
+                FROM fingerprints
+                WHERE fingerprint=?
+                """,
+                (canonical_fingerprint,),
+            ).fetchone()
+            if existing_canonical and canonical_fingerprint not in old_fingerprints:
+                occurrence_count = max(occurrence_count, int(existing_canonical[0] or 0))
+                first_seen = min(first_seen, str(existing_canonical[1] or first_seen))
+                last_seen = max(last_seen, str(existing_canonical[2] or last_seen))
+        if raw_rows and not force_canonical_from_raw:
             recalculated_from_raw: dict[str, list[sqlite3.Row | tuple[Any, ...]]] = {}
             for row in raw_rows:
                 new_fp = fingerprint_id(
@@ -1182,7 +1352,7 @@ def merge_duplicate_pattern_candidate(candidate_key: str, *, rule_id: int) -> di
                 occurrence_count = max(occurrence_count, int(existing_canonical[0] or 0))
                 first_seen = min(first_seen, str(existing_canonical[1] or first_seen))
                 last_seen = max(last_seen, str(existing_canonical[2] or last_seen))
-        else:
+        elif not raw_rows:
             representative_service = ""
             representative_level = ""
             representative_message = ""
@@ -1214,7 +1384,14 @@ def merge_duplicate_pattern_candidate(candidate_key: str, *, rule_id: int) -> di
                 recalculated.items(), key=lambda item: len(item[1])
             )
             if len(canonical_rows) < 2:
-                return {"merged": False, "reason": "rule_did_not_converge"}
+                representative = rows[0]
+                canonical_rows = rows
+                canonical_fingerprint = fingerprint_id(
+                    str(representative[5] or ""),
+                    str(representative[2]).upper(),
+                    canonical_template or str(representative[3] or ""),
+                    "",
+                )
             occurrence_count = sum(int(row[1] or 0) for row in canonical_rows)
             first_seen = min(str(row[6] or "") for row in canonical_rows)
             last_seen = max(str(row[7] or "") for row in canonical_rows)
@@ -1223,7 +1400,9 @@ def merge_duplicate_pattern_candidate(candidate_key: str, *, rule_id: int) -> di
             representative_service = str(representative[5] or "")
             representative_level = str(representative[2]).upper()
             representative_message = str(representative[3] or "")
-            representative_stack = str(representative[4] or "")
+            representative_stack = (
+                "" if len(canonical_rows) == len(rows) else str(representative[4] or "")
+            )
             existing_canonical = conn.execute(
                 """
                 SELECT occurrence_count, first_seen, last_seen
@@ -1272,7 +1451,24 @@ def merge_duplicate_pattern_candidate(candidate_key: str, *, rule_id: int) -> di
             "similar_fingerprint": "",
             "similarity_score": None,
         }
-        for old_fp in old_fingerprints:
+        alias_fingerprints = set(old_fingerprints)
+        for log_row in canonical_log_rows:
+            row_service = str(log_row[1] or "")
+            row_level = str(log_row[2]).upper()
+            row_message = str(log_row[3] or "")
+            row_stack = str(log_row[4] or "")
+            alias_fingerprints.add(
+                fingerprint_id(row_service, row_level, row_message, row_stack)
+            )
+            alias_fingerprints.add(
+                fingerprint_id(
+                    row_service,
+                    row_level,
+                    canonical_template or row_message,
+                    row_stack,
+                )
+            )
+        for old_fp in alias_fingerprints:
             if old_fp == canonical_fingerprint:
                 continue
             old_doc_ids.append(f"{representative_service}:{old_fp}")
@@ -2358,6 +2554,8 @@ def _repair_approved_duplicate_candidates(
         canonical_fingerprint, canonical_rows = max(
             recalculated.items(), key=lambda item: len(item[1])
         )
+        if len(canonical_rows) < 2:
+            continue
         existing_known = conn.execute(
             """
             SELECT fingerprint
@@ -2369,6 +2567,18 @@ def _repair_approved_duplicate_candidates(
             (f"Approved duplicate pattern candidate {candidate_key}",),
         ).fetchone()
         previous_canonical = str(existing_known[0] or "") if existing_known else ""
+        if previous_canonical:
+            alias_count = conn.execute(
+                f"""
+                SELECT COUNT(*)
+                FROM fingerprint_aliases
+                WHERE canonical_fingerprint=?
+                  AND old_fingerprint IN ({",".join("?" for _ in fingerprints)})
+                """,
+                [previous_canonical, *fingerprints],
+            ).fetchone()[0]
+            if int(alias_count or 0) > 0:
+                continue
         if previous_canonical == canonical_fingerprint:
             continue
 
@@ -2803,6 +3013,7 @@ def run_detection_pipeline(
             "SELECT COUNT(*) FROM exception_registry"
         ).fetchone()[0]
     visible_groups = []
+    exception_excluded_logs = 0
     ignored_fingerprints = set(ignored)
     for fp, group in all_groups.items():
         if (
@@ -2814,6 +3025,7 @@ def run_detection_pipeline(
             in ignored_signatures
         ):
             ignored_fingerprints.add(fp)
+            exception_excluded_logs += int(group.get("occurrence_count") or 0)
             continue
         visible_groups.append(group)
     duplicate_candidates = detect_duplicate_pattern_candidates(visible_groups)
@@ -2904,6 +3116,7 @@ def run_detection_pipeline(
             "new_patterns": new_count,
             "anomalies_detected": len(anomalies),
             "exception_registered_count": exception_count,
+            "exception_excluded_logs": exception_excluded_logs,
             "risk_score": top_impact["risk_score"],
             "risk_level": top_impact["risk_level"],
             "detection_status": "Detected" if anomalies else "Normal",

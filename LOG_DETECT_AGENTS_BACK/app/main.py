@@ -38,6 +38,17 @@ from app.db.sqlite_store import (
 )
 from app.graph.engine import build_graph
 from app.langsmith_tracing import configure_langsmith, fetch_langsmith_runs
+from app.patternops.registry import (
+    fetch_pattern_contracts_for_agents,
+    lookup_pattern_contracts,
+    record_pattern_ops_action,
+    sync_pattern_contracts_from_legacy_tables,
+)
+from app.patternops.runner import pattern_skill_runner
+from app.patternops.skill_graph import (
+    fetch_pattern_skill_edges,
+    fetch_pattern_skills,
+)
 from app.state import Scope, SharedState, create_initial_state
 
 
@@ -215,6 +226,15 @@ class ExceptionRegistryResponse(BaseModel):
     exceptions: list[dict]
 
 
+class PatternOpsContractsResponse(BaseModel):
+    contracts: list[dict]
+
+
+class PatternOpsSkillsResponse(BaseModel):
+    skills: list[dict]
+    edges: list[dict]
+
+
 class LangSmithRunsResponse(BaseModel):
     enabled: bool
     project: str
@@ -346,6 +366,45 @@ def _anomaly_reason(anomaly: dict | None) -> str:
     if anomaly_type == "SIMILAR_CASE_MATCH":
         return "유사한 승인/지식 사례와 매칭되었습니다."
     return str(anomaly.get("message") or anomaly_type or "Anomaly detected")
+
+
+def _patternops_matches_from_fingerprints(
+    *, service_name: str, fingerprints: list[dict]
+) -> list[dict]:
+    """Build PatternOps matches from scenario fingerprint rows."""
+
+    matches: list[dict] = []
+    for item in fingerprints:
+        message = str(item.get("message") or "")
+        fingerprint = str(item.get("fingerprint") or "")
+        log_level = str(item.get("log_level") or "")
+        normalized_message = normalize_log_text(message).lower()
+        for match in lookup_pattern_contracts(
+            message=message,
+            normalized_message=normalized_message,
+            level=log_level,
+            fingerprint=fingerprint,
+            service_name=service_name,
+        ):
+            matches.append(
+                {
+                    **match,
+                    "system": service_name,
+                    "fingerprint": fingerprint,
+                    "message_template": normalized_message,
+                    "message": message,
+                    "occurrence_count": item.get("occurrence_count", 0),
+                }
+            )
+    return matches
+
+
+def _refresh_patternops_skill_plan(state: SharedState) -> SharedState:
+    return pattern_skill_runner.run_for_agent(
+        state,
+        agent_name="ScenarioAnalysis",
+        scope="maintenance",
+    )
 
 
 def build_generated_answer(
@@ -481,6 +540,24 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
         "system_state_vectors", []
     )
     if scenario["fingerprints"]:
+        result["evidence"]["pattern_ops_matches"] = _patternops_matches_from_fingerprints(
+            service_name=req.service_name,
+            fingerprints=scenario["fingerprints"],
+        )
+        result["evidence"]["pattern_ops_contracts"] = [
+            {
+                "pattern_id": contract.pattern_id,
+                "name": contract.name,
+                "category": contract.category,
+                "sub_category": contract.sub_category,
+                "lifecycle": contract.lifecycle,
+                "confidence": contract.confidence,
+                "artifact": contract.artifact,
+                "validator_count": len(contract.validators),
+                "source": contract.source,
+            }
+            for contract in fetch_pattern_contracts_for_agents(limit=50)
+        ]
         result["evidence"]["clusters"] = _enrich_pattern_clusters(
             service_name=req.service_name,
             fingerprints=scenario["fingerprints"],
@@ -531,12 +608,41 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
                 "total_matches": len(result["evidence"].get("known_pattern_matches", [])),
                 "suppressed": len(result["evidence"].get("suppressed_logs", [])),
             },
+            "pattern_ops_summary": {
+                "matched_contracts": len(
+                    result["evidence"].get("pattern_ops_matches", [])
+                ),
+                "loaded_contracts": len(
+                    result["evidence"].get("pattern_ops_contracts", [])
+                ),
+            },
+            "pattern_ops_matches": result["evidence"].get("pattern_ops_matches", []),
+            "pattern_ops_contracts": result["evidence"].get(
+                "pattern_ops_contracts", []
+            ),
+            "pattern_ops_skill_plan": result["evidence"].get(
+                "pattern_ops_skill_plan", {}
+            ),
+            "pattern_ops_skill_executions": result["evidence"].get(
+                "pattern_ops_skill_executions", []
+            ),
             "fingerprint_merge_groups": scenario.get("fingerprint_merge_groups", []),
             "event_time_windows": scenario.get("event_time_windows", []),
             "system_state_vectors": scenario.get("system_state_vectors", []),
         }
     )
     result["decisions"]["skipped_agents"].append("RecommendationAgent")
+    result = _refresh_patternops_skill_plan(result)
+    result["final"]["evidence_bundle"].update(
+        {
+            "pattern_ops_skill_plan": result["evidence"].get(
+                "pattern_ops_skill_plan", {}
+            ),
+            "pattern_ops_skill_executions": result["evidence"].get(
+                "pattern_ops_skill_executions", []
+            ),
+        }
+    )
 
     result = KnowledgeBaseRAGAgent().run(result)
     result = KnowledgeBaseRAGAgent().persist_final_answer(result)
@@ -621,6 +727,24 @@ def recommend_for_fingerprint(req: FingerprintRecommendationRequest) -> AnalyzeR
         "AnomalyDetectionAgent",
     ]
     if selected:
+        state["evidence"]["pattern_ops_matches"] = _patternops_matches_from_fingerprints(
+            service_name=req.service_name,
+            fingerprints=[selected],
+        )
+        state["evidence"]["pattern_ops_contracts"] = [
+            {
+                "pattern_id": contract.pattern_id,
+                "name": contract.name,
+                "category": contract.category,
+                "sub_category": contract.sub_category,
+                "lifecycle": contract.lifecycle,
+                "confidence": contract.confidence,
+                "artifact": contract.artifact,
+                "validator_count": len(contract.validators),
+                "source": contract.source,
+            }
+            for contract in fetch_pattern_contracts_for_agents(limit=50)
+        ]
         state["evidence"]["clusters"] = _enrich_pattern_clusters(
             service_name=req.service_name,
             fingerprints=[selected],
@@ -675,6 +799,7 @@ def recommend_for_fingerprint(req: FingerprintRecommendationRequest) -> AnalyzeR
         f"Risk Level: {selected_impact['risk_level']}",
         f"Rule/knowledge recommendation hint: {selected_recommendation.get('recommendation', '-')}",
     ]
+    state = _refresh_patternops_skill_plan(state)
     state = RecommendationAgent().run(state)
     return AnalyzeResponse(result=state)
 
@@ -696,6 +821,56 @@ def list_knowledge_cards(
     """Return approved Knowledge Cards, newest first."""
     return KnowledgeCardListResponse(
         knowledge_cards=fetch_knowledge_cards(fingerprint=fingerprint, limit=limit)
+    )
+
+
+@app.get("/patternops/contracts", response_model=PatternOpsContractsResponse)
+def list_patternops_contracts(limit: int = 100) -> PatternOpsContractsResponse:
+    """Return active PatternOps knowledge contracts."""
+
+    sync_pattern_contracts_from_legacy_tables()
+    return PatternOpsContractsResponse(
+        contracts=[
+            {
+                "pattern_id": contract.pattern_id,
+                "name": contract.name,
+                "category": contract.category,
+                "sub_category": contract.sub_category,
+                "lifecycle": contract.lifecycle,
+                "confidence": contract.confidence,
+                "precondition": contract.precondition,
+                "operation": contract.operation,
+                "artifact": contract.artifact,
+                "validators": contract.validators,
+                "failure_modes": contract.failure_modes,
+                "source": contract.source,
+            }
+            for contract in fetch_pattern_contracts_for_agents(limit=limit)
+        ]
+    )
+
+
+@app.get("/patternops/skills", response_model=PatternOpsSkillsResponse)
+def list_patternops_skills(limit: int = 100) -> PatternOpsSkillsResponse:
+    """Return registered SkillOps-style skill graphs and graph-of-graphs edges."""
+
+    return PatternOpsSkillsResponse(
+        skills=[
+            {
+                "skill_id": skill.skill_id,
+                "name": skill.name,
+                "category": skill.category,
+                "lifecycle": skill.lifecycle,
+                "priority": skill.priority,
+                "graph": skill.graph,
+                "precondition": skill.precondition,
+                "operation": skill.operation,
+                "artifact": skill.artifact,
+                "validators": skill.validators,
+            }
+            for skill in fetch_pattern_skills(limit=limit)
+        ],
+        edges=fetch_pattern_skill_edges(),
     )
 
 
@@ -752,6 +927,15 @@ def create_known_pattern(req: KnownPatternSaveRequest) -> dict[str, int | str]:
         recommendation=req.recommendation,
         confidence=req.confidence,
     )
+    sync_pattern_contracts_from_legacy_tables()
+    record_pattern_ops_action(
+        action_type="register_known_pattern",
+        pattern_id=f"known-pattern:{pattern_id}",
+        status="applied",
+        payload=req.dict(),
+        result={"known_pattern_id": pattern_id},
+        reason="Human-selected known pattern registration",
+    )
     return {"status": "saved", "id": pattern_id, "fingerprint": req.fingerprint}
 
 
@@ -760,13 +944,23 @@ def manual_merge_fingerprints(req: FingerprintManualMergeRequest) -> dict[str, o
     """Merge user-selected fingerprints and register the canonical FP as known."""
 
     try:
-        return merge_selected_fingerprints_as_known_pattern(
+        result = merge_selected_fingerprints_as_known_pattern(
             service_name=req.service_name,
             fingerprints=req.fingerprints,
             cause=req.cause,
             recommendation=req.recommendation,
             confidence=req.confidence,
         )
+        sync_pattern_contracts_from_legacy_tables()
+        action_id = record_pattern_ops_action(
+            action_type="merge",
+            pattern_id=str(result.get("canonical_fingerprint", "")),
+            status="applied",
+            payload=req.dict(),
+            result=result,
+            reason="Manual selected fingerprint merge",
+        )
+        return {**result, "pattern_ops_action_id": action_id}
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -791,6 +985,15 @@ def create_pattern_rule(req: PatternRuleSaveRequest) -> dict[str, int | str]:
         template=req.template,
         enabled=req.enabled,
         priority=req.priority,
+    )
+    sync_pattern_contracts_from_legacy_tables()
+    record_pattern_ops_action(
+        action_type="add_adapter",
+        pattern_id=f"normalization-rule:{rule_id}",
+        status="applied",
+        payload=req.dict(),
+        result={"rule_id": rule_id},
+        reason="Approved normalization rule registered as PatternOps adapter",
     )
     return {"status": "saved", "id": rule_id}
 
@@ -833,11 +1036,21 @@ def approve_duplicate_pattern_candidate(candidate_key: str) -> dict[str, object]
     )
     updated = update_duplicate_pattern_candidate_status(candidate_key, "approved")
     merge_result = merge_duplicate_pattern_candidate(candidate_key, rule_id=rule_id)
+    sync_pattern_contracts_from_legacy_tables()
+    action_id = record_pattern_ops_action(
+        action_type="merge",
+        pattern_id=str(merge_result.get("canonical_fingerprint", "")),
+        status="applied",
+        payload={"candidate_key": candidate_key, "candidate": candidate},
+        result={"rule_id": rule_id, "merge": merge_result},
+        reason="Approved duplicate pattern candidate",
+    )
     return {
         "status": "approved",
         "rule_id": rule_id,
         "candidate": updated,
         "merge": merge_result,
+        "pattern_ops_action_id": action_id,
     }
 
 
@@ -848,6 +1061,14 @@ def reject_duplicate_pattern_candidate(candidate_key: str) -> dict[str, object]:
     updated = update_duplicate_pattern_candidate_status(candidate_key, "rejected")
     if updated is None:
         raise HTTPException(status_code=404, detail="Duplicate candidate not found")
+    record_pattern_ops_action(
+        action_type="reject",
+        pattern_id=candidate_key,
+        status="applied",
+        payload={"candidate_key": candidate_key},
+        result={"candidate": updated},
+        reason="Duplicate pattern candidate rejected",
+    )
     return {"status": "rejected", "candidate": updated}
 
 
@@ -861,5 +1082,14 @@ def approve_recommendation(req: ApprovalRequest) -> dict[str, str]:
         req.action,
         req.confidence,
         req.resolution_method,
+    )
+    sync_pattern_contracts_from_legacy_tables()
+    record_pattern_ops_action(
+        action_type="capture_resolution",
+        pattern_id=req.fingerprint,
+        status="applied",
+        payload=req.dict(),
+        result={"card_id": card_id},
+        reason="Approved recommendation captured as PatternOps case contract",
     )
     return {"result": "approved", "card_id": card_id}

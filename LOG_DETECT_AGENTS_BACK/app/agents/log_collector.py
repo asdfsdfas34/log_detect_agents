@@ -3,6 +3,7 @@
 from datetime import datetime, timedelta
 
 from app.mcp import get_mcp_client
+from app.patternops.runner import pattern_skill_runner
 from app.state import SharedState
 
 
@@ -12,6 +13,14 @@ class LogCollectorAgent:
     name = "LogCollectorAgent"
 
     def run(self, state: SharedState) -> SharedState:
+        return pattern_skill_runner.run_for_agent(
+            state,
+            agent_name=self.name,
+            scope="log_collection",
+            operations={"log_collection": self._collect_logs},
+        )
+
+    def _collect_logs(self, state: SharedState) -> SharedState:
         systems = state["scope"]["systems"] or []
         disable_stack = bool(state["scope"].get("filters", {}).get("disable_stack_traces", False))
         mcp = get_mcp_client()

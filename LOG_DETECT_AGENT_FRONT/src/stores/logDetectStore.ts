@@ -10,34 +10,57 @@ import type {
   ExecutionStatus,
   KnowledgeCardItem,
   LangSmithRunItem,
+  PatternOpsSkill,
+  PatternOpsSkillEdge,
+  PatternOpsSkillExecution,
   RecommendationHistoryItem,
   SharedState
 } from '@/types/agentTypes'
 
 const stepNames = [
-  'OrchestratorAgent',
-  'LogCollectorAgent',
-  'LogAnalysisAgent',
-  'AnomalyDetectionAgent',
-  'KnowledgeBaseRAGAgent',
-  'RecommendationAgent'
+  '분석 범위 확인',
+  '로그 수집/정규화',
+  '템플릿 추출/Fingerprint',
+  '임베딩/유사 FP 검색',
+  'FP 군집/병합 후보',
+  'Time-window/상태 벡터',
+  '추천/결과 정리'
 ]
 
 const stepLogMessages: Record<string, string> = {
-  'Starting execution': '분석 실행을 준비하고 있습니다.',
-  OrchestratorAgent:
-    'OrchestratorAgent: 요청 범위와 이전 실행 상태를 확인하고 다음에 실행할 agent를 결정하고 있습니다.',
-  LogCollectorAgent:
-    'LogCollectorAgent: 선택한 서비스의 원천 로그를 가져오고 분석 가능한 형태로 정규화하고 있습니다.',
-  LogAnalysisAgent:
-    'LogAnalysisAgent: 로그 메시지를 fingerprint 단위로 묶고 Known Pattern 및 신규 패턴 여부를 분석하고 있습니다.',
-  AnomalyDetectionAgent:
-    'AnomalyDetectionAgent: 발생 빈도, 심각도, 시간 분포를 비교해 이상 징후와 장애 가능성을 탐지하고 있습니다.',
-  KnowledgeBaseRAGAgent:
-    'KnowledgeBaseRAGAgent: 유사 분석 이력, Knowledge Card, 예외 처리 정보를 조회해 판단 근거를 보강하고 있습니다.',
-  RecommendationAgent:
-    'RecommendationAgent: 분석 근거를 종합해 영향 범위, 조치 방향, 재발 방지 권고안을 정리하고 있습니다.',
-  Completed: '멀티 에이전트 분석이 완료되었습니다.'
+  '분석 범위 확인':
+    '요청 범위, 대상 서비스, 분석 기준일, 이전 실행 상태를 확인하고 있습니다.',
+  '로그 수집/정규화':
+    '선택한 서비스의 원천 로그를 가져오고 분석 가능한 이벤트 형태로 정규화하고 있습니다.',
+  '템플릿 추출/Fingerprint':
+    '로그 메시지를 템플릿으로 추출하고 fingerprint 단위로 묶고 있습니다.',
+  '임베딩/유사 FP 검색':
+    'fingerprint 임베딩과 유사도 기준으로 기존 패턴 및 유사 fingerprint를 찾고 있습니다.',
+  'FP 군집/병합 후보':
+    '유사 fingerprint 군집과 병합 후보를 평가하고 승인 대기 항목을 정리하고 있습니다.',
+  'Time-window/상태 벡터':
+    '시간 창별 이벤트를 집계하고 trajectory modeling에 사용할 시스템 상태 벡터를 생성하고 있습니다.',
+  '추천/결과 정리':
+    '분석 근거를 종합해 영향 범위, 조치 방향, 재발 방지 권고안을 정리하고 있습니다.',
+  Completed: '분석 skill 실행이 완료되었습니다.'
+}
+
+const agentStageToSkillStage: Record<string, string> = {
+  'Starting execution': stepNames[0],
+  OrchestratorAgent: stepNames[0],
+  LogCollectorAgent: stepNames[1],
+  LogAnalysisAgent: stepNames[2],
+  KnowledgeBaseRAGAgent: stepNames[3],
+  AnomalyDetectionAgent: stepNames[5],
+  RecommendationAgent: stepNames[6],
+  Completed: 'Completed'
+}
+
+interface KnowledgeCardApprovalDraft {
+  cause: string
+  recommendation: string
+  resolutionMethod: string
+  confidence: string
 }
 
 function buildDefaultRequest(
@@ -68,6 +91,7 @@ export const useLogDetectStore = defineStore('logDetect', () => {
   const loadingExceptions = ref(false)
   const loadingLangSmithRuns = ref(false)
   const loadingDuplicatePatternCandidates = ref(false)
+  const loadingPatternOpsSkills = ref(false)
   const error = ref<string | null>(null)
   const serviceOptions = ref<string[]>([])
   const state = ref<SharedState | null>(null)
@@ -76,6 +100,8 @@ export const useLogDetectStore = defineStore('logDetect', () => {
   const exceptionRegistry = ref<ExceptionRegistryItem[]>([])
   const duplicatePatternCandidates = ref<DuplicatePatternCandidate[]>([])
   const langSmithRuns = ref<LangSmithRunItem[]>([])
+  const patternOpsSkills = ref<PatternOpsSkill[]>([])
+  const patternOpsSkillEdges = ref<PatternOpsSkillEdge[]>([])
   const langSmithStatus = ref<{
     enabled: boolean
     project: string
@@ -129,6 +155,8 @@ export const useLogDetectStore = defineStore('logDetect', () => {
       0,
     exceptionRegisteredCount:
       scenarioSummary.value?.exception_registered_count ?? 0,
+    exceptionExcludedLogs:
+      scenarioSummary.value?.exception_excluded_logs ?? 0,
     riskScore:
       scenarioSummary.value?.risk_score ??
       state.value?.assessment.risk_score ??
@@ -182,6 +210,41 @@ export const useLogDetectStore = defineStore('logDetect', () => {
     return state.value?.assessment.confidence?.toUpperCase() ?? 'MEDIUM'
   })
 
+  const patternOpsSkillExecutions = computed<PatternOpsSkillExecution[]>(() => {
+    const evidenceExecutions =
+      state.value?.evidence.pattern_ops_skill_executions
+    if (evidenceExecutions?.length) return evidenceExecutions
+    return (
+      (state.value?.final.evidence_bundle
+        ?.pattern_ops_skill_executions as PatternOpsSkillExecution[] | undefined) ??
+      []
+    )
+  })
+
+  const patternOpsSkillPlan = computed(() => {
+    return (
+      state.value?.evidence.pattern_ops_skill_plan ??
+      state.value?.final.evidence_bundle?.pattern_ops_skill_plan ??
+      null
+    )
+  })
+
+  const skillOpsOverview = computed(() => {
+    const executions = patternOpsSkillExecutions.value
+    const selected = new Set(executions.map((item) => item.skill_id))
+    const success = executions.filter((item) => item.status === 'success').length
+    const failed = executions.filter((item) => item.status === 'failed').length
+    const selectedOnly = executions.filter(
+      (item) => item.status === 'selected' || item.status === 'planned'
+    ).length
+    return {
+      selected: selected.size,
+      success,
+      failed,
+      selectedOnly
+    }
+  })
+
   function addToast(level: 'info' | 'error', message: string) {
     const id = Date.now() + Math.floor(Math.random() * 1000)
     toasts.value.push({ id, level, message })
@@ -194,11 +257,30 @@ export const useLogDetectStore = defineStore('logDetect', () => {
     const run = new Set(result.decisions.agents_run)
     const skipped = new Set(result.decisions.skipped_agents)
     const failed = new Set(result.decisions.failures.map((f) => f.node))
+    const failedSkills = new Set(
+      result.decisions.failures
+        .map((f) => agentStageToSkillStage[f.node])
+        .filter(Boolean)
+    )
+    const skippedSkills = new Set(
+      result.decisions.skipped_agents
+        .map((agent) => agentStageToSkillStage[agent])
+        .filter(Boolean)
+    )
+    const runSkills = new Set(
+      result.decisions.agents_run
+        .map((agent) => agentStageToSkillStage[agent])
+        .filter(Boolean)
+    )
+    const completedWithoutFailure = run.size > 0 && failed.size === 0
 
     agentTimeline.value = stepNames.map((name) => {
-      if (failed.has(name)) return { name, status: 'failed' }
-      if (run.has(name)) return { name, status: 'completed' }
-      if (skipped.has(name)) return { name, status: 'skipped' }
+      if (failedSkills.has(name)) return { name, status: 'failed' }
+      if (completedWithoutFailure) return { name, status: 'completed' }
+      if (runSkills.has(name)) return { name, status: 'completed' }
+      if (skipped.has(name) || skippedSkills.has(name)) {
+        return { name, status: 'skipped' }
+      }
       return { name, status: 'pending' }
     })
 
@@ -222,11 +304,13 @@ export const useLogDetectStore = defineStore('logDetect', () => {
   }
 
   function setCurrentStage(stage: string) {
-    currentStage.value = stage
+    const normalizedStage = agentStageToSkillStage[stage] ?? stage
+    currentStage.value = normalizedStage
     currentExecutionLog.value =
-      stepLogMessages[stage] || `${stage}: 현재 단계를 실행하고 있습니다.`
+      stepLogMessages[normalizedStage] ||
+      `${normalizedStage}: 현재 단계를 실행하고 있습니다.`
 
-    const activeIndex = stepNames.indexOf(stage)
+    const activeIndex = stepNames.indexOf(normalizedStage)
     if (activeIndex < 0) return
     localStageIndex = activeIndex
 
@@ -246,7 +330,12 @@ export const useLogDetectStore = defineStore('logDetect', () => {
       clearInterval(stageTimer)
     }
 
-    localStageIndex = Math.max(stepNames.indexOf(currentStage.value), 0)
+    localStageIndex = Math.max(
+      stepNames.indexOf(
+        agentStageToSkillStage[currentStage.value] ?? currentStage.value
+      ),
+      0
+    )
     stageTimer = setInterval(() => {
       if (!loading.value) return
       localStageIndex = Math.min(localStageIndex + 1, stepNames.length - 1)
@@ -288,6 +377,19 @@ export const useLogDetectStore = defineStore('logDetect', () => {
       addToast('error', 'LangSmith 로그를 불러오지 못했습니다.')
     } finally {
       loadingLangSmithRuns.value = false
+    }
+  }
+
+  async function fetchPatternOpsSkills() {
+    loadingPatternOpsSkills.value = true
+    try {
+      const { data } = await agentApi.patternOpsSkills({ limit: 100 })
+      patternOpsSkills.value = data.skills
+      patternOpsSkillEdges.value = data.edges
+    } catch {
+      addToast('error', 'PatternOps Skill Registry를 불러오지 못했습니다.')
+    } finally {
+      loadingPatternOpsSkills.value = false
     }
   }
 
@@ -412,7 +514,6 @@ export const useLogDetectStore = defineStore('logDetect', () => {
     cause: string
     recommendation: string
     confidence?: string
-    analysisDate?: string
   }) {
     try {
       const { data } = await agentApi.manualMergeFingerprints({
@@ -429,7 +530,6 @@ export const useLogDetectStore = defineStore('logDetect', () => {
           ? `선택 FP 병합 및 Known 등록 완료: ${canonical}`
           : '선택 FP 병합 및 Known 등록 완료'
       )
-      await runAnalysis(payload.service_name, payload.analysisDate)
       return true
     } catch (caught) {
       error.value = (caught as Error).message
@@ -501,6 +601,7 @@ export const useLogDetectStore = defineStore('logDetect', () => {
       await fetchRecommendations(serviceName)
       await fetchDuplicatePatternCandidates()
       await fetchLangSmithRuns()
+      await fetchPatternOpsSkills()
     } catch (caught) {
       executionStatus.value = 'failed'
       error.value = (caught as Error).message
@@ -519,10 +620,10 @@ export const useLogDetectStore = defineStore('logDetect', () => {
   ) {
     executionStatus.value = 'running'
     error.value = null
-    setCurrentStage('KnowledgeBaseRAGAgent')
+    setCurrentStage('임베딩/유사 FP 검색')
     agentTimeline.value = stepNames.map((name) => ({
       name,
-      status: ['KnowledgeBaseRAGAgent', 'RecommendationAgent'].includes(name)
+      status: ['임베딩/유사 FP 검색', '추천/결과 정리'].includes(name)
         ? 'running'
         : 'skipped'
     }))
@@ -554,6 +655,7 @@ export const useLogDetectStore = defineStore('logDetect', () => {
       lastExecutionAt.value = new Date().toISOString()
       await fetchRecommendations(serviceName)
       await fetchLangSmithRuns()
+      await fetchPatternOpsSkills()
       addToast('info', `Updated recommendations for ${fingerprint}`)
     } catch (caught) {
       executionStatus.value = 'failed'
@@ -650,22 +752,25 @@ export const useLogDetectStore = defineStore('logDetect', () => {
     }
   }
 
-  async function approveCurrentRecommendation(resolutionMethod: string) {
+  async function approveCurrentRecommendation(draft: KnowledgeCardApprovalDraft) {
     const fingerprint = currentRecommendationFingerprint.value
-    const recommendation = state.value?.final.generated_answer
-    if (!fingerprint || !recommendation) {
+    if (!fingerprint || !draft.recommendation.trim()) {
       addToast('error', '승인할 Recommendation 또는 fingerprint가 없습니다.')
+      return false
+    }
+    if (!draft.resolutionMethod.trim()) {
+      addToast('error', 'Knowledge Card 해결 방법을 입력해주세요.')
       return false
     }
 
     try {
       const { data } = await agentApi.approveRecommendation({
         fingerprint,
-        cause: currentRecommendationCause.value || '-',
-        recommendation,
-        resolution_method: resolutionMethod,
+        cause: draft.cause.trim() || '-',
+        recommendation: draft.recommendation.trim(),
+        resolution_method: draft.resolutionMethod.trim(),
         action: 'approved',
-        confidence: currentRecommendationConfidence.value
+        confidence: draft.confidence.trim() || currentRecommendationConfidence.value
       })
       addToast('info', `Recommendation 저장 승인 완료: ${data.card_id}`)
       await fetchKnowledgeCards(fingerprint)
@@ -711,6 +816,7 @@ export const useLogDetectStore = defineStore('logDetect', () => {
     loadingExceptions,
     loadingLangSmithRuns,
     loadingDuplicatePatternCandidates,
+    loadingPatternOpsSkills,
     error,
     state,
     recommendationHistory,
@@ -719,16 +825,24 @@ export const useLogDetectStore = defineStore('logDetect', () => {
     duplicatePatternCandidates,
     langSmithRuns,
     langSmithStatus,
+    patternOpsSkills,
+    patternOpsSkillEdges,
     serviceOptions,
     toasts,
     agentTimeline,
     riskClassification,
     overview,
+    skillOpsOverview,
+    patternOpsSkillExecutions,
+    patternOpsSkillPlan,
     recommendationSummary,
     currentRecommendationFingerprint,
+    currentRecommendationCause,
+    currentRecommendationConfidence,
     fetchHealth,
     fetchServices,
     fetchLangSmithRuns,
+    fetchPatternOpsSkills,
     fetchRecommendations,
     deleteSavedRecommendation,
     fetchKnowledgeCards,

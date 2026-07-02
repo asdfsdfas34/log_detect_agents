@@ -71,6 +71,10 @@
             label="Exception Registered Count"
             :value="store.overview.exceptionRegisteredCount"
           />
+          <OverviewCard
+            label="Exception Excluded"
+            :value="store.overview.exceptionExcludedLogs"
+          />
         </div>
       </div>
 
@@ -134,6 +138,17 @@
       @fetch-knowledge-cards="handleFetchKnowledgeCards"
       @fetch-exceptions="handleFetchExceptions"
       @delete-recommendation="handleDeleteRecommendation"
+    />
+
+    <KnowledgeCardReviewModal
+      v-if="knowledgeCardDraft"
+      :fingerprint="knowledgeCardDraft.fingerprint"
+      :cause="knowledgeCardDraft.cause"
+      :recommendation="knowledgeCardDraft.recommendation"
+      :resolution-method="knowledgeCardDraft.resolutionMethod"
+      :confidence="knowledgeCardDraft.confidence"
+      @cancel="knowledgeCardDraft = null"
+      @save="handleConfirmKnowledgeCard"
     />
 
     <aside class="fixed left-4 top-28 z-20 hidden w-56 xl:block">
@@ -217,6 +232,7 @@ import PatternClusterTable from '@/components/dashboard/PatternClusterTable.vue'
 import AnomalyTimelineChart from '@/components/dashboard/AnomalyTimelineChart.vue'
 import RecommendationPanel from '@/components/dashboard/RecommendationPanel.vue'
 import RecommendationHistoryPanel from '@/components/dashboard/RecommendationHistoryPanel.vue'
+import KnowledgeCardReviewModal from '@/components/dashboard/KnowledgeCardReviewModal.vue'
 import AgentProgressTimeline from '@/components/dashboard/AgentProgressTimeline.vue'
 import LangSmithLogPanel from '@/components/dashboard/LangSmithLogPanel.vue'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
@@ -237,6 +253,13 @@ const analysisDate = ref(new Date().toISOString().slice(0, 10))
 const showServiceLayer = ref(false)
 const duplicateCandidateBusyKey = ref<string | null>(null)
 const patternClusterTable = ref<InstanceType<typeof PatternClusterTable> | null>(null)
+const knowledgeCardDraft = ref<{
+  fingerprint: string
+  cause: string
+  recommendation: string
+  resolutionMethod: string
+  confidence: string
+} | null>(null)
 const canModerateRecommendation = computed(
   () =>
     Boolean(store.state?.final.generated_answer) &&
@@ -340,8 +363,7 @@ async function handleManualMergeKnown(fingerprints: string[]) {
     fingerprints,
     cause,
     recommendation,
-    confidence: 'HIGH',
-    analysisDate: analysisDate.value
+    confidence: 'HIGH'
   })
   if (merged) {
     patternClusterTable.value?.clearSelectedFingerprints()
@@ -430,15 +452,25 @@ function handleDeleteRecommendation(recommendationId: number) {
 function handleSaveCase() {
   const fingerprint = store.currentRecommendationFingerprint
   if (!fingerprint) return
-  const resolutionMethod = window.prompt(
-    `${fingerprint} Case를 어떻게 해결했는지 입력해주세요.`
-  )
-  if (!resolutionMethod?.trim()) return
-  const approved = window.confirm(
-    `${fingerprint} Case를 Knowledge Card로 저장하시겠습니까?`
-  )
-  if (!approved) return
-  void store.approveCurrentRecommendation(resolutionMethod.trim())
+  knowledgeCardDraft.value = {
+    fingerprint,
+    cause: store.currentRecommendationCause || '-',
+    recommendation: store.state?.final.generated_answer ?? '',
+    resolutionMethod: '',
+    confidence: store.currentRecommendationConfidence || 'MEDIUM'
+  }
+}
+
+async function handleConfirmKnowledgeCard(draft: {
+  cause: string
+  recommendation: string
+  resolutionMethod: string
+  confidence: string
+}) {
+  const saved = await store.approveCurrentRecommendation(draft)
+  if (saved) {
+    knowledgeCardDraft.value = null
+  }
 }
 
 function handleSaveRecommendation() {

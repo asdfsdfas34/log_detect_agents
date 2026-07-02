@@ -21,6 +21,8 @@ import type {
   PatternRuleSaveRequest,
   PatternRuleSaveResponse,
   PatternRuleSuggestRequest,
+  PatternOpsContractsResponse,
+  PatternOpsSkillsResponse,
   RecommendationDeleteResponse,
   RecommendationHistoryResponse,
   RecommendationSaveRequest,
@@ -122,5 +124,15 @@ export const agentApi = {
   },
   exceptions(params?: { fingerprint?: string; limit?: number }) {
     return apiClient.get<ExceptionRegistryResponse>('/exceptions', { params })
+  },
+  patternOpsSkills(params?: { limit?: number }) {
+    return apiClient.get<PatternOpsSkillsResponse>('/patternops/skills', {
+      params
+    })
+  },
+  patternOpsContracts(params?: { limit?: number }) {
+    return apiClient.get<PatternOpsContractsResponse>('/patternops/contracts', {
+      params
+    })
   }
 }
