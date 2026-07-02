@@ -16,6 +16,10 @@ class Evidence(TypedDict):
     suppressed_logs: list[dict]
     known_pattern_matches: list[dict]
     new_pattern_candidates: list[dict]
+    duplicate_pattern_candidates: list[dict]
+    fingerprint_merge_groups: list[dict]
+    event_time_windows: list[dict]
+    system_state_vectors: list[dict]
     anomalies: list[dict]
     anomaly_daily_counts: list[dict]
     clusters: list[dict]
@@ -95,6 +99,10 @@ def create_initial_state(
             "suppressed_logs": [],
             "known_pattern_matches": [],
             "new_pattern_candidates": [],
+            "duplicate_pattern_candidates": [],
+            "fingerprint_merge_groups": [],
+            "event_time_windows": [],
+            "system_state_vectors": [],
             "anomalies": [],
             "anomaly_daily_counts": [],
             "clusters": [],

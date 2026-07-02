@@ -82,6 +82,30 @@ export interface KnownPatternSaveResponse {
   fingerprint: string
 }
 
+export interface FingerprintManualMergeRequest {
+  service_name: string
+  fingerprints: string[]
+  cause: string
+  recommendation: string
+  confidence?: string
+}
+
+export interface FingerprintManualMergeResponse {
+  status: string
+  candidate_key?: string
+  rule_id?: number
+  known_pattern_id?: number
+  canonical_fingerprint?: string
+  merge?: {
+    merged: boolean
+    canonical_fingerprint?: string
+    merged_fingerprints?: string[]
+    occurrence_count?: number
+    reason?: string
+    chroma?: Record<string, number>
+  }
+}
+
 export interface PatternRuleSuggestRequest {
   cluster?: string
   message: string
@@ -250,6 +274,50 @@ export interface AnomalyDailyCount {
   anomaly_count: number
 }
 
+export interface FingerprintMergeGroup {
+  group_id: string
+  candidate_key: string
+  canonical_fingerprint: string
+  service_name: string
+  log_level: string
+  representative_template: string
+  member_fingerprints: string[]
+  avg_similarity: number
+  min_similarity: number
+  total_occurrence_count: number
+  status: string
+}
+
+export interface EventTimeWindow {
+  window_id: string
+  service_name: string
+  bucket_start: string
+  bucket_size: string
+  total_events: number
+  error_events: number
+  warn_events: number
+  info_events: number
+  unique_fingerprints: number
+  known_fingerprint_count: number
+  new_fingerprint_count: number
+  anomaly_count: number
+  max_risk_score: number
+  top_fingerprints: Array<{ fingerprint: string; count: number }>
+}
+
+export interface SystemStateVector {
+  vector_id: string
+  scope_key: string
+  service_name: string
+  bucket_start: string
+  bucket_size: string
+  feature_schema_version: string
+  features: Record<string, number>
+  vector: number[]
+  label: string
+  incident_id?: string
+}
+
 export interface Cluster {
   cluster: string
   count: number
@@ -317,6 +385,9 @@ export interface SharedState {
     incident_candidates?: Array<Record<string, unknown>>
     new_pattern_candidates?: Array<Record<string, unknown>>
     duplicate_pattern_candidates?: DuplicatePatternCandidate[]
+    fingerprint_merge_groups?: FingerprintMergeGroup[]
+    event_time_windows?: EventTimeWindow[]
+    system_state_vectors?: SystemStateVector[]
     anomaly_daily_counts?: AnomalyDailyCount[]
     summary?: ScenarioSummary
     recommendation?: Record<string, unknown>
@@ -357,6 +428,9 @@ export interface SharedState {
         recommendation: string
         confidence: string
       }
+      fingerprint_merge_groups?: FingerprintMergeGroup[]
+      event_time_windows?: EventTimeWindow[]
+      system_state_vectors?: SystemStateVector[]
     } | null
   }
 }

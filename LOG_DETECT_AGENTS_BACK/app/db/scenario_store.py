@@ -52,6 +52,9 @@ QUOTED_VOLATILE_RE = re.compile(r'"(?=[^"]*\d)[A-Za-z0-9_.:/\\-]{2,}"')
 ASSIGNED_VALUE_RE = re.compile(
     r"(\b[A-Za-z_][\w.-]*\s*[:=]\s*)(\"[^\"]*\"|'[^']*'|[^\s,;}\]]+)"
 )
+CANDIDATE_KEY_VALUE_RE = re.compile(
+    r"(\b[A-Za-z_][\w.-]*\s*[:=]\s*)(\"[^\"]*\"|'[^']*'|[^\s,;}\]]+)"
+)
 SEMANTIC_VALUE_RE = re.compile(
     r"\b(JobName|functionName)\s*:\s*([^\r\n]+)", re.IGNORECASE
 )
@@ -87,6 +90,9 @@ LEVEL_SCORE = {"ERROR": 50, "WARN": 20, "INFO": 5}
 _PIPELINE_CACHE: dict[tuple[Any, ...], dict[str, Any]] = {}
 KNOWN_SIMILARITY_THRESHOLD = 0.88
 DUPLICATE_SIMILARITY_THRESHOLD = 0.95
+DUPLICATE_MIN_TOTAL_OCCURRENCE = 2
+DUPLICATE_MIN_STRUCTURE_SIMILARITY = 0.80
+DUPLICATE_MAX_VARIABLE_TOKEN_RATIO = 0.25
 
 
 @lru_cache(maxsize=1)
@@ -457,6 +463,55 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             rule_id INTEGER,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
+        CREATE TABLE IF NOT EXISTS fingerprint_merge_groups (
+            group_id TEXT PRIMARY KEY,
+            candidate_key TEXT NOT NULL,
+            canonical_fingerprint TEXT NOT NULL,
+            service_name TEXT NOT NULL,
+            log_level TEXT NOT NULL,
+            representative_template TEXT NOT NULL,
+            member_fingerprints_json TEXT NOT NULL,
+            avg_similarity REAL NOT NULL DEFAULT 0,
+            min_similarity REAL NOT NULL DEFAULT 0,
+            total_occurrence_count INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'pending',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS event_time_windows (
+            window_id TEXT PRIMARY KEY,
+            service_name TEXT NOT NULL,
+            bucket_start TEXT NOT NULL,
+            bucket_size TEXT NOT NULL,
+            total_events INTEGER NOT NULL DEFAULT 0,
+            error_events INTEGER NOT NULL DEFAULT 0,
+            warn_events INTEGER NOT NULL DEFAULT 0,
+            info_events INTEGER NOT NULL DEFAULT 0,
+            unique_fingerprints INTEGER NOT NULL DEFAULT 0,
+            known_fingerprint_count INTEGER NOT NULL DEFAULT 0,
+            new_fingerprint_count INTEGER NOT NULL DEFAULT 0,
+            anomaly_count INTEGER NOT NULL DEFAULT 0,
+            max_risk_score INTEGER NOT NULL DEFAULT 0,
+            top_fingerprints_json TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(service_name, bucket_start, bucket_size)
+        );
+        CREATE TABLE IF NOT EXISTS system_state_vectors (
+            vector_id TEXT PRIMARY KEY,
+            scope_key TEXT NOT NULL,
+            service_name TEXT NOT NULL,
+            bucket_start TEXT NOT NULL,
+            bucket_size TEXT NOT NULL,
+            feature_schema_version TEXT NOT NULL,
+            features_json TEXT NOT NULL,
+            vector_json TEXT NOT NULL,
+            label TEXT NOT NULL DEFAULT 'normal',
+            incident_id TEXT DEFAULT '',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(scope_key, bucket_start, bucket_size, feature_schema_version)
+        );
         """)
 
     for column, definition in {
@@ -559,6 +614,7 @@ def duplicate_candidate_signature(message: str) -> str:
     """Build an aggressive signature used only to suggest duplicate FP groups."""
 
     text = normalize_log_text(message)
+    text = CANDIDATE_KEY_VALUE_RE.sub(r"\1*", text)
     text = re.sub(r"(\b[A-Za-z_][\w.]*)\s*:\s*(?=,|$)", r"\1:*", text)
     text = re.sub(r"(\b[A-Za-z_][\w.]*)(?:\s*:\s*)?\s+\*", r"\1:*", text)
     text = _generalize_candidate_paths(text)
@@ -586,7 +642,8 @@ def _duplicate_candidate_key(service_name: str, log_level: str, signature: str) 
 
 def _suggest_regex_from_duplicate_signature(signature: str) -> str:
     escaped = re.escape(signature)
-    escaped = escaped.replace(r":\*", r":\d*")
+    escaped = escaped.replace(r":\*", r":\s*[^,\s=>]*")
+    escaped = escaped.replace(r"=\ \*", r"=>?\s*[^,\s=>]*")
     escaped = escaped.replace(r"\(\*\)", r"\(\d+\)")
     escaped = escaped.replace(r"/\*/\*", r"/[^/\s]+/[^/\s]+")
     escaped = escaped.replace(r"/\*", r"/[^/\s]+")
@@ -622,6 +679,14 @@ def _wildcard_raw_duplicate_message(message: str) -> str:
     ]
     tokenized = message
     replacements: dict[str, str] = {}
+
+    def replace_key_value(match: re.Match[str]) -> str:
+        token = f"__DUP_KV_TOKEN_{len(replacements)}__"
+        prefix = re.escape(match.group(1)).replace(r"\ ", r"\s*")
+        replacements[token] = prefix + r"[^,\s;}\]]+"
+        return token
+
+    tokenized = CANDIDATE_KEY_VALUE_RE.sub(replace_key_value, tokenized)
     for index, (pattern, replacement) in enumerate(placeholders):
         token = f"__DUP_TOKEN_{index}__"
 
@@ -640,6 +705,59 @@ def _wildcard_raw_duplicate_message(message: str) -> str:
 
 def _suggest_template_from_duplicate_signature(signature: str) -> str:
     return signature.replace(":*", ":*")
+
+
+def _message_tokens(message: str) -> list[str]:
+    return [
+        token
+        for token in re.split(r"\s+", duplicate_candidate_signature(message))
+        if token and token != "*"
+    ]
+
+
+def _structure_similarity(items: list[dict[str, Any]]) -> tuple[float, float]:
+    token_lists = [_message_tokens(str(item.get("message") or "")) for item in items]
+    token_lists = [tokens for tokens in token_lists if tokens]
+    if len(token_lists) < 2:
+        return 1.0, 0.0
+    pair_scores: list[float] = []
+    variable_ratios: list[float] = []
+    for index, left in enumerate(token_lists):
+        for right in token_lists[index + 1 :]:
+            max_len = max(len(left), len(right), 1)
+            common = len(set(left) & set(right))
+            pair_scores.append(common / max_len)
+            mismatch = sum(
+                1
+                for left_token, right_token in zip(left, right, strict=False)
+                if left_token != right_token
+            ) + abs(len(left) - len(right))
+            variable_ratios.append(mismatch / max_len)
+    return min(pair_scores or [1.0]), max(variable_ratios or [0.0])
+
+
+def _candidate_regex_matches_all(regex: str, items: list[dict[str, Any]]) -> bool:
+    try:
+        return all(
+            re.search(regex, str(item.get("message") or ""), flags=re.IGNORECASE)
+            for item in items
+        )
+    except re.error:
+        return False
+
+
+def _candidate_items_allowed(items: list[dict[str, Any]]) -> bool:
+    statuses = {str(item.get("pattern_status") or "") for item in items}
+    if statuses and statuses <= {"known_exact"}:
+        return False
+    total_count = sum(int(item.get("occurrence_count") or 0) for item in items)
+    if total_count < DUPLICATE_MIN_TOTAL_OCCURRENCE:
+        return False
+    structure_score, variable_ratio = _structure_similarity(items)
+    return (
+        structure_score >= DUPLICATE_MIN_STRUCTURE_SIMILARITY
+        and variable_ratio <= DUPLICATE_MAX_VARIABLE_TOKEN_RATIO
+    )
 
 
 def detect_duplicate_pattern_candidates(
@@ -677,6 +795,14 @@ def detect_duplicate_pattern_candidates(
     with sqlite3.connect(_resolve_db_path()) as conn:
         ensure_schema(conn)
         for (service_name, log_level, signature), items in buckets.items():
+            deduped_items = {
+                str(item.get("fingerprint") or ""): item
+                for item in items
+                if item.get("fingerprint")
+            }
+            items = list(deduped_items.values())
+            if not _candidate_items_allowed(items):
+                continue
             fingerprints = sorted(
                 {
                     str(item.get("fingerprint") or "")
@@ -702,9 +828,11 @@ def detect_duplicate_pattern_candidates(
             confidence = min(0.99, 0.82 + (0.03 * min(len(fingerprints), 5)))
             reason = (
                 "Fingerprints share the same aggressive normalization signature; "
-                "differences appear to be empty or volatile field values."
+                "differences are limited to volatile fields and passed structure checks."
             )
             suggested_regex = _suggest_regex_from_duplicate_items(signature, items)
+            if not _candidate_regex_matches_all(suggested_regex, items):
+                continue
             suggested_template = _suggest_template_from_duplicate_signature(signature)
             conn.execute(
                 """
@@ -961,6 +1089,7 @@ def update_duplicate_pattern_candidate_status(
             """,
             (status, candidate_key),
         )
+        _sync_fingerprint_merge_group_status(conn)
         conn.commit()
     clear_normalization_rule_cache()
     _PIPELINE_CACHE.clear()
@@ -1247,6 +1376,7 @@ def merge_duplicate_pattern_candidate(candidate_key: str, *, rule_id: int) -> di
             """,
             (canonical_fingerprint,),
         )
+        _sync_fingerprint_merge_group_status(conn)
         conn.commit()
 
     _PIPELINE_CACHE.clear()
@@ -1640,6 +1770,391 @@ def _metric_baseline(
         "latest_count": latest_count,
         "baseline_count": baseline,
     }
+
+
+def _merge_group_id(candidate_key: str) -> str:
+    return "FMG-" + hashlib.sha1(candidate_key.encode("utf-8")).hexdigest()[:12].upper()
+
+
+def _sync_fingerprint_merge_group_status(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        DELETE FROM fingerprint_merge_groups
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM pattern_duplicate_candidates pdc
+            WHERE pdc.candidate_key=fingerprint_merge_groups.candidate_key
+        )
+        """
+    )
+    conn.execute(
+        """
+        UPDATE fingerprint_merge_groups
+        SET status=(
+                SELECT pdc.status
+                FROM pattern_duplicate_candidates pdc
+                WHERE pdc.candidate_key=fingerprint_merge_groups.candidate_key
+            ),
+            canonical_fingerprint=COALESCE(
+                (
+                    SELECT fa.canonical_fingerprint
+                    FROM fingerprint_aliases fa
+                    WHERE fa.reason LIKE '%' || fingerprint_merge_groups.candidate_key || '%'
+                    LIMIT 1
+                ),
+                canonical_fingerprint
+            ),
+            updated_at=CURRENT_TIMESTAMP
+        WHERE EXISTS (
+            SELECT 1
+            FROM pattern_duplicate_candidates pdc
+            WHERE pdc.candidate_key=fingerprint_merge_groups.candidate_key
+        )
+        """
+    )
+    conn.execute(
+        """
+        UPDATE fingerprint_merge_groups
+        SET total_occurrence_count=COALESCE(
+                (
+                    SELECT fp.occurrence_count
+                    FROM fingerprints fp
+                    WHERE fp.fingerprint=fingerprint_merge_groups.canonical_fingerprint
+                ),
+                total_occurrence_count
+            )
+        WHERE status='approved'
+        """
+    )
+
+
+def _fetch_fingerprint_merge_groups(
+    conn: sqlite3.Connection, *, status: str = "pending", limit: int = 50
+) -> list[dict[str, Any]]:
+    _sync_fingerprint_merge_group_status(conn)
+    params: list[Any] = []
+    where_sql = ""
+    if status:
+        where_sql = "WHERE status=?"
+        params.append(status)
+    params.append(limit)
+    rows = conn.execute(
+        f"""
+        SELECT group_id, candidate_key, canonical_fingerprint, service_name,
+               log_level, representative_template, member_fingerprints_json,
+               avg_similarity, min_similarity, total_occurrence_count, status
+        FROM fingerprint_merge_groups
+        {where_sql}
+        ORDER BY total_occurrence_count DESC, datetime(updated_at) DESC
+        LIMIT ?
+        """,
+        params,
+    ).fetchall()
+    return [
+        {
+            "group_id": str(row[0]),
+            "candidate_key": str(row[1]),
+            "canonical_fingerprint": str(row[2]),
+            "service_name": str(row[3]),
+            "log_level": str(row[4]),
+            "representative_template": str(row[5]),
+            "member_fingerprints": [str(item) for item in _load_json_list(str(row[6]))],
+            "avg_similarity": float(row[7] or 0),
+            "min_similarity": float(row[8] or 0),
+            "total_occurrence_count": int(row[9] or 0),
+            "status": str(row[10]),
+        }
+        for row in rows
+    ]
+
+
+def _upsert_fingerprint_merge_groups(
+    conn: sqlite3.Connection,
+    *,
+    candidates: list[dict[str, Any]],
+    groups_by_fingerprint: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    merge_groups: list[dict[str, Any]] = []
+    for candidate in candidates:
+        fingerprints = [
+            str(fp)
+            for fp in candidate.get("fingerprints", [])
+            if str(fp) in groups_by_fingerprint
+        ]
+        if len(fingerprints) < 2:
+            continue
+        canonical = max(
+            fingerprints,
+            key=lambda fp: int(groups_by_fingerprint[fp].get("occurrence_count") or 0),
+        )
+        total_count = sum(
+            int(groups_by_fingerprint[fp].get("occurrence_count") or 0)
+            for fp in fingerprints
+        )
+        similarity = float(candidate.get("confidence") or 0)
+        group = {
+            "group_id": _merge_group_id(str(candidate["candidate_key"])),
+            "candidate_key": str(candidate["candidate_key"]),
+            "canonical_fingerprint": canonical,
+            "service_name": str(candidate.get("service_name") or ""),
+            "log_level": str(candidate.get("log_level") or ""),
+            "representative_template": str(candidate.get("suggested_template") or ""),
+            "member_fingerprints": sorted(fingerprints),
+            "avg_similarity": similarity,
+            "min_similarity": similarity,
+            "total_occurrence_count": total_count,
+            "status": str(candidate.get("status") or "pending"),
+        }
+        conn.execute(
+            """
+            INSERT INTO fingerprint_merge_groups(
+                group_id, candidate_key, canonical_fingerprint, service_name,
+                log_level, representative_template, member_fingerprints_json,
+                avg_similarity, min_similarity, total_occurrence_count, status,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(group_id) DO UPDATE SET
+                canonical_fingerprint=excluded.canonical_fingerprint,
+                service_name=excluded.service_name,
+                log_level=excluded.log_level,
+                representative_template=excluded.representative_template,
+                member_fingerprints_json=excluded.member_fingerprints_json,
+                avg_similarity=excluded.avg_similarity,
+                min_similarity=excluded.min_similarity,
+                total_occurrence_count=excluded.total_occurrence_count,
+                status=excluded.status,
+                updated_at=CURRENT_TIMESTAMP
+            """,
+            (
+                group["group_id"],
+                group["candidate_key"],
+                group["canonical_fingerprint"],
+                group["service_name"],
+                group["log_level"],
+                group["representative_template"],
+                _json_list(group["member_fingerprints"]),
+                group["avg_similarity"],
+                group["min_similarity"],
+                group["total_occurrence_count"],
+                group["status"],
+            ),
+        )
+        merge_groups.append(group)
+    _sync_fingerprint_merge_group_status(conn)
+    return merge_groups
+
+
+def _window_id(service_name: str, bucket_start: str, bucket_size: str) -> str:
+    raw = f"{service_name}|{bucket_start}|{bucket_size}"
+    return "ETW-" + hashlib.sha1(raw.encode("utf-8")).hexdigest()[:14].upper()
+
+
+def _vector_id(scope_key: str, bucket_start: str, bucket_size: str, version: str) -> str:
+    raw = f"{scope_key}|{bucket_start}|{bucket_size}|{version}"
+    return "SSV-" + hashlib.sha1(raw.encode("utf-8")).hexdigest()[:14].upper()
+
+
+def _upsert_event_time_windows(
+    conn: sqlite3.Connection, *, service_name: str | None
+) -> list[dict[str, Any]]:
+    params: list[Any] = []
+    where = ""
+    if service_name:
+        where = "WHERE pt.service_name=?"
+        params.append(service_name)
+    rows = conn.execute(
+        f"""
+        SELECT
+            pt.service_name, pt.bucket_start, pt.bucket_size,
+            SUM(pt.total_count), SUM(pt.error_count), SUM(pt.warn_count),
+            SUM(pt.info_count), COUNT(DISTINCT pt.fingerprint),
+            SUM(CASE WHEN COALESCE(lar.is_known_pattern, 0)=1 THEN 1 ELSE 0 END),
+            SUM(CASE WHEN COALESCE(lar.is_new_pattern, 0)=1 THEN 1 ELSE 0 END),
+            SUM(CASE WHEN COALESCE(ar.anomaly_detected, 0)=1 THEN 1 ELSE 0 END),
+            MAX(COALESCE(ie.risk_score, 0))
+        FROM pattern_time_series_metrics pt
+        LEFT JOIN log_analysis_results lar ON lar.fingerprint=pt.fingerprint
+        LEFT JOIN anomaly_results ar ON ar.fingerprint=pt.fingerprint
+        LEFT JOIN impact_evaluations ie ON ie.fingerprint=pt.fingerprint
+        {where}
+        GROUP BY pt.service_name, pt.bucket_start, pt.bucket_size
+        ORDER BY pt.bucket_size, pt.bucket_start DESC
+        """,
+        params,
+    ).fetchall()
+    windows: list[dict[str, Any]] = []
+    for row in rows:
+        svc = str(row[0] or "")
+        bucket_start = str(row[1] or "")
+        bucket_size = str(row[2] or "")
+        top_rows = conn.execute(
+            """
+            SELECT fingerprint, total_count
+            FROM pattern_time_series_metrics
+            WHERE service_name=? AND bucket_start=? AND bucket_size=?
+            ORDER BY total_count DESC, fingerprint ASC
+            LIMIT 5
+            """,
+            (svc, bucket_start, bucket_size),
+        ).fetchall()
+        top_fingerprints = [
+            {"fingerprint": str(fp), "count": int(count or 0)}
+            for fp, count in top_rows
+        ]
+        window = {
+            "window_id": _window_id(svc, bucket_start, bucket_size),
+            "service_name": svc,
+            "bucket_start": bucket_start,
+            "bucket_size": bucket_size,
+            "total_events": int(row[3] or 0),
+            "error_events": int(row[4] or 0),
+            "warn_events": int(row[5] or 0),
+            "info_events": int(row[6] or 0),
+            "unique_fingerprints": int(row[7] or 0),
+            "known_fingerprint_count": int(row[8] or 0),
+            "new_fingerprint_count": int(row[9] or 0),
+            "anomaly_count": int(row[10] or 0),
+            "max_risk_score": int(row[11] or 0),
+            "top_fingerprints": top_fingerprints,
+        }
+        conn.execute(
+            """
+            INSERT INTO event_time_windows(
+                window_id, service_name, bucket_start, bucket_size,
+                total_events, error_events, warn_events, info_events,
+                unique_fingerprints, known_fingerprint_count, new_fingerprint_count,
+                anomaly_count, max_risk_score, top_fingerprints_json, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(service_name, bucket_start, bucket_size) DO UPDATE SET
+                total_events=excluded.total_events,
+                error_events=excluded.error_events,
+                warn_events=excluded.warn_events,
+                info_events=excluded.info_events,
+                unique_fingerprints=excluded.unique_fingerprints,
+                known_fingerprint_count=excluded.known_fingerprint_count,
+                new_fingerprint_count=excluded.new_fingerprint_count,
+                anomaly_count=excluded.anomaly_count,
+                max_risk_score=excluded.max_risk_score,
+                top_fingerprints_json=excluded.top_fingerprints_json,
+                updated_at=CURRENT_TIMESTAMP
+            """,
+            (
+                window["window_id"],
+                window["service_name"],
+                window["bucket_start"],
+                window["bucket_size"],
+                window["total_events"],
+                window["error_events"],
+                window["warn_events"],
+                window["info_events"],
+                window["unique_fingerprints"],
+                window["known_fingerprint_count"],
+                window["new_fingerprint_count"],
+                window["anomaly_count"],
+                window["max_risk_score"],
+                _json_list(top_fingerprints),
+            ),
+        )
+        windows.append(window)
+    return windows
+
+
+def _state_vector_from_window(window: dict[str, Any]) -> dict[str, Any]:
+    total = max(1, int(window.get("total_events") or 0))
+    unique = int(window.get("unique_fingerprints") or 0)
+    features = {
+        "total_events": int(window.get("total_events") or 0),
+        "error_ratio": round(int(window.get("error_events") or 0) / total, 6),
+        "warn_ratio": round(int(window.get("warn_events") or 0) / total, 6),
+        "info_ratio": round(int(window.get("info_events") or 0) / total, 6),
+        "unique_fingerprint_count": unique,
+        "unique_fingerprint_ratio": round(unique / total, 6),
+        "known_fingerprint_ratio": round(
+            int(window.get("known_fingerprint_count") or 0) / max(1, unique), 6
+        ),
+        "new_fingerprint_ratio": round(
+            int(window.get("new_fingerprint_count") or 0) / max(1, unique), 6
+        ),
+        "anomaly_count": int(window.get("anomaly_count") or 0),
+        "max_risk_score": int(window.get("max_risk_score") or 0),
+    }
+    vector = [
+        float(features["total_events"]),
+        float(features["error_ratio"]),
+        float(features["warn_ratio"]),
+        float(features["info_ratio"]),
+        float(features["unique_fingerprint_count"]),
+        float(features["unique_fingerprint_ratio"]),
+        float(features["known_fingerprint_ratio"]),
+        float(features["new_fingerprint_ratio"]),
+        float(features["anomaly_count"]),
+        float(features["max_risk_score"]) / 100.0,
+    ]
+    return {"features": features, "vector": vector}
+
+
+def _upsert_system_state_vectors(
+    conn: sqlite3.Connection, *, windows: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    version = "system-state-v1"
+    vectors: list[dict[str, Any]] = []
+    for window in windows:
+        scope_key = str(window.get("service_name") or "all")
+        state = _state_vector_from_window(window)
+        label = (
+            "incident"
+            if int(window.get("anomaly_count") or 0) > 0
+            else "warning"
+            if int(window.get("max_risk_score") or 0) >= 70
+            else "normal"
+        )
+        vector = {
+            "vector_id": _vector_id(
+                scope_key,
+                str(window["bucket_start"]),
+                str(window["bucket_size"]),
+                version,
+            ),
+            "scope_key": scope_key,
+            "service_name": str(window.get("service_name") or ""),
+            "bucket_start": str(window.get("bucket_start") or ""),
+            "bucket_size": str(window.get("bucket_size") or ""),
+            "feature_schema_version": version,
+            "features": state["features"],
+            "vector": state["vector"],
+            "label": label,
+            "incident_id": "",
+        }
+        conn.execute(
+            """
+            INSERT INTO system_state_vectors(
+                vector_id, scope_key, service_name, bucket_start, bucket_size,
+                feature_schema_version, features_json, vector_json, label,
+                incident_id, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(scope_key, bucket_start, bucket_size, feature_schema_version)
+            DO UPDATE SET
+                features_json=excluded.features_json,
+                vector_json=excluded.vector_json,
+                label=excluded.label,
+                incident_id=excluded.incident_id,
+                updated_at=CURRENT_TIMESTAMP
+            """,
+            (
+                vector["vector_id"],
+                vector["scope_key"],
+                vector["service_name"],
+                vector["bucket_start"],
+                vector["bucket_size"],
+                vector["feature_schema_version"],
+                _json_dict(vector["features"]),
+                _json_list(vector["vector"]),
+                vector["label"],
+                vector["incident_id"],
+            ),
+        )
+        vectors.append(vector)
+    return vectors
 
 
 def _upsert_anomaly_daily_count(
@@ -2236,7 +2751,7 @@ def run_detection_pipeline(
                     anomaly_type,
                 ),
             )
-            if anomaly:
+            if anomaly and not _is_new_pattern_anomaly(g, anomaly_type):
                 anomaly_item = {
                     "system": g["service_name"],
                     "severity": severity,
@@ -2302,6 +2817,33 @@ def run_detection_pipeline(
             continue
         visible_groups.append(group)
     duplicate_candidates = detect_duplicate_pattern_candidates(visible_groups)
+    with sqlite3.connect(db_path) as model_conn:
+        ensure_schema(model_conn)
+        _upsert_fingerprint_merge_groups(
+            model_conn,
+            candidates=duplicate_candidates,
+            groups_by_fingerprint={str(g["fingerprint"]): g for g in visible_groups},
+        )
+        merge_groups = _fetch_fingerprint_merge_groups(
+            model_conn, status="pending", limit=50
+        )
+        event_time_windows = _upsert_event_time_windows(
+            model_conn, service_name=service_name
+        )
+        system_state_vectors = _upsert_system_state_vectors(
+            model_conn, windows=event_time_windows
+        )
+        model_conn.commit()
+    latest_event_time_windows = sorted(
+        event_time_windows,
+        key=lambda item: (str(item["bucket_size"]), str(item["bucket_start"])),
+        reverse=True,
+    )[:12]
+    latest_system_state_vectors = sorted(
+        system_state_vectors,
+        key=lambda item: (str(item["bucket_size"]), str(item["bucket_start"])),
+        reverse=True,
+    )[:12]
     visible_impacts = [
         impact
         for impact in impacts
@@ -2351,6 +2893,9 @@ def run_detection_pipeline(
         "recommendations": visible_recs,
         "recommendation": top_rec,
         "duplicate_pattern_candidates": duplicate_candidates,
+        "fingerprint_merge_groups": merge_groups,
+        "event_time_windows": latest_event_time_windows,
+        "system_state_vectors": latest_system_state_vectors,
         "summary": {
             "total_logs": total_logs,
             "processed_new_logs": len(rows),
@@ -2366,6 +2911,137 @@ def run_detection_pipeline(
     }
     _PIPELINE_CACHE[cache_key] = copy.deepcopy(result)
     return result
+
+
+def merge_selected_fingerprints_as_known_pattern(
+    *,
+    service_name: str,
+    fingerprints: list[str],
+    cause: str,
+    recommendation: str,
+    confidence: str = "HIGH",
+) -> dict[str, Any]:
+    """Create an approved duplicate candidate from selected FPs and register it."""
+
+    selected = sorted({str(fp).strip() for fp in fingerprints if str(fp).strip()})
+    if len(selected) < 2:
+        raise ValueError("At least two fingerprints are required.")
+    placeholders = ",".join("?" for _ in selected)
+    with sqlite3.connect(_resolve_db_path()) as conn:
+        ensure_schema(conn)
+        rows = conn.execute(
+            f"""
+            SELECT fingerprint, occurrence_count, log_level, message, stacktrace,
+                   service_name, first_seen, last_seen
+            FROM fingerprints
+            WHERE fingerprint IN ({placeholders})
+            """,
+            selected,
+        ).fetchall()
+        if len(rows) != len(selected):
+            found = {str(row[0]) for row in rows}
+            missing = [fp for fp in selected if fp not in found]
+            raise ValueError(f"Fingerprint not found: {', '.join(missing)}")
+        services = {str(row[5] or "") for row in rows}
+        levels = {str(row[2] or "").upper() for row in rows}
+        if service_name and services != {service_name}:
+            raise ValueError("Selected fingerprints must belong to the selected service.")
+        if len(services) != 1 or len(levels) != 1:
+            raise ValueError("Selected fingerprints must share one service and log level.")
+        items = [
+            {
+                "fingerprint": str(row[0]),
+                "occurrence_count": int(row[1] or 0),
+                "log_level": str(row[2] or "").upper(),
+                "message": str(row[3] or ""),
+                "stacktrace": str(row[4] or ""),
+                "service_name": str(row[5] or ""),
+                "first_seen": str(row[6] or ""),
+                "last_seen": str(row[7] or ""),
+            }
+            for row in rows
+        ]
+        representative = max(items, key=lambda item: int(item["occurrence_count"]))
+        signature = _common_duplicate_signature(items)
+        if not signature:
+            signature = duplicate_candidate_signature(str(representative["message"]))
+        candidate_key = _duplicate_candidate_key(
+            str(representative["service_name"]),
+            str(representative["log_level"]),
+            f"manual:{signature}:{','.join(selected)}",
+        )
+        suggested_regex = _suggest_regex_from_duplicate_items(signature, items)
+        suggested_template = _suggest_template_from_duplicate_signature(signature)
+        conn.execute(
+            """
+            INSERT INTO pattern_duplicate_candidates(
+                candidate_key, service_name, log_level, signature,
+                fingerprints_json, suggested_regex, suggested_template,
+                confidence, reason, status, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 0.99, ?, 'approved', CURRENT_TIMESTAMP)
+            ON CONFLICT(candidate_key) DO UPDATE SET
+                fingerprints_json=excluded.fingerprints_json,
+                suggested_regex=excluded.suggested_regex,
+                suggested_template=excluded.suggested_template,
+                confidence=excluded.confidence,
+                reason=excluded.reason,
+                status='approved',
+                updated_at=CURRENT_TIMESTAMP
+            """,
+            (
+                candidate_key,
+                str(representative["service_name"]),
+                str(representative["log_level"]),
+                signature,
+                _json_list(selected),
+                suggested_regex,
+                suggested_template,
+                "Manually selected fingerprints were approved for canonical merge.",
+            ),
+        )
+        conn.commit()
+
+    clear_normalization_rule_cache()
+    rule_id = save_pattern_normalization_rule(
+        name=f"manual-merge:{candidate_key}",
+        match_regex=suggested_regex,
+        template=suggested_template,
+        enabled=True,
+        priority=140,
+    )
+    merge_result = merge_duplicate_pattern_candidate(candidate_key, rule_id=rule_id)
+    if not merge_result.get("merged"):
+        return {
+            "status": "failed",
+            "candidate_key": candidate_key,
+            "rule_id": rule_id,
+            "merge": merge_result,
+        }
+    canonical = str(merge_result["canonical_fingerprint"])
+    pattern_id = save_known_pattern(
+        fingerprint=canonical,
+        category="Manual",
+        sub_category="Known Pattern",
+        cause=cause,
+        recommendation=recommendation,
+        confidence=confidence,
+    )
+    return {
+        "status": "merged",
+        "candidate_key": candidate_key,
+        "rule_id": rule_id,
+        "known_pattern_id": pattern_id,
+        "canonical_fingerprint": canonical,
+        "merge": merge_result,
+    }
+
+
+def _is_new_pattern_anomaly(group: dict[str, Any], anomaly_type: str) -> bool:
+    return str(group.get("pattern_status") or "") == "new_pattern" or anomaly_type in {
+        "NEW_ERROR",
+        "NEW_PATTERN",
+        "PRESENCE",
+    }
 
 
 def _case_card_context(conn: sqlite3.Connection, fingerprint: str) -> dict[str, Any]:

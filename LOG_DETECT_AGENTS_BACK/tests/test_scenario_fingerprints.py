@@ -15,6 +15,7 @@ from app.db.scenario_store import (
     fetch_knowledge_cards,
     fingerprint_id,
     merge_duplicate_pattern_candidate,
+    merge_selected_fingerprints_as_known_pattern,
     normalize_log_text,
     register_exception,
     run_detection_pipeline,
@@ -203,6 +204,131 @@ def test_detection_pipeline_suggests_duplicate_pattern_candidates(
     assert repaired_known_count == 1
 
 
+def test_duplicate_candidate_groups_string_value_variants_after_approval(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db_path = tmp_path / "logs.db"
+    monkeypatch.setenv("SQLITE_PATH", str(db_path))
+    clear_normalization_rule_cache()
+    messages = [
+        "BatchWorker failed functionName: AlphaJob reason=timeout",
+        "BatchWorker failed functionName: AlphaJob reason=timeout",
+        "BatchWorker failed functionName: BetaJob reason=timeout",
+    ]
+    with sqlite3.connect(db_path) as conn:
+        ensure_schema(conn)
+        conn.executemany(
+            """
+            INSERT INTO service_logs(service_name, level, message, stack_trace, created_at)
+            VALUES ('batch-service', 'ERROR', ?, '', ?)
+            """,
+            [
+                (message, f"2026-07-01T09:0{index}:00")
+                for index, message in enumerate(messages)
+            ],
+        )
+        conn.commit()
+
+    result = run_detection_pipeline("batch-service")
+
+    candidates = result["duplicate_pattern_candidates"]
+    assert len(result["fingerprints"]) == 2
+    assert len(candidates) == 1
+    assert len(result["fingerprint_merge_groups"]) == 1
+    assert result["fingerprint_merge_groups"][0]["total_occurrence_count"] == 3
+    assert result["event_time_windows"]
+    assert result["system_state_vectors"]
+    assert result["system_state_vectors"][0]["feature_schema_version"] == "system-state-v1"
+    assert len(result["system_state_vectors"][0]["vector"]) == 10
+    assert len(candidates[0]["fingerprints"]) == 2
+    assert "functionName:*" in candidates[0]["suggested_template"]
+    assert all(
+        re.search(candidates[0]["suggested_regex"], message, flags=re.IGNORECASE)
+        for message in messages
+    )
+
+    rule_id = save_pattern_normalization_rule(
+        name="function-name-merge",
+        match_regex=candidates[0]["suggested_regex"],
+        template=candidates[0]["suggested_template"],
+    )
+    update_duplicate_pattern_candidate_status(candidates[0]["candidate_key"], "approved")
+    merge_result = merge_duplicate_pattern_candidate(
+        candidates[0]["candidate_key"], rule_id=rule_id
+    )
+
+    assert merge_result["merged"] is True
+    assert merge_result["occurrence_count"] == 3
+    rerun = run_detection_pipeline("batch-service", analysis_date="2026-07-01")
+    assert rerun["summary"]["total_fingerprints"] == 1
+    assert rerun["fingerprints"][0]["occurrence_count"] == 3
+
+
+def test_manual_selected_fingerprint_merge_registers_known_pattern(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db_path = tmp_path / "logs.db"
+    monkeypatch.setenv("SQLITE_PATH", str(db_path))
+    clear_normalization_rule_cache()
+    first = (
+        "PARAMETER I_SPERNR_TO of FUNCTION TEST_INT_ENTRUST_LIST (SETTER): "
+        "cannot convert String into NUM(3)"
+    )
+    second = (
+        "PARAMETER I_SPERNR_TO of FUNCTION TEST_INT_ENTRUST_LIST (SETTER): "
+        "cannot convert String into NUM(5)"
+    )
+    with sqlite3.connect(db_path) as conn:
+        ensure_schema(conn)
+        conn.executemany(
+            """
+            INSERT INTO fingerprints(
+                fingerprint, occurrence_count, log_level, message, stacktrace,
+                service_name, first_seen, last_seen
+            ) VALUES (?, ?, 'ERROR', ?, '', 'test_appl', ?, ?)
+            """,
+            [
+                ("FP-B09568", 10, first, "2026-07-02T10:00:00", "2026-07-02T10:10:00"),
+                ("FP-38AC10", 4, second, "2026-07-02T10:01:00", "2026-07-02T10:11:00"),
+            ],
+        )
+        conn.commit()
+
+    merge = merge_selected_fingerprints_as_known_pattern(
+        service_name="test_appl",
+        fingerprints=["FP-B09568", "FP-38AC10"],
+        cause="Same ABAP function parameter conversion failure with variable NUM length.",
+        recommendation="Treat NUM length as a variable template and review parameter mapping.",
+    )
+
+    assert merge["status"] == "merged"
+    assert merge["canonical_fingerprint"]
+    assert merge["known_pattern_id"]
+    with sqlite3.connect(db_path) as conn:
+        fingerprint_rows = conn.execute(
+            "SELECT fingerprint, occurrence_count FROM fingerprints"
+        ).fetchall()
+        alias_count = conn.execute("SELECT COUNT(*) FROM fingerprint_aliases").fetchone()[
+            0
+        ]
+        known_count = conn.execute(
+            "SELECT COUNT(*) FROM known_patterns WHERE fingerprint=?",
+            (merge["canonical_fingerprint"],),
+        ).fetchone()[0]
+        result_row = conn.execute(
+            """
+            SELECT is_known_pattern, is_new_pattern, pattern_status, match_source
+            FROM log_analysis_results
+            WHERE fingerprint=?
+            """,
+            (merge["canonical_fingerprint"],),
+        ).fetchone()
+    assert fingerprint_rows == [(merge["canonical_fingerprint"], 14)]
+    assert alias_count >= 1
+    assert known_count >= 1
+    assert result_row == (1, 0, "known_exact", "known_patterns")
+
+
 def test_duplicate_candidates_use_chroma_similarity_for_near_patterns(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -344,6 +470,16 @@ def test_approved_semantic_duplicate_aliases_are_known_on_date_rerun(
     assert len(merge_result["merged_fingerprints"]) == 4
 
     with sqlite3.connect(db_path) as conn:
+        merge_group_count = conn.execute(
+            "SELECT COUNT(*) FROM fingerprint_merge_groups"
+        ).fetchone()[0]
+        merge_group_status = conn.execute(
+            "SELECT status FROM fingerprint_merge_groups"
+        ).fetchone()[0]
+        window_count = conn.execute("SELECT COUNT(*) FROM event_time_windows").fetchone()[0]
+        vector_count = conn.execute(
+            "SELECT COUNT(*) FROM system_state_vectors"
+        ).fetchone()[0]
         conn.execute(
             """
             UPDATE pattern_duplicate_candidates
@@ -357,6 +493,10 @@ def test_approved_semantic_duplicate_aliases_are_known_on_date_rerun(
             (rule_id,),
         )
         conn.commit()
+    assert merge_group_count == 1
+    assert merge_group_status == "approved"
+    assert window_count > 0
+    assert vector_count > 0
     clear_normalization_rule_cache()
 
     rerun = run_detection_pipeline("test_appl", analysis_date="2026-06-30")
@@ -725,11 +865,14 @@ def test_detection_pipeline_filters_service_logs_by_analysis_date(
     assert result["summary"]["total_logs"] == 1
     assert result["summary"]["processed_new_logs"] == 1
     assert result["fingerprints"][0]["message"] == "target day failure"
+    assert result["summary"]["new_patterns"] == 1
+    assert result["summary"]["anomalies_detected"] == 0
+    assert result["anomalies"] == []
     assert result["anomaly_daily_counts"] == [
         {
             "service_name": "payment-api",
             "analysis_date": "2026-06-16",
-            "anomaly_count": result["summary"]["anomalies_detected"],
+            "anomaly_count": 0,
         }
     ]
     assert fetch_anomaly_daily_counts("payment-api") == result[

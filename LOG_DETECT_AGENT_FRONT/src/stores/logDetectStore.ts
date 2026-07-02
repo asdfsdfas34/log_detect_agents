@@ -23,6 +23,23 @@ const stepNames = [
   'RecommendationAgent'
 ]
 
+const stepLogMessages: Record<string, string> = {
+  'Starting execution': '분석 실행을 준비하고 있습니다.',
+  OrchestratorAgent:
+    'OrchestratorAgent: 요청 범위와 이전 실행 상태를 확인하고 다음에 실행할 agent를 결정하고 있습니다.',
+  LogCollectorAgent:
+    'LogCollectorAgent: 선택한 서비스의 원천 로그를 가져오고 분석 가능한 형태로 정규화하고 있습니다.',
+  LogAnalysisAgent:
+    'LogAnalysisAgent: 로그 메시지를 fingerprint 단위로 묶고 Known Pattern 및 신규 패턴 여부를 분석하고 있습니다.',
+  AnomalyDetectionAgent:
+    'AnomalyDetectionAgent: 발생 빈도, 심각도, 시간 분포를 비교해 이상 징후와 장애 가능성을 탐지하고 있습니다.',
+  KnowledgeBaseRAGAgent:
+    'KnowledgeBaseRAGAgent: 유사 분석 이력, Knowledge Card, 예외 처리 정보를 조회해 판단 근거를 보강하고 있습니다.',
+  RecommendationAgent:
+    'RecommendationAgent: 분석 근거를 종합해 영향 범위, 조치 방향, 재발 방지 권고안을 정리하고 있습니다.',
+  Completed: '멀티 에이전트 분석이 완료되었습니다.'
+}
+
 function buildDefaultRequest(
   serviceName: string,
   analysisDate?: string
@@ -39,6 +56,7 @@ function buildDefaultRequest(
 export const useLogDetectStore = defineStore('logDetect', () => {
   const executionStatus = ref<ExecutionStatus>('idle')
   const currentStage = ref<string>('Not started')
+  const currentExecutionLog = ref<string>('')
   const lastExecutionAt = ref<string | null>(null)
   const healthModel = ref<string>('unknown')
   const healthStatus = ref<string>('unknown')
@@ -71,6 +89,8 @@ export const useLogDetectStore = defineStore('logDetect', () => {
     stepNames.map((name) => ({ name, status: 'pending' }))
   )
   let pollTimer: ReturnType<typeof setInterval> | null = null
+  let stageTimer: ReturnType<typeof setInterval> | null = null
+  let localStageIndex = 0
   let stream: EventSource | null = null
 
   const scenarioSummary = computed(
@@ -183,7 +203,7 @@ export const useLogDetectStore = defineStore('logDetect', () => {
     })
 
     const current = agentTimeline.value.find((s) => s.status === 'pending')
-    currentStage.value = current ? current.name : 'Completed'
+    setCurrentStage(current ? current.name : 'Completed')
   }
 
   function closeStreamAndPolling() {
@@ -195,6 +215,43 @@ export const useLogDetectStore = defineStore('logDetect', () => {
       stream.close()
       stream = null
     }
+    if (stageTimer) {
+      clearInterval(stageTimer)
+      stageTimer = null
+    }
+  }
+
+  function setCurrentStage(stage: string) {
+    currentStage.value = stage
+    currentExecutionLog.value =
+      stepLogMessages[stage] || `${stage}: 현재 단계를 실행하고 있습니다.`
+
+    const activeIndex = stepNames.indexOf(stage)
+    if (activeIndex < 0) return
+    localStageIndex = activeIndex
+
+    agentTimeline.value = stepNames.map((name, index) => {
+      const previous = agentTimeline.value.find((step) => step.name === name)
+      if (previous?.status === 'failed' || previous?.status === 'skipped') {
+        return previous
+      }
+      if (index < activeIndex) return { name, status: 'completed' }
+      if (index === activeIndex) return { name, status: 'running' }
+      return { name, status: 'pending' }
+    })
+  }
+
+  function startLocalStageProgress() {
+    if (stageTimer) {
+      clearInterval(stageTimer)
+    }
+
+    localStageIndex = Math.max(stepNames.indexOf(currentStage.value), 0)
+    stageTimer = setInterval(() => {
+      if (!loading.value) return
+      localStageIndex = Math.min(localStageIndex + 1, stepNames.length - 1)
+      setCurrentStage(stepNames[localStageIndex])
+    }, 3000)
   }
 
   async function fetchHealth() {
@@ -349,6 +406,38 @@ export const useLogDetectStore = defineStore('logDetect', () => {
     }
   }
 
+  async function manualMergeFingerprints(payload: {
+    service_name: string
+    fingerprints: string[]
+    cause: string
+    recommendation: string
+    confidence?: string
+    analysisDate?: string
+  }) {
+    try {
+      const { data } = await agentApi.manualMergeFingerprints({
+        service_name: payload.service_name,
+        fingerprints: payload.fingerprints,
+        cause: payload.cause,
+        recommendation: payload.recommendation,
+        confidence: payload.confidence ?? 'HIGH'
+      })
+      const canonical = data.canonical_fingerprint ?? data.merge?.canonical_fingerprint
+      addToast(
+        'info',
+        canonical
+          ? `선택 FP 병합 및 Known 등록 완료: ${canonical}`
+          : '선택 FP 병합 및 Known 등록 완료'
+      )
+      await runAnalysis(payload.service_name, payload.analysisDate)
+      return true
+    } catch (caught) {
+      error.value = (caught as Error).message
+      addToast('error', `선택 FP 병합 실패: ${error.value}`)
+      return false
+    }
+  }
+
   function startPollingHealth() {
     closeStreamAndPolling()
     pollTimer = setInterval(async () => {
@@ -365,15 +454,17 @@ export const useLogDetectStore = defineStore('logDetect', () => {
     loading.value = true
     executionStatus.value = 'running'
     error.value = null
-    currentStage.value = 'Starting execution'
+    setCurrentStage('Starting execution')
     agentTimeline.value = stepNames.map((name, index) => ({
       name,
       status: index === 0 ? 'running' : 'pending'
     }))
+    setCurrentStage(stepNames[0])
+    startLocalStageProgress()
 
     stream = connectExecutionStream({
       onStage: (stage) => {
-        currentStage.value = stage
+        setCurrentStage(stage)
       },
       onPartial: () => {
         addToast('info', 'Received partial agent output')
@@ -384,6 +475,8 @@ export const useLogDetectStore = defineStore('logDetect', () => {
       },
       onError: (message) => {
         addToast('error', message)
+        stream = null
+        startLocalStageProgress()
       }
     })
 
@@ -411,6 +504,7 @@ export const useLogDetectStore = defineStore('logDetect', () => {
     } catch (caught) {
       executionStatus.value = 'failed'
       error.value = (caught as Error).message
+      currentExecutionLog.value = `분석 실패: ${error.value}`
       addToast('error', `Analysis failed: ${error.value}`)
     } finally {
       loading.value = false
@@ -425,7 +519,7 @@ export const useLogDetectStore = defineStore('logDetect', () => {
   ) {
     executionStatus.value = 'running'
     error.value = null
-    currentStage.value = 'KnowledgeBaseRAGAgent'
+    setCurrentStage('KnowledgeBaseRAGAgent')
     agentTimeline.value = stepNames.map((name) => ({
       name,
       status: ['KnowledgeBaseRAGAgent', 'RecommendationAgent'].includes(name)
@@ -456,7 +550,7 @@ export const useLogDetectStore = defineStore('logDetect', () => {
       markTimelineFromState(data.result)
       executionStatus.value =
         data.result.decisions.failures.length > 0 ? 'failed' : 'completed'
-      currentStage.value = 'Completed'
+      setCurrentStage('Completed')
       lastExecutionAt.value = new Date().toISOString()
       await fetchRecommendations(serviceName)
       await fetchLangSmithRuns()
@@ -464,6 +558,7 @@ export const useLogDetectStore = defineStore('logDetect', () => {
     } catch (caught) {
       executionStatus.value = 'failed'
       error.value = (caught as Error).message
+      currentExecutionLog.value = `Recommendation update 실패: ${error.value}`
       addToast('error', `Recommendation update failed: ${error.value}`)
     }
   }
@@ -604,6 +699,7 @@ export const useLogDetectStore = defineStore('logDetect', () => {
   return {
     executionStatus,
     currentStage,
+    currentExecutionLog,
     lastExecutionAt,
     healthModel,
     healthStatus,
@@ -640,6 +736,7 @@ export const useLogDetectStore = defineStore('logDetect', () => {
     fetchDuplicatePatternCandidates,
     approveDuplicatePatternCandidate,
     rejectDuplicatePatternCandidate,
+    manualMergeFingerprints,
     saveKnownPattern,
     suggestPatternRule,
     savePatternRule,

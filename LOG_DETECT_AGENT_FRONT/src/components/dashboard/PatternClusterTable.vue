@@ -11,6 +11,31 @@
         {{ activeClusters.length }} patterns
       </div>
     </div>
+    <div
+      class="mb-3 flex flex-wrap items-center justify-between gap-3 rounded border border-slate-200 bg-slate-50 px-3 py-2"
+    >
+      <p class="text-xs text-slate-600">
+        {{ selectedFingerprints.length }} fingerprints selected
+      </p>
+      <div class="flex gap-2">
+        <button
+          class="rounded border border-slate-300 px-2 py-1 text-xs font-semibold text-slate-600 hover:bg-white disabled:cursor-not-allowed disabled:opacity-50"
+          type="button"
+          :disabled="selectedFingerprints.length === 0"
+          @click="selectedFingerprints = []"
+        >
+          Clear
+        </button>
+        <button
+          class="rounded bg-emerald-600 px-3 py-1 text-xs font-semibold text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:bg-slate-300"
+          type="button"
+          :disabled="selectedFingerprints.length < 2"
+          @click="emit('manual-merge-known', selectedFingerprints)"
+        >
+          Merge + Known
+        </button>
+      </div>
+    </div>
 
     <div class="mb-4 flex flex-wrap gap-2 border-b border-slate-200">
       <button
@@ -68,6 +93,15 @@
       <table class="min-w-full table-fixed text-left text-sm">
         <thead class="text-xs uppercase text-slate-500">
           <tr>
+            <th class="w-10 py-2">
+              <input
+                type="checkbox"
+                :checked="pageSelectionState === 'all'"
+                :indeterminate="pageSelectionState === 'partial'"
+                aria-label="Select visible fingerprints"
+                @change="togglePageSelection"
+              />
+            </th>
             <th class="w-32 py-2">Cluster</th>
             <th class="py-2">Error Message</th>
             <th class="w-24 py-2">Level</th>
@@ -83,6 +117,14 @@
             :key="item.cluster"
             class="border-t"
           >
+            <td class="py-2">
+              <input
+                type="checkbox"
+                :checked="selectedFingerprints.includes(item.cluster)"
+                :aria-label="`Select ${item.cluster}`"
+                @change="toggleFingerprint(item.cluster)"
+              />
+            </td>
             <td
               class="py-2 font-mono text-xs"
               :class="isErrorLevel(item) ? 'font-semibold text-red-600' : ''"
@@ -178,7 +220,7 @@
           <tr v-if="pagedClusters.length === 0">
             <td
               class="border-t py-8 text-center text-sm text-slate-500"
-              colspan="7"
+              colspan="8"
             >
               No pattern clusters found.
             </td>
@@ -406,6 +448,7 @@ const emit = defineEmits<{
   'save-known-pattern': [cluster: Cluster]
   'request-recommendation': [cluster: Cluster]
   'suggest-pattern-rule': [cluster: Cluster]
+  'manual-merge-known': [fingerprints: string[]]
 }>()
 
 const currentPage = ref(1)
@@ -415,6 +458,7 @@ const similarLoadingKey = ref<string | null>(null)
 const similarError = ref('')
 const activeTab = ref<PatternTab>('similar')
 const activeAnomalyTab = ref<AnomalyTab>('all')
+const selectedFingerprints = ref<string[]>([])
 
 const sortedClusters = computed(() =>
   [...props.clusters].sort((a, b) => b.count - a.count)
@@ -529,6 +573,17 @@ const pagedClusters = computed(() => {
   return activeClusters.value.slice(start, start + PAGE_SIZE)
 })
 
+const pageSelectionState = computed<'all' | 'partial' | 'none'>(() => {
+  const pageFingerprints = pagedClusters.value.map((cluster) => cluster.cluster)
+  if (pageFingerprints.length === 0) return 'none'
+  const selectedCount = pageFingerprints.filter((fp) =>
+    selectedFingerprints.value.includes(fp)
+  ).length
+  if (selectedCount === pageFingerprints.length) return 'all'
+  if (selectedCount > 0) return 'partial'
+  return 'none'
+})
+
 const visiblePages = computed(() => {
   const pages: number[] = []
   const start = Math.max(1, currentPage.value - 2)
@@ -541,6 +596,10 @@ watch(
   () => props.clusters,
   () => {
     currentPage.value = 1
+    const available = new Set(props.clusters.map((cluster) => cluster.cluster))
+    selectedFingerprints.value = selectedFingerprints.value.filter((fp) =>
+      available.has(fp)
+    )
   }
 )
 
@@ -568,6 +627,35 @@ function similarity(item: Cluster): number {
   if (!Number.isFinite(score)) return 0
   return Math.round(score <= 1 ? score * 100 : score)
 }
+
+function toggleFingerprint(fingerprint: string) {
+  if (selectedFingerprints.value.includes(fingerprint)) {
+    selectedFingerprints.value = selectedFingerprints.value.filter(
+      (item) => item !== fingerprint
+    )
+    return
+  }
+  selectedFingerprints.value = [...selectedFingerprints.value, fingerprint]
+}
+
+function togglePageSelection() {
+  const pageFingerprints = pagedClusters.value.map((cluster) => cluster.cluster)
+  if (pageSelectionState.value === 'all') {
+    selectedFingerprints.value = selectedFingerprints.value.filter(
+      (fp) => !pageFingerprints.includes(fp)
+    )
+    return
+  }
+  selectedFingerprints.value = Array.from(
+    new Set([...selectedFingerprints.value, ...pageFingerprints])
+  )
+}
+
+function clearSelectedFingerprints() {
+  selectedFingerprints.value = []
+}
+
+defineExpose({ clearSelectedFingerprints })
 
 function isErrorLevel(item: Cluster): boolean {
   return item.log_level === 'ERROR'

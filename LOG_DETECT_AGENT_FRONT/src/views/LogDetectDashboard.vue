@@ -82,7 +82,11 @@
       />
     </section>
 
-    <LoadingSpinner v-if="store.loading" label="Running multi-agent analysis" />
+    <LoadingSpinner
+      v-if="store.loading"
+      label="Running multi-agent analysis"
+      :stage-log="store.currentExecutionLog"
+    />
     <ErrorState v-else-if="store.error" :message="store.error" />
 
     <template v-if="store.state">
@@ -94,12 +98,19 @@
         @approve="handleApproveDuplicateCandidate"
         @reject="handleRejectDuplicateCandidate"
       />
+      <TrajectoryModelingPanel
+        :merge-groups="trajectoryMergeGroups"
+        :event-windows="trajectoryEventWindows"
+        :state-vectors="trajectoryStateVectors"
+      />
       <PatternClusterTable
+        ref="patternClusterTable"
         :clusters="store.state.evidence.clusters"
         :service-name="serviceName"
         @save-known-pattern="handleSaveKnownPattern"
         @request-recommendation="handleRequestRecommendation"
         @suggest-pattern-rule="handleSuggestPatternRule"
+        @manual-merge-known="handleManualMergeKnown"
       />
       <RecommendationPanel
         :actions="store.state.final.recommended_actions ?? []"
@@ -201,6 +212,7 @@ import { computed, onMounted, ref } from 'vue'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import OverviewCard from '@/components/dashboard/OverviewCard.vue'
 import DuplicatePatternCandidatePanel from '@/components/dashboard/DuplicatePatternCandidatePanel.vue'
+import TrajectoryModelingPanel from '@/components/dashboard/TrajectoryModelingPanel.vue'
 import PatternClusterTable from '@/components/dashboard/PatternClusterTable.vue'
 import AnomalyTimelineChart from '@/components/dashboard/AnomalyTimelineChart.vue'
 import RecommendationPanel from '@/components/dashboard/RecommendationPanel.vue'
@@ -211,18 +223,48 @@ import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
 import ErrorState from '@/components/common/ErrorState.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import { useLogDetectStore } from '@/stores/logDetectStore'
-import type { Cluster, DuplicatePatternCandidate } from '@/types/agentTypes'
+import type {
+  Cluster,
+  DuplicatePatternCandidate,
+  EventTimeWindow,
+  FingerprintMergeGroup,
+  SystemStateVector
+} from '@/types/agentTypes'
 
 const store = useLogDetectStore()
 const serviceName = ref('')
 const analysisDate = ref(new Date().toISOString().slice(0, 10))
 const showServiceLayer = ref(false)
 const duplicateCandidateBusyKey = ref<string | null>(null)
+const patternClusterTable = ref<InstanceType<typeof PatternClusterTable> | null>(null)
 const canModerateRecommendation = computed(
   () =>
     Boolean(store.state?.final.generated_answer) &&
     Boolean(store.currentRecommendationFingerprint)
 )
+
+const evidenceBundle = computed(
+  () => store.state?.final.evidence_bundle as Record<string, unknown> | null | undefined
+)
+
+const trajectoryMergeGroups = computed(() => {
+  const evidenceItems = store.state?.evidence.fingerprint_merge_groups
+  if (evidenceItems?.length) return evidenceItems
+  return (evidenceBundle.value?.fingerprint_merge_groups ??
+    []) as FingerprintMergeGroup[]
+})
+
+const trajectoryEventWindows = computed(() => {
+  const evidenceItems = store.state?.evidence.event_time_windows
+  if (evidenceItems?.length) return evidenceItems
+  return (evidenceBundle.value?.event_time_windows ?? []) as EventTimeWindow[]
+})
+
+const trajectoryStateVectors = computed(() => {
+  const evidenceItems = store.state?.evidence.system_state_vectors
+  if (evidenceItems?.length) return evidenceItems
+  return (evidenceBundle.value?.system_state_vectors ?? []) as SystemStateVector[]
+})
 
 async function openServiceLayer() {
   await store.fetchServices()
@@ -273,6 +315,36 @@ async function handleSaveKnownPattern(cluster: Cluster) {
   if (saved) {
     cluster.pattern_status = 'known_exact'
     cluster.match_source = 'known_patterns'
+  }
+}
+
+async function handleManualMergeKnown(fingerprints: string[]) {
+  const trimmed = serviceName.value.trim()
+  if (!trimmed || fingerprints.length < 2) return
+  const approved = window.confirm(
+    `${fingerprints.length}개 fingerprint를 병합하고 Known Pattern으로 등록하시겠습니까?`
+  )
+  if (!approved) return
+  const cause = window.prompt(
+    'Known Pattern 원인을 입력해주세요.',
+    'Selected fingerprints represent the same parameter conversion failure.'
+  )
+  if (!cause?.trim()) return
+  const recommendation = window.prompt(
+    '권고 사항을 입력해주세요.',
+    'Normalize variable NUM length values and review the function parameter mapping.'
+  )
+  if (!recommendation?.trim()) return
+  const merged = await store.manualMergeFingerprints({
+    service_name: trimmed,
+    fingerprints,
+    cause,
+    recommendation,
+    confidence: 'HIGH',
+    analysisDate: analysisDate.value
+  })
+  if (merged) {
+    patternClusterTable.value?.clearSelectedFingerprints()
   }
 }
 

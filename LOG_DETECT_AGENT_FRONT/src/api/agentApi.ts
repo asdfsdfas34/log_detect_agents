@@ -10,6 +10,8 @@ import type {
   ExceptionRegisterResponse,
   ExceptionRegistryResponse,
   FingerprintRecommendationRequest,
+  FingerprintManualMergeRequest,
+  FingerprintManualMergeResponse,
   HealthResponse,
   KnownPatternSaveRequest,
   KnownPatternSaveResponse,
@@ -75,6 +77,12 @@ export const agentApi = {
   },
   saveKnownPattern(payload: KnownPatternSaveRequest) {
     return apiClient.post<KnownPatternSaveResponse>('/known-patterns', payload)
+  },
+  manualMergeFingerprints(payload: FingerprintManualMergeRequest) {
+    return apiClient.post<FingerprintManualMergeResponse>(
+      '/fingerprints/manual-merge',
+      payload
+    )
   },
   suggestPatternRule(payload: PatternRuleSuggestRequest) {
     return apiClient.post<PatternRuleProposal>('/pattern-rules/suggest', payload)

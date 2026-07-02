@@ -22,6 +22,7 @@ from app.db.scenario_store import (
     fetch_knowledge_cards,
     fetch_pattern_cluster,
     merge_duplicate_pattern_candidate,
+    merge_selected_fingerprints_as_known_pattern,
     normalize_log_text,
     register_exception,
     run_detection_pipeline,
@@ -116,6 +117,16 @@ class KnownPatternSaveRequest(BaseModel):
     sub_category: str = "Known Pattern"
     cause: str
     recommendation: str
+    confidence: str = "HIGH"
+
+
+class FingerprintManualMergeRequest(BaseModel):
+    """Request body for user-selected fingerprint merge and known registration."""
+
+    service_name: str
+    fingerprints: list[str] = Field(..., min_length=2)
+    cause: str = Field(..., min_length=1)
+    recommendation: str = Field(..., min_length=1)
     confidence: str = "HIGH"
 
 
@@ -457,6 +468,18 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
     result["evidence"]["anomaly_daily_counts"] = scenario.get(
         "anomaly_daily_counts", []
     )
+    result["evidence"]["duplicate_pattern_candidates"] = scenario.get(
+        "duplicate_pattern_candidates", []
+    )
+    result["evidence"]["fingerprint_merge_groups"] = scenario.get(
+        "fingerprint_merge_groups", []
+    )
+    result["evidence"]["event_time_windows"] = scenario.get(
+        "event_time_windows", []
+    )
+    result["evidence"]["system_state_vectors"] = scenario.get(
+        "system_state_vectors", []
+    )
     if scenario["fingerprints"]:
         result["evidence"]["clusters"] = _enrich_pattern_clusters(
             service_name=req.service_name,
@@ -482,9 +505,6 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
         result["evidence"]["known_pattern_matches"] = scenario.get(
             "recommendations", []
         )[:5]
-        result["evidence"]["duplicate_pattern_candidates"] = scenario.get(
-            "duplicate_pattern_candidates", []
-        )
         result["evidence"]["incident_candidates"] = [
             {
                 "fingerprint": scenario["recommendation"].get("fingerprint"),
@@ -511,6 +531,9 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
                 "total_matches": len(result["evidence"].get("known_pattern_matches", [])),
                 "suppressed": len(result["evidence"].get("suppressed_logs", [])),
             },
+            "fingerprint_merge_groups": scenario.get("fingerprint_merge_groups", []),
+            "event_time_windows": scenario.get("event_time_windows", []),
+            "system_state_vectors": scenario.get("system_state_vectors", []),
         }
     )
     result["decisions"]["skipped_agents"].append("RecommendationAgent")
@@ -730,6 +753,22 @@ def create_known_pattern(req: KnownPatternSaveRequest) -> dict[str, int | str]:
         confidence=req.confidence,
     )
     return {"status": "saved", "id": pattern_id, "fingerprint": req.fingerprint}
+
+
+@app.post("/fingerprints/manual-merge")
+def manual_merge_fingerprints(req: FingerprintManualMergeRequest) -> dict[str, object]:
+    """Merge user-selected fingerprints and register the canonical FP as known."""
+
+    try:
+        return merge_selected_fingerprints_as_known_pattern(
+            service_name=req.service_name,
+            fingerprints=req.fingerprints,
+            cause=req.cause,
+            recommendation=req.recommendation,
+            confidence=req.confidence,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/pattern-rules/suggest", response_model=PatternRuleProposalResponse)
