@@ -2,6 +2,7 @@ import json
 import re
 import sqlite3
 from pathlib import Path
+from typing import Any
 
 from app.agents.pattern_rule_suggestion import PatternRuleSuggestionAgent
 from app.db import scenario_store
@@ -203,6 +204,135 @@ def test_detection_pipeline_suggests_duplicate_pattern_candidates(
             (merge_result["canonical_fingerprint"],),
         ).fetchone()[0]
     assert repaired_known_count == 1
+
+
+def test_hybrid_similarity_promotes_structurally_identical_known_match(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db_path = tmp_path / "logs.db"
+    monkeypatch.setenv("SQLITE_PATH", str(db_path))
+    with sqlite3.connect(db_path) as conn:
+        ensure_schema(conn)
+        status = scenario_store._pattern_status_from_matches(
+            conn=conn,
+            item={
+                "fingerprint": "FP-NEW",
+                "service_name": "checkout-api",
+                "log_level": "ERROR",
+                "message": "Payment failed for order 123",
+                "normalized_message": "payment failed for order <number>",
+                "stacktrace": "",
+            },
+            existing_fingerprints=set(),
+            approved_matches=[
+                {
+                    "id": "known-pattern:1",
+                    "document": "payment failed for order <number>",
+                    "metadata": {
+                        "source": "known_pattern",
+                        "fingerprint": "FP-OLD",
+                        "service_name": "checkout-api",
+                        "log_level": "ERROR",
+                        "normalized_message": "payment failed for order <number>",
+                    },
+                    "similarity": 0.82,
+                }
+            ],
+            observed_matches=[],
+        )
+
+    assert status["pattern_status"] == "known_similar"
+    assert status["similar_fingerprint"] == "FP-OLD"
+    assert status["similarity_score"] >= scenario_store.HYBRID_KNOWN_SIMILARITY_THRESHOLD
+
+
+def test_semantic_duplicate_groups_use_hybrid_score_below_raw_duplicate_threshold(
+    monkeypatch,
+) -> None:
+    groups = [
+        {
+            "fingerprint": "FP-A",
+            "service_name": "checkout-api",
+            "log_level": "ERROR",
+            "message": "Payment failed for order 123",
+            "normalized_message": "payment failed for order <number>",
+            "occurrence_count": 1,
+        },
+        {
+            "fingerprint": "FP-B",
+            "service_name": "checkout-api",
+            "log_level": "ERROR",
+            "message": "Payment failed for order 456",
+            "normalized_message": "payment failed for order <number>",
+            "occurrence_count": 1,
+        },
+    ]
+
+    def fake_similar_batches(**kwargs: Any) -> list[list[dict[str, Any]]]:
+        return [
+            [
+                {
+                    "id": "checkout-api:FP-B",
+                    "document": "payment failed for order <number>",
+                    "metadata": {
+                        "fingerprint": "FP-B",
+                        "service_name": "checkout-api",
+                        "log_level": "ERROR",
+                        "normalized_message": "payment failed for order <number>",
+                    },
+                    "similarity": 0.90,
+                }
+            ],
+            [
+                {
+                    "id": "checkout-api:FP-A",
+                    "document": "payment failed for order <number>",
+                    "metadata": {
+                        "fingerprint": "FP-A",
+                        "service_name": "checkout-api",
+                        "log_level": "ERROR",
+                        "normalized_message": "payment failed for order <number>",
+                    },
+                    "similarity": 0.90,
+                }
+            ],
+        ]
+
+    monkeypatch.setattr(
+        scenario_store, "find_similar_pattern_clusters_batch", fake_similar_batches
+    )
+
+    semantic_groups = scenario_store._semantic_duplicate_groups(groups)
+
+    assert len(semantic_groups) == 1
+    assert {item["fingerprint"] for item in semantic_groups[0]} == {"FP-A", "FP-B"}
+
+
+def test_hdbscan_duplicate_groups_use_optional_cluster_labels(monkeypatch) -> None:
+    groups = [
+        {"fingerprint": "FP-A", "service_name": "checkout-api", "log_level": "ERROR"},
+        {"fingerprint": "FP-B", "service_name": "checkout-api", "log_level": "ERROR"},
+        {"fingerprint": "FP-C", "service_name": "checkout-api", "log_level": "ERROR"},
+    ]
+    pair_scores = {
+        ("FP-A", "FP-B"): 0.92,
+        ("FP-A", "FP-C"): 0.91,
+        ("FP-B", "FP-C"): 0.90,
+    }
+    monkeypatch.setattr(
+        scenario_store,
+        "_hdbscan_cluster_labels",
+        lambda *args, **kwargs: [0, 0, 0],
+    )
+
+    semantic_groups = scenario_store._hdbscan_duplicate_groups(groups, pair_scores)
+
+    assert len(semantic_groups) == 1
+    assert {item["fingerprint"] for item in semantic_groups[0]} == {
+        "FP-A",
+        "FP-B",
+        "FP-C",
+    }
 
 
 def test_duplicate_candidate_groups_string_value_variants_after_approval(

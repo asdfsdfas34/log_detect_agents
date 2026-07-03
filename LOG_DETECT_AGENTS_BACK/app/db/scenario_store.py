@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import importlib
 import json
 import math
 import re
 import sqlite3
 from datetime import datetime, timedelta
+from difflib import SequenceMatcher
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -93,6 +95,19 @@ DUPLICATE_SIMILARITY_THRESHOLD = 0.93
 DUPLICATE_MIN_TOTAL_OCCURRENCE = 2
 DUPLICATE_MIN_STRUCTURE_SIMILARITY = 0.74
 DUPLICATE_MAX_VARIABLE_TOKEN_RATIO = 0.35
+HYBRID_KNOWN_SIMILARITY_THRESHOLD = 0.86
+HYBRID_DUPLICATE_SIMILARITY_THRESHOLD = 0.90
+HYBRID_WEIGHTS = {
+    "embedding": 0.45,
+    "message": 0.20,
+    "tokens": 0.15,
+    "structure": 0.10,
+    "stacktrace": 0.05,
+    "metadata": 0.05,
+}
+HDBSCAN_MIN_CLUSTER_SIZE = 3
+HDBSCAN_MIN_SAMPLES = 2
+HDBSCAN_MAX_DISTANCE = 1.0 - HYBRID_DUPLICATE_SIMILARITY_THRESHOLD
 
 
 @lru_cache(maxsize=1)
@@ -613,6 +628,124 @@ def _pattern_cluster_context(item: dict[str, Any]) -> str:
     )
 
 
+def _metadata_from_match(match: dict[str, Any]) -> dict[str, Any]:
+    metadata = match.get("metadata")
+    return metadata if isinstance(metadata, dict) else {}
+
+
+def _fingerprint_from_match(match: dict[str, Any]) -> str:
+    metadata = _metadata_from_match(match)
+    fingerprint = str(metadata.get("fingerprint") or match.get("id") or "")
+    if ":" in fingerprint:
+        fingerprint = fingerprint.rsplit(":", 1)[-1]
+    return fingerprint
+
+
+def _token_set(text: str) -> set[str]:
+    return set(re.findall(r"[a-z0-9_./:-]+", normalize_log_text(text).lower()))
+
+
+def _sequence_similarity(left: str, right: str) -> float:
+    left_norm = normalize_log_text(left)
+    right_norm = normalize_log_text(right)
+    if not left_norm and not right_norm:
+        return 1.0
+    if not left_norm or not right_norm:
+        return 0.0
+    return SequenceMatcher(None, left_norm, right_norm).ratio()
+
+
+def _jaccard_similarity(left: str, right: str) -> float:
+    left_tokens = _token_set(left)
+    right_tokens = _token_set(right)
+    if not left_tokens and not right_tokens:
+        return 1.0
+    if not left_tokens or not right_tokens:
+        return 0.0
+    return len(left_tokens & right_tokens) / len(left_tokens | right_tokens)
+
+
+def _template_structure(text: str) -> str:
+    normalized = normalize_log_text(text)
+    normalized = re.sub(r"\b[a-z_][\w.-]*\s*[:=]\s*<[^>\s]+>", "key=<value>", normalized)
+    normalized = re.sub(r"<[^>\s]+>", "<value>", normalized)
+    normalized = re.sub(r"[a-z]+", "a", normalized)
+    normalized = re.sub(r"\s+", " ", normalized)
+    return normalized.strip()
+
+
+def _template_structure_similarity(left: str, right: str) -> float:
+    return _sequence_similarity(_template_structure(left), _template_structure(right))
+
+
+def _optional_text_similarity(left: str, right: str) -> float:
+    if not left.strip() or not right.strip():
+        return 0.0
+    return _jaccard_similarity(left, right)
+
+
+def _metadata_match_score(item: dict[str, Any], match: dict[str, Any]) -> float:
+    metadata = _metadata_from_match(match)
+    checks = [
+        (
+            str(item.get("service_name") or ""),
+            str(metadata.get("service_name") or ""),
+        ),
+        (
+            str(item.get("log_level") or "").upper(),
+            str(metadata.get("log_level") or "").upper(),
+        ),
+    ]
+    applicable = [(left, right) for left, right in checks if left and right]
+    if not applicable:
+        return 0.0
+    return sum(1 for left, right in applicable if left == right) / len(applicable)
+
+
+def _match_message(match: dict[str, Any]) -> str:
+    metadata = _metadata_from_match(match)
+    return str(
+        metadata.get("normalized_message")
+        or metadata.get("message")
+        or match.get("document")
+        or ""
+    )
+
+
+def _hybrid_similarity(item: dict[str, Any], match: dict[str, Any]) -> float:
+    embedding_similarity = max(0.0, min(1.0, float(match.get("similarity") or 0.0)))
+    item_message = str(
+        item.get("normalized_message") or item.get("message") or item.get("context") or ""
+    )
+    match_message = _match_message(match)
+    item_stacktrace = str(item.get("stacktrace") or item.get("stack_trace") or "")
+    match_stacktrace = str(_metadata_from_match(match).get("stacktrace") or "")
+    score = (
+        HYBRID_WEIGHTS["embedding"] * embedding_similarity
+        + HYBRID_WEIGHTS["message"] * _sequence_similarity(item_message, match_message)
+        + HYBRID_WEIGHTS["tokens"] * _jaccard_similarity(item_message, match_message)
+        + HYBRID_WEIGHTS["structure"]
+        * _template_structure_similarity(item_message, match_message)
+        + HYBRID_WEIGHTS["stacktrace"]
+        * _optional_text_similarity(item_stacktrace, match_stacktrace)
+        + HYBRID_WEIGHTS["metadata"] * _metadata_match_score(item, match)
+    )
+    return round(max(0.0, min(1.0, score)), 4)
+
+
+def _with_hybrid_similarity(
+    item: dict[str, Any], matches: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    return [
+        {
+            **match,
+            "hybrid_similarity": _hybrid_similarity(item, match),
+            "raw_similarity": match.get("similarity"),
+        }
+        for match in matches
+    ]
+
+
 def duplicate_candidate_signature(message: str) -> str:
     """Build an aggressive signature used only to suggest duplicate FP groups."""
 
@@ -1022,44 +1155,9 @@ def _merge_signature_token(left: str, right: str) -> str:
     return "*"
 
 
-def _semantic_duplicate_groups(groups: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
-    lookup = {str(group.get("fingerprint") or ""): group for group in groups}
-    contexts = [_pattern_cluster_context(group) for group in groups]
-    if not contexts:
-        return []
-    try:
-        match_groups = find_similar_pattern_clusters_batch(queries=contexts)
-    except Exception:  # noqa: BLE001
-        return []
-
-    edges: dict[str, set[str]] = {fingerprint: set() for fingerprint in lookup}
-    for index, matches in enumerate(match_groups):
-        if index >= len(groups):
-            continue
-        source = str(groups[index].get("fingerprint") or "")
-        source_group = lookup.get(source)
-        if not source or source_group is None:
-            continue
-        for match in matches:
-            similarity = float(match.get("similarity") or 0)
-            if similarity < DUPLICATE_SIMILARITY_THRESHOLD:
-                continue
-            metadata = match.get("metadata") or {}
-            target = str(metadata.get("fingerprint") or match.get("id") or "")
-            if ":" in target:
-                target = target.rsplit(":", 1)[-1]
-            target_group = lookup.get(target)
-            if (
-                not target_group
-                or target == source
-                or target_group.get("service_name") != source_group.get("service_name")
-                or str(target_group.get("log_level") or "").upper()
-                != str(source_group.get("log_level") or "").upper()
-            ):
-                continue
-            edges[source].add(target)
-            edges[target].add(source)
-
+def _connected_duplicate_components(
+    edges: dict[str, set[str]], lookup: dict[str, dict[str, Any]]
+) -> list[list[dict[str, Any]]]:
     seen: set[str] = set()
     components: list[list[dict[str, Any]]] = []
     for fingerprint in edges:
@@ -1077,6 +1175,146 @@ def _semantic_duplicate_groups(groups: list[dict[str, Any]]) -> list[list[dict[s
                     stack.append(next_fingerprint)
         if len(component) >= 2:
             components.append(component)
+    return components
+
+
+def _hdbscan_cluster_labels(
+    distance_matrix: list[list[float]],
+    *,
+    min_cluster_size: int = HDBSCAN_MIN_CLUSTER_SIZE,
+    min_samples: int = HDBSCAN_MIN_SAMPLES,
+) -> list[int]:
+    if len(distance_matrix) < min_cluster_size:
+        return []
+    try:
+        numpy = importlib.import_module("numpy")
+        hdbscan = importlib.import_module("hdbscan")
+        clusterer = hdbscan.HDBSCAN(
+            metric="precomputed",
+            min_cluster_size=min_cluster_size,
+            min_samples=min_samples,
+            cluster_selection_method="eom",
+        )
+        labels = clusterer.fit_predict(numpy.array(distance_matrix))
+    except Exception:  # noqa: BLE001
+        return []
+    return [int(label) for label in labels]
+
+
+def _hdbscan_component_allowed(
+    items: list[dict[str, Any]], pair_scores: dict[tuple[str, str], float]
+) -> bool:
+    fingerprints = [str(item.get("fingerprint") or "") for item in items]
+    scores: list[float] = []
+    for left_index, left in enumerate(fingerprints):
+        for right in fingerprints[left_index + 1 :]:
+            scores.append(pair_scores.get((left, right), pair_scores.get((right, left), 0.0)))
+    if not scores:
+        return False
+    return (
+        max(scores) >= HYBRID_DUPLICATE_SIMILARITY_THRESHOLD
+        and sum(scores) / len(scores) >= 1.0 - (HDBSCAN_MAX_DISTANCE * 1.5)
+    )
+
+
+def _hdbscan_duplicate_groups(
+    groups: list[dict[str, Any]],
+    pair_scores: dict[tuple[str, str], float],
+) -> list[list[dict[str, Any]]]:
+    buckets: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for group in groups:
+        service_name = str(group.get("service_name") or "")
+        log_level = str(group.get("log_level") or "").upper()
+        fingerprint = str(group.get("fingerprint") or "")
+        if service_name and log_level and fingerprint:
+            buckets.setdefault((service_name, log_level), []).append(group)
+
+    clustered: list[list[dict[str, Any]]] = []
+    for bucket_items in buckets.values():
+        if len(bucket_items) < HDBSCAN_MIN_CLUSTER_SIZE:
+            continue
+        fingerprints = [str(item.get("fingerprint") or "") for item in bucket_items]
+        matrix: list[list[float]] = []
+        for left in fingerprints:
+            row: list[float] = []
+            for right in fingerprints:
+                if left == right:
+                    row.append(0.0)
+                    continue
+                score = pair_scores.get((left, right), pair_scores.get((right, left), 0.0))
+                row.append(min(1.0, max(0.0, 1.0 - score)))
+            matrix.append(row)
+
+        labels = _hdbscan_cluster_labels(matrix)
+        if not labels or len(labels) != len(bucket_items):
+            continue
+        by_label: dict[int, list[dict[str, Any]]] = {}
+        for label, item in zip(labels, bucket_items, strict=False):
+            if label < 0:
+                continue
+            by_label.setdefault(label, []).append(item)
+        clustered.extend(
+            items
+            for items in by_label.values()
+            if len(items) >= 2 and _hdbscan_component_allowed(items, pair_scores)
+        )
+    return clustered
+
+
+def _semantic_duplicate_groups(groups: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    lookup = {str(group.get("fingerprint") or ""): group for group in groups}
+    contexts = [_pattern_cluster_context(group) for group in groups]
+    if not contexts:
+        return []
+    try:
+        match_groups = find_similar_pattern_clusters_batch(queries=contexts)
+    except Exception:  # noqa: BLE001
+        return []
+
+    edges: dict[str, set[str]] = {fingerprint: set() for fingerprint in lookup}
+    pair_scores: dict[tuple[str, str], float] = {}
+    for index, matches in enumerate(match_groups):
+        if index >= len(groups):
+            continue
+        source = str(groups[index].get("fingerprint") or "")
+        source_group = lookup.get(source)
+        if not source or source_group is None:
+            continue
+        for match in _with_hybrid_similarity(source_group, matches):
+            target = _fingerprint_from_match(match)
+            target_group = lookup.get(target)
+            if (
+                not target_group
+                or target == source
+                or target_group.get("service_name") != source_group.get("service_name")
+                or str(target_group.get("log_level") or "").upper()
+                != str(source_group.get("log_level") or "").upper()
+            ):
+                continue
+            similarity = float(match.get("similarity") or 0)
+            hybrid_similarity = float(match.get("hybrid_similarity") or 0)
+            pair_scores[(source, target)] = max(
+                pair_scores.get((source, target), 0.0),
+                hybrid_similarity,
+            )
+            if (
+                hybrid_similarity < HYBRID_DUPLICATE_SIMILARITY_THRESHOLD
+                and similarity < DUPLICATE_SIMILARITY_THRESHOLD
+            ):
+                continue
+            edges[source].add(target)
+            edges[target].add(source)
+
+    components = _connected_duplicate_components(edges, lookup)
+    seen_keys = {
+        tuple(sorted(str(item.get("fingerprint") or "") for item in component))
+        for component in components
+    }
+    for component in _hdbscan_duplicate_groups(groups, pair_scores):
+        key = tuple(sorted(str(item.get("fingerprint") or "") for item in component))
+        if key and key not in seen_keys:
+            components.append(component)
+            seen_keys.add(key)
     return components
 
 
@@ -1591,10 +1829,22 @@ def merge_duplicate_pattern_candidate(candidate_key: str, *, rule_id: int) -> di
 
 
 def _top_similarity(matches: list[dict[str, Any]]) -> dict[str, Any] | None:
-    scored = [m for m in matches if m.get("similarity") is not None]
+    scored = [
+        m
+        for m in matches
+        if m.get("hybrid_similarity") is not None or m.get("similarity") is not None
+    ]
     if not scored:
         return None
-    return max(scored, key=lambda item: float(item.get("similarity") or 0))
+    return max(
+        scored,
+        key=lambda item: float(
+            item.get("hybrid_similarity")
+            if item.get("hybrid_similarity") is not None
+            else item.get("similarity")
+            or 0
+        ),
+    )
 
 
 def _exact_known_match(conn: sqlite3.Connection, fp: str) -> tuple[bool, str]:
@@ -1693,6 +1943,8 @@ def _pattern_status_from_matches(
             "similarity_score": None,
         }
 
+    approved_matches = _with_hybrid_similarity(item, approved_matches)
+    observed_matches = _with_hybrid_similarity(item, observed_matches)
     approved_match = _top_similarity(
         [
             match
@@ -1711,9 +1963,22 @@ def _pattern_status_from_matches(
         ]
     )
     best_match = _top_similarity([m for m in [approved_match, observed_match] if m])
+    best_score = (
+        float(best_match.get("hybrid_similarity") or best_match.get("similarity") or 0)
+        if best_match
+        else 0.0
+    )
+    raw_score = (
+        float(best_match.get("similarity") or 0)
+        if best_match
+        else 0.0
+    )
     if (
         best_match
-        and float(best_match.get("similarity") or 0) >= KNOWN_SIMILARITY_THRESHOLD
+        and (
+            best_score >= HYBRID_KNOWN_SIMILARITY_THRESHOLD
+            or raw_score >= KNOWN_SIMILARITY_THRESHOLD
+        )
     ):
         metadata = best_match.get("metadata") or {}
         similar_fp = str(metadata.get("fingerprint") or best_match.get("id") or "")
@@ -1724,7 +1989,7 @@ def _pattern_status_from_matches(
             "pattern_status": "known_similar",
             "match_source": source,
             "similar_fingerprint": similar_fp,
-            "similarity_score": float(best_match.get("similarity") or 0),
+            "similarity_score": best_score,
         }
 
     if fp in existing_fingerprints:
@@ -3500,6 +3765,75 @@ def fetch_knowledge_cards(
         }
         for row in rows
     ]
+
+
+def fetch_knowledge_cards_by_ids(card_ids: list[str]) -> list[dict[str, Any]]:
+    """Return Knowledge Cards for the given IDs, preserving input order."""
+    ordered_ids = list(dict.fromkeys(str(card_id) for card_id in card_ids if card_id))
+    if not ordered_ids:
+        return []
+    placeholders = ",".join("?" for _ in ordered_ids)
+    with sqlite3.connect(_resolve_db_path()) as conn:
+        ensure_schema(conn)
+        rows = conn.execute(
+            f"""
+            SELECT
+                kc.card_id,
+                kc.fingerprint,
+                kc.cause,
+                kc.recommendation,
+                kc.action,
+                kc.confidence,
+                kc.resolution_method,
+                kc.created_at,
+                COALESCE(fp.message, ''),
+                COALESCE(fp.log_level, ''),
+                COALESCE(fp.service_name, ''),
+                kc.title,
+                kc.summary,
+                kc.symptoms,
+                kc.evidence_text,
+                kc.root_cause,
+                kc.remediation_steps,
+                kc.verification_steps,
+                kc.prevention_steps,
+                kc.metadata_json,
+                kc.rag_document,
+                kc.embedding_status
+            FROM knowledge_cards kc
+            LEFT JOIN fingerprints fp ON fp.fingerprint = kc.fingerprint
+            WHERE kc.card_id IN ({placeholders})
+            """,
+            ordered_ids,
+        ).fetchall()
+    cards_by_id = {
+        str(row[0]): {
+            "card_id": str(row[0]),
+            "fingerprint": str(row[1]),
+            "cause": str(row[2]),
+            "recommendation": str(row[3]),
+            "action": str(row[4]),
+            "confidence": str(row[5]),
+            "resolution_method": str(row[6]),
+            "created_at": str(row[7]),
+            "message": str(row[8]),
+            "log_level": str(row[9]),
+            "service_name": str(row[10]),
+            "title": str(row[11]),
+            "summary": str(row[12]),
+            "symptoms": _load_json_list(str(row[13])),
+            "evidence_text": str(row[14]),
+            "root_cause": str(row[15]),
+            "remediation_steps": _load_json_list(str(row[16])),
+            "verification_steps": _load_json_list(str(row[17])),
+            "prevention_steps": _load_json_list(str(row[18])),
+            "metadata": _load_json_dict(str(row[19])),
+            "rag_document": str(row[20]),
+            "embedding_status": str(row[21]),
+        }
+        for row in rows
+    }
+    return [cards_by_id[card_id] for card_id in ordered_ids if card_id in cards_by_id]
 
 
 def fetch_known_patterns_for_agents(limit: int = 500) -> list[dict[str, str]]:

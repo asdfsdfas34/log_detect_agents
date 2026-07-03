@@ -148,6 +148,10 @@ def test_recommendation_agent_uses_structured_llm_actions(monkeypatch):
     assert result["final"]["evidence_bundle"]["quality_score"] == 86
     assert result["final"]["evidence_bundle"]["quality_gate_status"] == "passed"
     assert result["final"]["evidence_bundle"]["quality_attempts"] == 1
+    assert result["final"]["evidence_bundle"]["referenced_knowledge_card_ids"] == [
+        "KC-123"
+    ]
+    assert "참조 Knowledge Card\n- KC-123" in result["final"]["generated_answer"]
     assert not any(call[0] == "sqlite.save_recommendation_result" for call in fake.calls)
     assert result["final"]["saved_recommendation_id"] is None
 

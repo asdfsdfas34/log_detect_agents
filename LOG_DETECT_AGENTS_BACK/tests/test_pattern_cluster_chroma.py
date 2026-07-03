@@ -571,6 +571,52 @@ def test_enrich_pattern_clusters_adds_backend_semantic_similarity(monkeypatch) -
     assert clusters[0]["similar_clusters"][0]["metadata"]["fingerprint"] == "FP-OLD"
 
 
+def test_related_knowledge_cards_include_exact_and_similar_cards(monkeypatch) -> None:
+    def fake_exact_cards(*, fingerprint: str | None = None, limit: int = 20):
+        assert fingerprint == "FP-NEW"
+        return [{"card_id": "KC-EXACT", "fingerprint": "FP-NEW"}]
+
+    def fake_similar_batches(**kwargs: Any) -> list[list[dict[str, Any]]]:
+        return [
+            [
+                {
+                    "id": "case-card-v2:knowledge-card:KC-SIMILAR",
+                    "metadata": {"card_id": "KC-SIMILAR", "fingerprint": "FP-OLD"},
+                    "similarity": 0.88,
+                },
+                {
+                    "id": "case-card-v2:knowledge-card:KC-EXACT",
+                    "metadata": {"card_id": "KC-EXACT", "fingerprint": "FP-NEW"},
+                    "similarity": 0.99,
+                },
+            ]
+        ]
+
+    def fake_cards_by_ids(card_ids: list[str]):
+        assert card_ids == ["KC-SIMILAR", "KC-EXACT"]
+        return [
+            {"card_id": "KC-SIMILAR", "fingerprint": "FP-OLD"},
+            {"card_id": "KC-EXACT", "fingerprint": "FP-NEW"},
+        ]
+
+    monkeypatch.setattr(main, "fetch_knowledge_cards", fake_exact_cards)
+    monkeypatch.setattr(main, "find_similar_analysis_documents_batch", fake_similar_batches)
+    monkeypatch.setattr(main, "fetch_knowledge_cards_by_ids", fake_cards_by_ids)
+
+    cards = main._related_knowledge_cards_for_recommendation(
+        fingerprint="FP-NEW",
+        service_name="checkout-api",
+        selected={
+            "message": "Payment failed for order 123",
+            "log_level": "ERROR",
+            "stacktrace": "PaymentException",
+        },
+        limit=5,
+    )
+
+    assert [card["card_id"] for card in cards] == ["KC-EXACT", "KC-SIMILAR"]
+
+
 def test_save_new_pattern_clusters_only_persists_new_patterns(monkeypatch) -> None:
     saved_documents: list[dict[str, Any]] = []
 

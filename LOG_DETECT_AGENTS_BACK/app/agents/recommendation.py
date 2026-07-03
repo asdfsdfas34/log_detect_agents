@@ -42,6 +42,7 @@ class RecommendationAgent:
             "pattern_ops_skill_executions", []
         )
         related = state.get("rag", {}).get("related_knowledge", [])
+        referenced_knowledge_card_ids = self._knowledge_card_ids(related)
 
         needs_data = any(
             "additional data" in str(item).lower() or "추가" in str(item)
@@ -80,6 +81,7 @@ class RecommendationAgent:
             "summary": state["evidence"].get("summary", {}),
             "recommendation": state["evidence"].get("recommendation", {}),
             "similar_cases": related,
+            "referenced_knowledge_card_ids": referenced_knowledge_card_ids,
         }
 
         mcp = get_mcp_client()
@@ -99,6 +101,12 @@ class RecommendationAgent:
                 f"LLM/RAG recommendation failed, fallback used: {exc}"
             )
 
+        recommendation["referenced_knowledge_card_ids"] = (
+            self._merge_knowledge_card_ids(
+                recommendation.get("referenced_knowledge_card_ids"),
+                referenced_knowledge_card_ids,
+            )
+        )
         evidence_bundle["recommendation_source"] = recommendation["source"]
         evidence_bundle["quality_score"] = recommendation.get("quality_score")
         evidence_bundle["quality_gate_status"] = recommendation.get(
@@ -264,6 +272,7 @@ class RecommendationAgent:
             "verification_steps": ["string: Korean verification step"],
             "prevention_steps": ["string: Korean prevention step"],
             "additional_data_needed": ["string: Korean missing data"],
+            "referenced_knowledge_card_ids": ["string: referenced Knowledge Card ID"],
             "confidence": "low|mid|high",
         }
         feedback_text = (
@@ -287,6 +296,10 @@ class RecommendationAgent:
             "- If evidence is insufficient, state the gap in additional_data_needed "
             "instead of guessing.\n"
             "- Actions must be specific enough for an engineer to execute and verify.\n"
+            "- Include every Knowledge Card ID used from "
+            "referenced_knowledge_card_ids in the referenced_knowledge_card_ids "
+            "JSON field, and mention those IDs in root_cause_analysis or action "
+            "evidence when they influenced the answer.\n"
             f"{feedback_text}\n"
             f"Additional data needed flag: {needs_data}\n"
             f"JSON schema: {json.dumps(schema, ensure_ascii=False)}\n"
@@ -359,6 +372,11 @@ class RecommendationAgent:
             "additional_data_needed",
             required=False,
         )
+        referenced_knowledge_card_ids = self._validate_text_list(
+            payload.get("referenced_knowledge_card_ids", []),
+            "referenced_knowledge_card_ids",
+            required=False,
+        )
         confidence = str(payload.get("confidence") or "mid").lower()
         if confidence not in {"low", "mid", "high"}:
             confidence = "mid"
@@ -370,6 +388,7 @@ class RecommendationAgent:
             "verification_steps": verification_steps,
             "prevention_steps": prevention_steps,
             "additional_data_needed": additional_data_needed or None,
+            "referenced_knowledge_card_ids": referenced_knowledge_card_ids,
             "confidence": confidence,
             "source": "llm_rag",
         }
@@ -608,6 +627,7 @@ class RecommendationAgent:
             ],
             "prevention_steps": [],
             "additional_data_needed": additional_data,
+            "referenced_knowledge_card_ids": [],
             "confidence": "mid",
             "source": "fallback",
             "quality_score": None,
@@ -646,6 +666,10 @@ class RecommendationAgent:
         if prevention_steps:
             lines.extend(["", "재발 방지"])
             lines.extend(f"- {item}" for item in prevention_steps)
+        referenced_ids = recommendation.get("referenced_knowledge_card_ids") or []
+        if referenced_ids:
+            lines.extend(["", "참조 Knowledge Card"])
+            lines.extend(f"- {item}" for item in referenced_ids)
         additional_data = recommendation.get("additional_data_needed") or []
         if additional_data:
             lines.extend(["", "추가 필요 데이터"])
@@ -663,3 +687,29 @@ class RecommendationAgent:
                 ]
             )
         return "\n".join(lines)
+
+    @staticmethod
+    def _knowledge_card_ids(items: list[Any]) -> list[str]:
+        ids: list[str] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            card_id = str(item.get("card_id") or "").strip()
+            if card_id and card_id not in ids:
+                ids.append(card_id)
+        return ids
+
+    @staticmethod
+    def _merge_knowledge_card_ids(value: Any, fallback_ids: list[str]) -> list[str]:
+        ids: list[str] = []
+        if isinstance(value, list):
+            candidates = value
+        elif value:
+            candidates = [value]
+        else:
+            candidates = []
+        for item in candidates + fallback_ids:
+            card_id = str(item or "").strip()
+            if card_id and card_id not in ids:
+                ids.append(card_id)
+        return ids

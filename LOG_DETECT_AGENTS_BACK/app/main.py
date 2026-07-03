@@ -13,6 +13,7 @@ from app.agents.pattern_rule_suggestion import PatternRuleSuggestionAgent
 from app.agents.recommendation import RecommendationAgent
 from app.config import settings
 from app.db.chroma_store import (
+    find_similar_analysis_documents_batch,
     find_similar_pattern_clusters_batch,
 )
 from app.db.scenario_store import (
@@ -20,6 +21,7 @@ from app.db.scenario_store import (
     fetch_duplicate_pattern_candidates,
     fetch_exception_registry,
     fetch_knowledge_cards,
+    fetch_knowledge_cards_by_ids,
     fetch_pattern_cluster,
     merge_duplicate_pattern_candidate,
     merge_selected_fingerprints_as_known_pattern,
@@ -446,6 +448,62 @@ def build_generated_answer(
     return "\n".join(lines)
 
 
+def _knowledge_card_id_from_match(match: dict) -> str:
+    metadata = match.get("metadata") or {}
+    card_id = str(metadata.get("card_id") or "")
+    if card_id:
+        return card_id
+    raw_id = str(match.get("id") or "")
+    for prefix in ("case-card-v2:knowledge-card:", "knowledge-card:"):
+        if raw_id.startswith(prefix):
+            return raw_id[len(prefix) :]
+    return ""
+
+
+def _related_knowledge_cards_for_recommendation(
+    *,
+    fingerprint: str,
+    service_name: str,
+    selected: dict | None,
+    limit: int = 5,
+) -> list[dict]:
+    exact_cards = fetch_knowledge_cards(fingerprint=fingerprint, limit=limit)
+    if not selected:
+        return exact_cards
+
+    query = _pattern_cluster_context(
+        service_name=service_name,
+        fingerprint=fingerprint,
+        message=str(selected.get("message") or ""),
+        log_level=str(selected.get("log_level") or ""),
+        stacktrace=str(selected.get("stacktrace") or ""),
+    )
+    try:
+        groups = find_similar_analysis_documents_batch(
+            queries=[query], n_results=max(1, limit)
+        )
+    except Exception:  # noqa: BLE001
+        groups = []
+    similar_card_ids = [
+        card_id
+        for card_id in (
+            _knowledge_card_id_from_match(match)
+            for match in (groups[0] if groups else [])
+        )
+        if card_id
+    ]
+    similar_cards = fetch_knowledge_cards_by_ids(similar_card_ids)
+    merged: list[dict] = []
+    seen: set[str] = set()
+    for card in exact_cards + similar_cards:
+        card_id = str(card.get("card_id") or "")
+        if not card_id or card_id in seen:
+            continue
+        seen.add(card_id)
+        merged.append(card)
+    return merged[:limit]
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {
@@ -787,8 +845,11 @@ def recommend_for_fingerprint(req: FingerprintRecommendationRequest) -> AnalyzeR
     ]
     state["evidence"]["summary"] = scenario["summary"]
     state["evidence"]["recommendation"] = selected_recommendation
-    state["rag"]["related_knowledge"] = fetch_knowledge_cards(
-        fingerprint=req.fingerprint, limit=5
+    state["rag"]["related_knowledge"] = _related_knowledge_cards_for_recommendation(
+        fingerprint=req.fingerprint,
+        service_name=req.service_name,
+        selected=selected,
+        limit=5,
     )
     state["assessment"]["risk_score"] = selected_impact["risk_score"]
     state["assessment"]["confidence"] = (
