@@ -156,11 +156,10 @@
     </aside>
 
     <aside class="fixed right-4 top-28 z-20 hidden w-80 2xl:block">
-      <LangSmithLogPanel
-        :runs="store.langSmithRuns"
-        :loading="store.loadingLangSmithRuns"
-        :status="store.langSmithStatus"
-        @refresh="store.fetchLangSmithRuns"
+      <SkillActivityStreamPanel
+        :items="store.skillActivityStream"
+        :current="store.currentSkillActivity"
+        :execution-status="store.executionStatus"
       />
     </aside>
 
@@ -234,7 +233,7 @@ import RecommendationPanel from '@/components/dashboard/RecommendationPanel.vue'
 import RecommendationHistoryPanel from '@/components/dashboard/RecommendationHistoryPanel.vue'
 import KnowledgeCardReviewModal from '@/components/dashboard/KnowledgeCardReviewModal.vue'
 import AgentProgressTimeline from '@/components/dashboard/AgentProgressTimeline.vue'
-import LangSmithLogPanel from '@/components/dashboard/LangSmithLogPanel.vue'
+import SkillActivityStreamPanel from '@/components/dashboard/SkillActivityStreamPanel.vue'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
 import ErrorState from '@/components/common/ErrorState.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
@@ -498,6 +497,5 @@ onMounted(async () => {
   await store.fetchKnowledgeCards()
   await store.fetchExceptionRegistry()
   await store.fetchDuplicatePatternCandidates()
-  await store.fetchLangSmithRuns()
 })
 </script>

@@ -9,10 +9,10 @@ import type {
   ExceptionRegistryItem,
   ExecutionStatus,
   KnowledgeCardItem,
-  LangSmithRunItem,
   PatternOpsSkill,
   PatternOpsSkillEdge,
   PatternOpsSkillExecution,
+  SkillActivityStreamItem,
   RecommendationHistoryItem,
   SharedState
 } from '@/types/agentTypes'
@@ -26,6 +26,8 @@ const stepNames = [
   'Time-window/상태 벡터',
   '추천/결과 정리'
 ]
+
+const analysisStepNames = stepNames.filter((name) => name !== '추천/결과 정리')
 
 const stepLogMessages: Record<string, string> = {
   '분석 범위 확인':
@@ -89,7 +91,6 @@ export const useLogDetectStore = defineStore('logDetect', () => {
   const loadingRecommendations = ref(false)
   const loadingKnowledgeCards = ref(false)
   const loadingExceptions = ref(false)
-  const loadingLangSmithRuns = ref(false)
   const loadingDuplicatePatternCandidates = ref(false)
   const loadingPatternOpsSkills = ref(false)
   const error = ref<string | null>(null)
@@ -99,15 +100,9 @@ export const useLogDetectStore = defineStore('logDetect', () => {
   const knowledgeCards = ref<KnowledgeCardItem[]>([])
   const exceptionRegistry = ref<ExceptionRegistryItem[]>([])
   const duplicatePatternCandidates = ref<DuplicatePatternCandidate[]>([])
-  const langSmithRuns = ref<LangSmithRunItem[]>([])
   const patternOpsSkills = ref<PatternOpsSkill[]>([])
   const patternOpsSkillEdges = ref<PatternOpsSkillEdge[]>([])
-  const langSmithStatus = ref<{
-    enabled: boolean
-    project: string
-    source: string
-    error?: string | null
-  }>({ enabled: false, project: 'log-detect-agents', source: 'local' })
+  const skillActivityStream = ref<SkillActivityStreamItem[]>([])
   const toasts = ref<
     Array<{ id: number; level: 'info' | 'error'; message: string }>
   >([])
@@ -117,6 +112,7 @@ export const useLogDetectStore = defineStore('logDetect', () => {
   let pollTimer: ReturnType<typeof setInterval> | null = null
   let stageTimer: ReturnType<typeof setInterval> | null = null
   let localStageIndex = 0
+  let localProgressStepNames = analysisStepNames
   let stream: EventSource | null = null
 
   const scenarioSummary = computed(
@@ -229,6 +225,10 @@ export const useLogDetectStore = defineStore('logDetect', () => {
     )
   })
 
+  const currentSkillActivity = computed<SkillActivityStreamItem | null>(() => {
+    return skillActivityStream.value[0] ?? null
+  })
+
   const skillOpsOverview = computed(() => {
     const executions = patternOpsSkillExecutions.value
     const selected = new Set(executions.map((item) => item.skill_id))
@@ -251,6 +251,70 @@ export const useLogDetectStore = defineStore('logDetect', () => {
     setTimeout(() => {
       toasts.value = toasts.value.filter((item) => item.id !== id)
     }, 3500)
+  }
+
+  function appendSkillActivity(
+    activity: Omit<SkillActivityStreamItem, 'id' | 'at'>
+  ) {
+    const id = `${Date.now()}-${Math.floor(Math.random() * 100000)}`
+    const item = {
+      ...activity,
+      id,
+      at: new Date().toISOString()
+    }
+    const [latest] = skillActivityStream.value
+    if (
+      latest &&
+      latest.skill === item.skill &&
+      latest.status === item.status &&
+      latest.action === item.action &&
+      latest.source === item.source
+    ) {
+      skillActivityStream.value = [
+        { ...latest, at: item.at, detail: item.detail || latest.detail },
+        ...skillActivityStream.value.slice(1)
+      ]
+      return
+    }
+    skillActivityStream.value = [item, ...skillActivityStream.value].slice(0, 80)
+  }
+
+  function resetSkillActivityStream(serviceName: string, action: string) {
+    skillActivityStream.value = []
+    appendSkillActivity({
+      skill: '분석 요청 접수',
+      agent: 'Dashboard',
+      status: 'running',
+      action,
+      detail: `${serviceName} 서비스 분석 요청을 백엔드로 전달했습니다.`,
+      source: 'user-action'
+    })
+  }
+
+  function skillNameById(result: SharedState, skillId: string): string {
+    const plans = [
+      ...(result.evidence.pattern_ops_skill_plan?.selected_skills ?? []),
+      ...(result.final.evidence_bundle?.pattern_ops_skill_plan?.selected_skills ?? [])
+    ]
+    const matched = plans.find((item) => item.skill_id === skillId)
+    return matched?.name || skillId
+  }
+
+  function appendPatternOpsExecutionActivities(result: SharedState) {
+    const executions =
+      result.evidence.pattern_ops_skill_executions ??
+      result.final.evidence_bundle?.pattern_ops_skill_executions ??
+      []
+    executions.slice(-12).forEach((execution) => {
+      appendSkillActivity({
+        skill: skillNameById(result, execution.skill_id),
+        agent: execution.agent_name,
+        status: execution.status,
+        action: `${execution.scope} skill ${execution.status}`,
+        detail: execution.reason || execution.skill_id,
+        source: 'backend-result'
+      })
+    })
   }
 
   function markTimelineFromState(result: SharedState) {
@@ -276,11 +340,11 @@ export const useLogDetectStore = defineStore('logDetect', () => {
 
     agentTimeline.value = stepNames.map((name) => {
       if (failedSkills.has(name)) return { name, status: 'failed' }
-      if (completedWithoutFailure) return { name, status: 'completed' }
-      if (runSkills.has(name)) return { name, status: 'completed' }
       if (skipped.has(name) || skippedSkills.has(name)) {
         return { name, status: 'skipped' }
       }
+      if (completedWithoutFailure) return { name, status: 'completed' }
+      if (runSkills.has(name)) return { name, status: 'completed' }
       return { name, status: 'pending' }
     })
 
@@ -303,12 +367,30 @@ export const useLogDetectStore = defineStore('logDetect', () => {
     }
   }
 
-  function setCurrentStage(stage: string) {
+  function setCurrentStage(
+    stage: string,
+    source: SkillActivityStreamItem['source'] = 'local-stage'
+  ) {
     const normalizedStage = agentStageToSkillStage[stage] ?? stage
     currentStage.value = normalizedStage
     currentExecutionLog.value =
       stepLogMessages[normalizedStage] ||
       `${normalizedStage}: 현재 단계를 실행하고 있습니다.`
+
+    appendSkillActivity({
+      skill: normalizedStage,
+      agent: stage === normalizedStage ? undefined : stage,
+      status: normalizedStage === 'Completed' ? 'completed' : 'running',
+      action:
+        normalizedStage === 'Completed'
+          ? '분석 결과 정리 완료'
+          : currentExecutionLog.value,
+      detail:
+        normalizedStage === 'Completed'
+          ? '백엔드 분석 flow가 완료되었습니다.'
+          : `Backend stage: ${stage}`,
+      source
+    })
 
     const activeIndex = stepNames.indexOf(normalizedStage)
     if (activeIndex < 0) return
@@ -331,15 +413,18 @@ export const useLogDetectStore = defineStore('logDetect', () => {
     }
 
     localStageIndex = Math.max(
-      stepNames.indexOf(
+      localProgressStepNames.indexOf(
         agentStageToSkillStage[currentStage.value] ?? currentStage.value
       ),
       0
     )
     stageTimer = setInterval(() => {
       if (!loading.value) return
-      localStageIndex = Math.min(localStageIndex + 1, stepNames.length - 1)
-      setCurrentStage(stepNames[localStageIndex])
+      localStageIndex = Math.min(
+        localStageIndex + 1,
+        localProgressStepNames.length - 1
+      )
+      setCurrentStage(localProgressStepNames[localStageIndex])
     }, 3000)
   }
 
@@ -359,24 +444,6 @@ export const useLogDetectStore = defineStore('logDetect', () => {
       addToast('error', '서비스 목록을 불러오지 못했습니다.')
     } finally {
       loadingServices.value = false
-    }
-  }
-
-  async function fetchLangSmithRuns() {
-    loadingLangSmithRuns.value = true
-    try {
-      const { data } = await agentApi.langSmithRuns({ limit: 30 })
-      langSmithRuns.value = data.runs
-      langSmithStatus.value = {
-        enabled: data.enabled,
-        project: data.project,
-        source: data.source,
-        error: data.error
-      }
-    } catch {
-      addToast('error', 'LangSmith 로그를 불러오지 못했습니다.')
-    } finally {
-      loadingLangSmithRuns.value = false
     }
   }
 
@@ -539,7 +606,9 @@ export const useLogDetectStore = defineStore('logDetect', () => {
   }
 
   function startPollingHealth() {
-    closeStreamAndPolling()
+    if (pollTimer) {
+      clearInterval(pollTimer)
+    }
     pollTimer = setInterval(async () => {
       try {
         await fetchHealth()
@@ -554,26 +623,51 @@ export const useLogDetectStore = defineStore('logDetect', () => {
     loading.value = true
     executionStatus.value = 'running'
     error.value = null
+    localProgressStepNames = analysisStepNames
+    resetSkillActivityStream(
+      serviceName,
+      `분석 시작: ${analysisDate || '오늘'}`
+    )
     setCurrentStage('Starting execution')
     agentTimeline.value = stepNames.map((name, index) => ({
       name,
-      status: index === 0 ? 'running' : 'pending'
+      status:
+        name === '추천/결과 정리'
+          ? 'skipped'
+          : index === 0
+            ? 'running'
+            : 'pending'
     }))
     setCurrentStage(stepNames[0])
     startLocalStageProgress()
 
     stream = connectExecutionStream({
       onStage: (stage) => {
-        setCurrentStage(stage)
+        setCurrentStage(stage, 'sse')
       },
       onPartial: () => {
+        appendSkillActivity({
+          skill: currentStage.value,
+          status: 'running',
+          action: '부분 결과 수신',
+          detail: '백엔드가 중간 분석 상태를 전송했습니다.',
+          source: 'sse'
+        })
         addToast('info', 'Received partial agent output')
       },
       onComplete: (result) => {
         state.value = result
         markTimelineFromState(result)
+        appendPatternOpsExecutionActivities(result)
       },
       onError: (message) => {
+        appendSkillActivity({
+          skill: currentStage.value,
+          status: 'failed',
+          action: 'SSE stream 연결 실패',
+          detail: message,
+          source: 'sse'
+        })
         addToast('error', message)
         stream = null
         startLocalStageProgress()
@@ -594,18 +688,25 @@ export const useLogDetectStore = defineStore('logDetect', () => {
       duplicatePatternCandidates.value =
         data.result.evidence.duplicate_pattern_candidates ?? []
       markTimelineFromState(data.result)
+      appendPatternOpsExecutionActivities(data.result)
       executionStatus.value =
         data.result.decisions.failures.length > 0 ? 'failed' : 'completed'
       lastExecutionAt.value = new Date().toISOString()
       await fetchHealth()
       await fetchRecommendations(serviceName)
       await fetchDuplicatePatternCandidates()
-      await fetchLangSmithRuns()
       await fetchPatternOpsSkills()
     } catch (caught) {
       executionStatus.value = 'failed'
       error.value = (caught as Error).message
       currentExecutionLog.value = `분석 실패: ${error.value}`
+      appendSkillActivity({
+        skill: currentStage.value,
+        status: 'failed',
+        action: '분석 실패',
+        detail: error.value ?? undefined,
+        source: 'backend-result'
+      })
       addToast('error', `Analysis failed: ${error.value}`)
     } finally {
       loading.value = false
@@ -620,6 +721,11 @@ export const useLogDetectStore = defineStore('logDetect', () => {
   ) {
     executionStatus.value = 'running'
     error.value = null
+    localProgressStepNames = ['임베딩/유사 FP 검색', '추천/결과 정리']
+    resetSkillActivityStream(
+      serviceName,
+      `선택 fingerprint 추천 생성: ${fingerprint}`
+    )
     setCurrentStage('임베딩/유사 FP 검색')
     agentTimeline.value = stepNames.map((name) => ({
       name,
@@ -649,18 +755,25 @@ export const useLogDetectStore = defineStore('logDetect', () => {
         state.value = data.result
       }
       markTimelineFromState(data.result)
+      appendPatternOpsExecutionActivities(data.result)
       executionStatus.value =
         data.result.decisions.failures.length > 0 ? 'failed' : 'completed'
       setCurrentStage('Completed')
       lastExecutionAt.value = new Date().toISOString()
       await fetchRecommendations(serviceName)
-      await fetchLangSmithRuns()
       await fetchPatternOpsSkills()
       addToast('info', `Updated recommendations for ${fingerprint}`)
     } catch (caught) {
       executionStatus.value = 'failed'
       error.value = (caught as Error).message
       currentExecutionLog.value = `Recommendation update 실패: ${error.value}`
+      appendSkillActivity({
+        skill: currentStage.value,
+        status: 'failed',
+        action: 'Recommendation update 실패',
+        detail: error.value ?? undefined,
+        source: 'backend-result'
+      })
       addToast('error', `Recommendation update failed: ${error.value}`)
     }
   }
@@ -814,7 +927,6 @@ export const useLogDetectStore = defineStore('logDetect', () => {
     loadingRecommendations,
     loadingKnowledgeCards,
     loadingExceptions,
-    loadingLangSmithRuns,
     loadingDuplicatePatternCandidates,
     loadingPatternOpsSkills,
     error,
@@ -823,8 +935,8 @@ export const useLogDetectStore = defineStore('logDetect', () => {
     knowledgeCards,
     exceptionRegistry,
     duplicatePatternCandidates,
-    langSmithRuns,
-    langSmithStatus,
+    skillActivityStream,
+    currentSkillActivity,
     patternOpsSkills,
     patternOpsSkillEdges,
     serviceOptions,
@@ -841,7 +953,6 @@ export const useLogDetectStore = defineStore('logDetect', () => {
     currentRecommendationConfidence,
     fetchHealth,
     fetchServices,
-    fetchLangSmithRuns,
     fetchPatternOpsSkills,
     fetchRecommendations,
     deleteSavedRecommendation,

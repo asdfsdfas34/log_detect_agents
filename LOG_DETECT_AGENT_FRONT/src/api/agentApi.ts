@@ -16,7 +16,6 @@ import type {
   KnownPatternSaveRequest,
   KnownPatternSaveResponse,
   KnowledgeCardListResponse,
-  LangSmithRunsResponse,
   PatternRuleProposal,
   PatternRuleSaveRequest,
   PatternRuleSaveResponse,
@@ -51,9 +50,6 @@ export const agentApi = {
   },
   services() {
     return apiClient.get<ServiceListResponse>('/services')
-  },
-  langSmithRuns(params?: { limit?: number }) {
-    return apiClient.get<LangSmithRunsResponse>('/langsmith/runs', { params })
   },
   recommendations(params?: { service_name?: string; limit?: number }) {
     return apiClient.get<RecommendationHistoryResponse>('/recommendations', {
