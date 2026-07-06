@@ -19,12 +19,20 @@ from app.state import SharedState
 from app.suppression_config import get_suppression_config
 
 _TOKEN_PATTERN = re.compile(r"[a-z0-9_./:-]+")
+_DRAIN_DYNAMIC_TOKEN = "<*>"
+_DRAIN_MIN_SIMILARITY = 0.5
 _NORMALIZATION_RULES = [
-    (re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", re.I), "<uuid>"),
+    (
+        re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", re.I),
+        "<uuid>",
+    ),
     (re.compile(r"\b\d{4}-\d{2}-\d{2}t\d{2}:\d{2}:\d{2}(?:\.\d+)?z?\b", re.I), "<timestamp>"),
     (re.compile(r"\b\d+(?:\.\d+)?\s?(?:ms|s|sec|seconds|m|minutes)\b", re.I), "<duration>"),
     (re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b"), "<ip>"),
-    (re.compile(r"\b(?:request|trace|span|correlation)[_-]?id[=:][a-z0-9-]+\b", re.I), "<request_id>"),
+    (
+        re.compile(r"\b(?:request|trace|span|correlation)[_-]?id[=:][a-z0-9-]+\b", re.I),
+        "<request_id>",
+    ),
     (re.compile(r"\buser[_-]?id[=:][a-z0-9-]+\b", re.I), "<user_id>"),
     (re.compile(r"(?<=/)\d+(?=/|\b)"), "<id>"),
     (re.compile(r"\b\d+\b"), "<number>"),
@@ -57,9 +65,7 @@ class LogAnalysisAgent:
             sub_category = row["sub_category"]
             fingerprint = row["fingerprint"]
             patterns = [
-                value
-                for value in [sub_category, row["cause"], row["recommendation"]]
-                if value
+                value for value in [sub_category, row["cause"], row["recommendation"]] if value
             ]
             entries.append(
                 {
@@ -86,11 +92,7 @@ class LogAnalysisAgent:
             artifact = contract.artifact
             precondition = contract.precondition
             fingerprint = str(artifact.get("fingerprint") or "")
-            keywords = [
-                str(item)
-                for item in precondition.get("keywords", [])
-                if str(item).strip()
-            ]
+            keywords = [str(item) for item in precondition.get("keywords", []) if str(item).strip()]
             template = str(precondition.get("message_template") or "")
             patterns = [value for value in [template, *keywords] if value]
             if not fingerprint and not patterns:
@@ -103,8 +105,7 @@ class LogAnalysisAgent:
                     "classification": contract.category or "patternops",
                     "suppression": False,
                     "level_scope": [
-                        str(item).upper()
-                        for item in precondition.get("level_scope", [])
+                        str(item).upper() for item in precondition.get("level_scope", [])
                     ],
                     "stack_tokens": precondition.get("stack_tokens", []),
                     "fingerprint": fingerprint,
@@ -149,14 +150,15 @@ class LogAnalysisAgent:
         enriched = []
         for log in logs:
             message_template = str(
-                log.get("message_template")
-                or self._normalize_message(str(log.get("message", "")))
+                log.get("message_template") or self._normalize_message(str(log.get("message", "")))
             )
             enriched.append(
                 {
                     **log,
                     "message_template": message_template,
-                    "fingerprint": str(log.get("fingerprint") or self._fingerprint(message_template)),
+                    "fingerprint": str(
+                        log.get("fingerprint") or self._fingerprint(message_template)
+                    ),
                 }
             )
         state["evidence"]["normalized_logs"] = enriched
@@ -172,10 +174,7 @@ class LogAnalysisAgent:
         cluster_counter: Counter[str] = Counter()
 
         normalized_frequencies = Counter(
-            str(
-                log.get("message_template")
-                or self._normalize_message(str(log.get("message", "")))
-            )
+            str(log.get("message_template") or self._normalize_message(str(log.get("message", ""))))
             for log in logs
         )
         known_pattern_registry = self._known_pattern_registry()
@@ -239,7 +238,11 @@ class LogAnalysisAgent:
                 )
 
                 if match["match_result"] == "known_suppressed":
-                    enriched_log = {**log, "fingerprint": fingerprint, "message_template": normalized_message}
+                    enriched_log = {
+                        **log,
+                        "fingerprint": fingerprint,
+                        "message_template": normalized_message,
+                    }
                     suppressed_logs.append(enriched_log)
                     cluster_counter[f"suppressed:{match['classification']}"] += 1
                     continue
@@ -259,19 +262,25 @@ class LogAnalysisAgent:
                         "fingerprint": fingerprint,
                         "message_template": normalized_message,
                         "known_pattern_id": match.get("pattern_id") if match else None,
-                        "pattern_status": match["match_result"] if match else "new_pattern_candidate",
+                        "pattern_status": match["match_result"]
+                        if match
+                        else "new_pattern_candidate",
                     }
                 )
                 cluster_counter[f"error:{severity}"] += 1
                 if not match:
                     new_pattern_candidates.append(
-                        self._new_pattern_candidate(log, normalized_message, fingerprint, "error_signal")
+                        self._new_pattern_candidate(
+                            log, normalized_message, fingerprint, "error_signal"
+                        )
                     )
             elif is_warning:
                 cluster_counter["warn:retry"] += 1
                 if not match and normalized_frequencies[normalized_message] >= 2:
                     new_pattern_candidates.append(
-                        self._new_pattern_candidate(log, normalized_message, fingerprint, "repeated_warning")
+                        self._new_pattern_candidate(
+                            log, normalized_message, fingerprint, "repeated_warning"
+                        )
                     )
             else:
                 cluster_counter["info:normal"] += 1
@@ -330,10 +339,41 @@ class LogAnalysisAgent:
 
     @classmethod
     def _normalize_message(cls, message: str) -> str:
+        return cls._drain_template(cls._regex_normalize_message(message))
+
+    @classmethod
+    def _regex_normalize_message(cls, message: str) -> str:
         normalized = message.strip().lower()
         for pattern, replacement in _NORMALIZATION_RULES:
             normalized = pattern.sub(replacement, normalized)
         return re.sub(r"\s+", " ", normalized).strip()
+
+    @classmethod
+    def _drain_template(cls, normalized_message: str) -> str:
+        """Apply lightweight Drain-style token abstraction to a normalized log line.
+
+        The runtime path handles one log at a time, so this implements Drain's
+        core well-known heuristic locally: preserve structural tokens and
+        abstract dynamic key/value payload tokens that are not already covered by
+        regex normalization. This keeps fingerprints stable without introducing
+        a stateful parser dependency in request handling.
+        """
+
+        tokens = normalized_message.split()
+        templated = [cls._drain_token(token) for token in tokens]
+        return " ".join(templated)
+
+    @staticmethod
+    def _drain_token(token: str) -> str:
+        if token.startswith("<") and token.endswith(">"):
+            return token
+        if "=" in token:
+            key, value = token.split("=", 1)
+            if value and any(char.isdigit() for char in value):
+                return f"{key}={_DRAIN_DYNAMIC_TOKEN}"
+        if any(char.isdigit() for char in token) and any(char.isalpha() for char in token):
+            return _DRAIN_DYNAMIC_TOKEN
+        return token
 
     @staticmethod
     def _fingerprint(normalized_message: str) -> str:
@@ -500,16 +540,23 @@ class LogAnalysisAgent:
         suppressed_logs: list[dict],
         clusters: list[dict],
     ) -> str:
-        cluster_summary = ", ".join(
-            f"{item.get('cluster')}={item.get('count')}" for item in clusters
-        ) or "none"
-        known_summary = ", ".join(
-            f"{item.get('pattern_id')}:{item.get('match_result')}:{item.get('confidence')}"
-            for item in known_pattern_matches[:5]
-        ) or "none"
-        new_summary = ", ".join(
-            f"{item.get('fingerprint')}:{item.get('reason')}" for item in new_pattern_candidates[:5]
-        ) or "none"
+        cluster_summary = (
+            ", ".join(f"{item.get('cluster')}={item.get('count')}" for item in clusters) or "none"
+        )
+        known_summary = (
+            ", ".join(
+                f"{item.get('pattern_id')}:{item.get('match_result')}:{item.get('confidence')}"
+                for item in known_pattern_matches[:5]
+            )
+            or "none"
+        )
+        new_summary = (
+            ", ".join(
+                f"{item.get('fingerprint')}:{item.get('reason')}"
+                for item in new_pattern_candidates[:5]
+            )
+            or "none"
+        )
         return (
             "Deterministic log analysis summary\n"
             f"- anomalies={len(anomalies)}\n"

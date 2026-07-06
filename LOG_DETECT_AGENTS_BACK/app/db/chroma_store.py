@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
+import re
+from collections import Counter
 from typing import Any
 
 from openai import AzureOpenAI, OpenAI
@@ -23,8 +26,104 @@ _DEFAULT_EMBEDDING_MODEL = "text-embedding-3-large"
 _DEFAULT_PATTERN_DIMENSIONS = 1024
 _DEFAULT_CASE_CARD_DIMENSIONS = 1536
 _DEFAULT_EMBEDDING_BATCH_SIZE = 100
+_BM25_K1 = 1.5
+_BM25_B = 0.75
+_TOKEN_RE = re.compile(r"[a-z0-9_./:-]+", re.I)
 
 logger = logging.getLogger(__name__)
+
+
+def _tokens(text: str) -> list[str]:
+    return [token.lower() for token in _TOKEN_RE.findall(text)]
+
+
+def _collection_snapshot(collection_name: str) -> list[dict[str, Any]]:
+    client = _client()
+    if client is None:
+        return []
+    try:
+        collection = client.get_or_create_collection(name=collection_name)
+        try:
+            out = collection.get(include=["documents", "metadatas", "embeddings"])
+        except TypeError:
+            out = collection.get()
+    except Exception:
+        return []
+    ids = out.get("ids", []) or []
+    docs = out.get("documents", []) or []
+    metadatas = out.get("metadatas", []) or []
+    embeddings = out.get("embeddings", []) or []
+    rows: list[dict[str, Any]] = []
+    for index, doc_id in enumerate(ids):
+        rows.append(
+            {
+                "id": str(doc_id),
+                "document": str(docs[index]) if index < len(docs) else "",
+                "metadata": metadatas[index] if index < len(metadatas) else {},
+                "embedding": embeddings[index] if index < len(embeddings) else None,
+            }
+        )
+    return rows
+
+
+def _bm25_search(collection_name: str, query: str, n_results: int) -> list[dict[str, Any]]:
+    rows = _collection_snapshot(collection_name)
+    if not rows:
+        return []
+    query_terms = _tokens(query)
+    if not query_terms:
+        return []
+    doc_tokens = [_tokens(str(row.get("document", ""))) for row in rows]
+    avgdl = sum(len(tokens) for tokens in doc_tokens) / max(len(doc_tokens), 1)
+    document_frequency: Counter[str] = Counter()
+    for tokens in doc_tokens:
+        document_frequency.update(set(tokens))
+    scored: list[dict[str, Any]] = []
+    for row, tokens in zip(rows, doc_tokens, strict=False):
+        if not tokens:
+            continue
+        term_frequency = Counter(tokens)
+        score = 0.0
+        for term in query_terms:
+            if term not in term_frequency:
+                continue
+            idf = math.log(
+                1 + (len(rows) - document_frequency[term] + 0.5) / (document_frequency[term] + 0.5)
+            )
+            numerator = term_frequency[term] * (_BM25_K1 + 1)
+            denominator = term_frequency[term] + _BM25_K1 * (
+                1 - _BM25_B + _BM25_B * len(tokens) / max(avgdl, 1e-9)
+            )
+            score += idf * numerator / denominator
+        if score <= 0:
+            continue
+        scored.append({**row, "bm25_score": score, "similarity": min(1.0, score / (score + 1.0))})
+    return sorted(scored, key=lambda item: float(item["bm25_score"]), reverse=True)[:n_results]
+
+
+def _reciprocal_rank_fusion(
+    groups: list[list[dict[str, Any]]], n_results: int, *, k: int = 60
+) -> list[dict[str, Any]]:
+    fused: dict[str, dict[str, Any]] = {}
+    for source_index, group in enumerate(groups):
+        source = "vector" if source_index == 0 else "bm25"
+        for rank, item in enumerate(group, start=1):
+            key = str(item.get("id") or item.get("document"))
+            current = fused.setdefault(key, {**item, "rrf_score": 0.0, "matched_by": []})
+            current["rrf_score"] = float(current.get("rrf_score", 0.0)) + 1 / (k + rank)
+            matched_by = list(current.get("matched_by", []))
+            if source not in matched_by:
+                matched_by.append(source)
+            current["matched_by"] = matched_by
+            if item.get("similarity") is not None:
+                current["similarity"] = max(
+                    float(current.get("similarity") or 0), float(item["similarity"])
+                )
+            if item.get("bm25_score") is not None:
+                current["bm25_score"] = item["bm25_score"]
+    return sorted(fused.values(), key=lambda item: float(item.get("rrf_score", 0.0)), reverse=True)[
+        :n_results
+    ]
 
 
 def _backend_logger() -> logging.Logger:
@@ -89,10 +188,13 @@ def _azure_embedding_endpoint() -> str:
 
 
 def _azure_embedding_api_version() -> str:
-    return os.getenv(
-        "AZURE_OPENAI_EMBEDDING_API_VERSION",
-        settings.azure_openai_embedding_api_version,
-    ).strip() or os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-01").strip()
+    return (
+        os.getenv(
+            "AZURE_OPENAI_EMBEDDING_API_VERSION",
+            settings.azure_openai_embedding_api_version,
+        ).strip()
+        or os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-01").strip()
+    )
 
 
 def _positive_int_env(name: str, default: int) -> int:
@@ -108,9 +210,7 @@ def _embedding_batch_size() -> int:
         100,
         max(
             1,
-            _positive_int_env(
-                "OPENAI_EMBEDDING_BATCH_SIZE", _DEFAULT_EMBEDDING_BATCH_SIZE
-            ),
+            _positive_int_env("OPENAI_EMBEDDING_BATCH_SIZE", _DEFAULT_EMBEDDING_BATCH_SIZE),
         ),
     )
 
@@ -130,8 +230,7 @@ def _case_card_dimensions() -> int:
         "OPENAI_CASE_CARD_EMBEDDING_DIMENSIONS",
         _positive_int_env(
             "OPENAI_EMBEDDING_DIMENSIONS",
-            settings.openai_case_card_embedding_dimensions
-            or _DEFAULT_CASE_CARD_DIMENSIONS,
+            settings.openai_case_card_embedding_dimensions or _DEFAULT_CASE_CARD_DIMENSIONS,
         ),
     )
 
@@ -149,9 +248,7 @@ def _embedding_client() -> OpenAI | AzureOpenAI | None:
             azure_endpoint=azure_endpoint,
             api_version=_azure_embedding_api_version(),
         )
-    base_url = (
-        os.getenv("OPENAI_EMBEDDING_BASE_URL") or os.getenv("OPENAI_BASE_URL") or None
-    )
+    base_url = os.getenv("OPENAI_EMBEDDING_BASE_URL") or os.getenv("OPENAI_BASE_URL") or None
     return OpenAI(api_key=api_key, base_url=base_url)
 
 
@@ -170,9 +267,7 @@ def _embed_texts(texts: list[str], *, dimensions: int) -> list[list[float]] | No
     return [list(item.embedding) for item in response.data]
 
 
-def _embed_texts_for_query(
-    texts: list[str], *, dimensions: int
-) -> list[list[float]] | None:
+def _embed_texts_for_query(texts: list[str], *, dimensions: int) -> list[list[float]] | None:
     try:
         return _embed_texts(texts, dimensions=dimensions)
     except Exception as exc:  # noqa: BLE001
@@ -386,16 +481,12 @@ def _query_result_groups(out: dict[str, Any] | None) -> list[list[dict[str, Any]
                 else None
             )
             distance = float(raw_distance) if raw_distance is not None else None
-            similarity = (
-                None if distance is None else max(0.0, min(1.0, 1.0 - distance))
-            )
+            similarity = None if distance is None else max(0.0, min(1.0, 1.0 - distance))
             results.append(
                 {
                     "id": query_ids[index] if index < len(query_ids) else "",
                     "document": str(document),
-                    "metadata": (
-                        query_metadatas[index] if index < len(query_metadatas) else {}
-                    ),
+                    "metadata": (query_metadatas[index] if index < len(query_metadatas) else {}),
                     "distance": distance,
                     "similarity": similarity,
                 }
@@ -407,18 +498,14 @@ def _query_result_groups(out: dict[str, Any] | None) -> list[list[dict[str, Any]
 def _save_analysis_document_v2(
     *, doc_id: str, text: str, metadata: dict[str, Any] | None = None
 ) -> bool:
-    result = save_analysis_documents(
-        [{"doc_id": doc_id, "text": text, "metadata": metadata or {}}]
-    )
+    result = save_analysis_documents([{"doc_id": doc_id, "text": text, "metadata": metadata or {}}])
     return bool(result["v2_saved"] or result["v2_skipped"])
 
 
 def save_analysis_document(
     *, doc_id: str, text: str, metadata: dict[str, Any] | None = None
 ) -> bool:
-    result = save_analysis_documents(
-        [{"doc_id": doc_id, "text": text, "metadata": metadata or {}}]
-    )
+    result = save_analysis_documents([{"doc_id": doc_id, "text": text, "metadata": metadata or {}}])
     return bool(result["v1_saved"] or result["v2_saved"] or result["v2_skipped"])
 
 
@@ -488,9 +575,7 @@ def _save_analysis_documents_v1(documents: list[dict[str, Any]]) -> int:
 
 def _analysis_document_v2_item(document: dict[str, Any]) -> dict[str, Any]:
     doc_id = str(document["doc_id"])
-    collection_name, document_type, schema_version, dimensions = _analysis_v2_target(
-        doc_id
-    )
+    collection_name, document_type, schema_version, dimensions = _analysis_v2_target(doc_id)
     metadata = _with_embedding_metadata(
         dict(document.get("metadata") or {}),
         document_type=document_type,
@@ -525,12 +610,8 @@ def _pattern_template_text(text: str, metadata: dict[str, Any] | None) -> str:
     )
 
 
-def save_pattern_cluster(
-    *, doc_id: str, text: str, metadata: dict[str, Any] | None = None
-) -> bool:
-    result = save_pattern_clusters(
-        [{"doc_id": doc_id, "text": text, "metadata": metadata or {}}]
-    )
+def save_pattern_cluster(*, doc_id: str, text: str, metadata: dict[str, Any] | None = None) -> bool:
+    result = save_pattern_clusters([{"doc_id": doc_id, "text": text, "metadata": metadata or {}}])
     return bool(result["v1_saved"] or result["v2_saved"] or result["v2_skipped"])
 
 
@@ -622,9 +703,7 @@ def _save_pattern_clusters_v1(patterns: list[dict[str, Any]]) -> int:
     )
 
 
-def _pattern_cluster_v2_item(
-    pattern: dict[str, Any], dimensions: int
-) -> dict[str, Any]:
+def _pattern_cluster_v2_item(pattern: dict[str, Any], dimensions: int) -> dict[str, Any]:
     metadata = dict(pattern.get("metadata") or {})
     text = str(pattern["text"])
     return {
@@ -645,9 +724,7 @@ def _save_pattern_cluster_v2_batch(
     if not items:
         return 0
     try:
-        embeddings = _embed_texts(
-            [str(item["text"]) for item in items], dimensions=dimensions
-        )
+        embeddings = _embed_texts([str(item["text"]) for item in items], dimensions=dimensions)
         if embeddings is None:
             raise RuntimeError("embedding client is not configured")
         if len(embeddings) != len(items):
@@ -667,16 +744,12 @@ def _save_pattern_cluster_v2_batch(
     except Exception as exc:  # noqa: BLE001
         if len(items) == 1:
             failed.append({"id": str(items[0]["id"]), "error": str(exc)})
-            logger.warning(
-                "Failed to save pattern embedding for %s: %s", items[0]["id"], exc
-            )
+            logger.warning("Failed to save pattern embedding for %s: %s", items[0]["id"], exc)
             return 0
         midpoint = len(items) // 2
         return _save_pattern_cluster_v2_batch(
             items[:midpoint], dimensions=dimensions, failed=failed
-        ) + _save_pattern_cluster_v2_batch(
-            items[midpoint:], dimensions=dimensions, failed=failed
-        )
+        ) + _save_pattern_cluster_v2_batch(items[midpoint:], dimensions=dimensions, failed=failed)
 
 
 def _save_embedding_item_batch(
@@ -689,9 +762,7 @@ def _save_embedding_item_batch(
     if not items:
         return 0
     try:
-        embeddings = _embed_texts(
-            [str(item["text"]) for item in items], dimensions=dimensions
-        )
+        embeddings = _embed_texts([str(item["text"]) for item in items], dimensions=dimensions)
         if embeddings is None:
             raise RuntimeError("embedding client is not configured")
         if len(embeddings) != len(items):
@@ -732,9 +803,7 @@ def _save_embedding_item_batch(
         )
 
 
-def find_similar_pattern_clusters(
-    *, query: str, n_results: int = 5
-) -> list[dict[str, Any]]:
+def find_similar_pattern_clusters(*, query: str, n_results: int = 5) -> list[dict[str, Any]]:
     groups = find_similar_pattern_clusters_batch(queries=[query], n_results=n_results)
     return groups[0] if groups else []
 
@@ -746,12 +815,18 @@ def find_similar_pattern_clusters_batch(
         return []
     dimensions = _pattern_dimensions() if _embedding_api_key() else None
     collection_name = _PATTERN_COLLECTION_V2 if dimensions else _PATTERN_COLLECTION_V1
-    results = _query_pattern_collection_groups(
+    vector_results = _query_pattern_collection_groups(
         collection_name=collection_name,
         queries=queries,
         n_results=n_results,
         dimensions=dimensions,
     )
+    results = [
+        _reciprocal_rank_fusion(
+            [vector_group, _bm25_search(collection_name, query, n_results)], n_results
+        )
+        for query, vector_group in zip(queries, vector_results, strict=False)
+    ]
     if not dimensions:
         return results
     missing_indexes = [index for index, group in enumerate(results) if not group]
@@ -764,7 +839,13 @@ def find_similar_pattern_clusters_batch(
     )
     for fallback_index, result_index in enumerate(missing_indexes):
         if fallback_index < len(fallback_groups):
-            results[result_index] = fallback_groups[fallback_index]
+            results[result_index] = _reciprocal_rank_fusion(
+                [
+                    fallback_groups[fallback_index],
+                    _bm25_search(_PATTERN_COLLECTION_V1, queries[result_index], n_results),
+                ],
+                n_results,
+            )
     return results
 
 
@@ -781,9 +862,7 @@ def _query_pattern_collection_groups(
     for start in range(0, len(queries), batch_size):
         batch = queries[start : start + batch_size]
         batch_embeddings = (
-            query_embeddings[start : start + batch_size]
-            if query_embeddings is not None
-            else None
+            query_embeddings[start : start + batch_size] if query_embeddings is not None else None
         )
         batch_groups = _query_result_groups(
             _query_collection_batch(
@@ -811,9 +890,7 @@ def find_related_analyses(*, query: str, n_results: int = 3) -> list[str]:
         else [_ANALYSIS_COLLECTION_V1]
     )
     related: list[str] = []
-    query_embedding = (
-        _embed_texts_for_query([query], dimensions=dimensions) if dimensions else None
-    )
+    query_embedding = _embed_texts_for_query([query], dimensions=dimensions) if dimensions else None
     for collection_name in collection_names:
         matches = _query_results(
             _query_collection(
@@ -830,16 +907,12 @@ def find_related_analyses(*, query: str, n_results: int = 3) -> list[str]:
     if related or not dimensions:
         return related[:n_results]
     matches = _query_results(
-        _query_collection(
-            collection_name=_ANALYSIS_COLLECTION_V1, query=query, n_results=n_results
-        )
+        _query_collection(collection_name=_ANALYSIS_COLLECTION_V1, query=query, n_results=n_results)
     )
     return [str(match["document"]) for match in matches[:n_results]]
 
 
-def find_similar_analysis_documents(
-    *, query: str, n_results: int = 5
-) -> list[dict[str, Any]]:
+def find_similar_analysis_documents(*, query: str, n_results: int = 5) -> list[dict[str, Any]]:
     groups = find_similar_analysis_documents_batch(queries=[query], n_results=n_results)
     return groups[0] if groups else []
 
@@ -905,3 +978,54 @@ def find_similar_analysis_documents_batch(
         if fallback_index < len(fallback_groups):
             groups[result_index] = fallback_groups[fallback_index]
     return groups
+
+
+def cluster_pattern_templates_batch(*, min_cluster_size: int = 5) -> dict[str, Any]:
+    """Cluster pattern-template embeddings with HDBSCAN and persist cluster metadata.
+
+    Returns a status dictionary instead of raising so this can be called from
+    background jobs in environments where optional scientific dependencies are
+    not installed.
+    """
+
+    try:
+        import hdbscan  # type: ignore[import-not-found]
+    except Exception as exc:  # pragma: no cover - optional dependency path
+        return {"clustered": 0, "noise": 0, "status": "unavailable", "error": str(exc)}
+    rows = [row for row in _collection_snapshot(_PATTERN_COLLECTION_V2) if row.get("embedding")]
+    if len(rows) < min_cluster_size:
+        return {"clustered": 0, "noise": 0, "status": "insufficient_data"}
+    embeddings = [list(row["embedding"]) for row in rows]
+    clusterer = hdbscan.HDBSCAN(min_cluster_size=min_cluster_size, metric="euclidean")
+    labels = clusterer.fit_predict(embeddings)
+    probabilities = getattr(clusterer, "probabilities_", [0.0] * len(rows))
+    outlier_scores = getattr(clusterer, "outlier_scores_", [0.0] * len(rows))
+    client = _client()
+    if client is None:
+        return {"clustered": 0, "noise": 0, "status": "no_client"}
+    collection = client.get_or_create_collection(name=_PATTERN_COLLECTION_V2)
+    ids: list[str] = []
+    documents: list[str] = []
+    metadatas: list[dict[str, Any]] = []
+    embeddings_to_save: list[list[float]] = []
+    for row, label, probability, outlier_score, embedding in zip(
+        rows, labels, probabilities, outlier_scores, embeddings, strict=False
+    ):
+        metadata = dict(row.get("metadata") or {})
+        metadata.update(
+            {
+                "cluster_id": f"hdbscan:{int(label)}" if int(label) >= 0 else "hdbscan:noise",
+                "cluster_probability": float(probability),
+                "outlier_score": float(outlier_score),
+                "cluster_algorithm": "hdbscan",
+            }
+        )
+        ids.append(str(row["id"]))
+        documents.append(str(row.get("document", "")))
+        metadatas.append(metadata)
+        embeddings_to_save.append(embedding)
+    collection.upsert(
+        ids=ids, documents=documents, metadatas=metadatas, embeddings=embeddings_to_save
+    )
+    noise = sum(1 for label in labels if int(label) < 0)
+    return {"clustered": len(rows) - noise, "noise": noise, "status": "ok"}

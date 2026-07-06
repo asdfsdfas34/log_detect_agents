@@ -14,14 +14,37 @@ class FakeCollection:
         self.upserts: list[dict[str, Any]] = []
         self.deletes: list[dict[str, Any]] = []
         self.existing_ids: set[str] = set()
+        self.documents_by_id: dict[str, str] = {}
+        self.metadatas_by_id: dict[str, dict[str, Any]] = {}
+        self.embeddings_by_id: dict[str, list[float]] = {}
 
     def upsert(self, **kwargs: Any) -> None:
         self.upserts.append(kwargs)
-        self.existing_ids.update(str(item) for item in kwargs.get("ids", []))
+        ids = [str(item) for item in kwargs.get("ids", [])]
+        self.existing_ids.update(ids)
+        documents = kwargs.get("documents", [])
+        metadatas = kwargs.get("metadatas", [])
+        embeddings = kwargs.get("embeddings", [])
+        for index, doc_id in enumerate(ids):
+            if index < len(documents):
+                self.documents_by_id[doc_id] = str(documents[index])
+            if index < len(metadatas):
+                self.metadatas_by_id[doc_id] = dict(metadatas[index])
+            if index < len(embeddings):
+                self.embeddings_by_id[doc_id] = list(embeddings[index])
 
     def get(self, **kwargs: Any) -> dict[str, Any]:
-        ids = [str(item) for item in kwargs.get("ids", [])]
-        return {"ids": [item for item in ids if item in self.existing_ids]}
+        raw_ids = kwargs.get("ids")
+        ids = [str(item) for item in raw_ids] if raw_ids is not None else list(self.existing_ids)
+        existing = [item for item in ids if item in self.existing_ids]
+        return {
+            "ids": existing,
+            "documents": [self.documents_by_id.get(item, "") for item in existing],
+            "metadatas": [self.metadatas_by_id.get(item, {}) for item in existing],
+            "embeddings": [
+                self.embeddings_by_id[item] for item in existing if item in self.embeddings_by_id
+            ],
+        }
 
     def delete(self, **kwargs: Any) -> None:
         self.deletes.append(kwargs)
@@ -32,9 +55,7 @@ class FakeCollection:
         count = len(queries) if isinstance(queries, list) else 1
         return {
             "ids": [["checkout-api:FP-OLD"] for _ in range(count)],
-            "documents": [
-                ["service=checkout-api\nfingerprint=FP-OLD"] for _ in range(count)
-            ],
+            "documents": [["service=checkout-api\nfingerprint=FP-OLD"] for _ in range(count)],
             "metadatas": [[{"fingerprint": "FP-OLD"}] for _ in range(count)],
             "distances": [[0.18] for _ in range(count)],
         }
@@ -135,9 +156,7 @@ def test_pattern_cluster_chroma_uses_dedicated_collection(monkeypatch) -> None:
     matches = chroma_store.find_similar_pattern_clusters(query="normalized message")
 
     assert "pattern_clusters" in client.collections
-    assert client.collections["pattern_clusters"].upserts[0]["ids"] == [
-        "checkout-api:FP-NEW"
-    ]
+    assert client.collections["pattern_clusters"].upserts[0]["ids"] == ["checkout-api:FP-NEW"]
     assert matches[0]["id"] == "checkout-api:FP-OLD"
     assert matches[0]["similarity"] == 0.8200000000000001
 
@@ -145,9 +164,7 @@ def test_pattern_cluster_chroma_uses_dedicated_collection(monkeypatch) -> None:
 def test_delete_pattern_clusters_skips_missing_ids(monkeypatch) -> None:
     client = FakeClient()
     monkeypatch.setattr(chroma_store, "_client", lambda: client)
-    client.get_or_create_collection("pattern_clusters").existing_ids.add(
-        "checkout-api:FP-EXISTS"
-    )
+    client.get_or_create_collection("pattern_clusters").existing_ids.add("checkout-api:FP-EXISTS")
     client.get_or_create_collection("pattern_templates_v2").existing_ids.add(
         "pattern-template-v2:checkout-api:FP-EXISTS"
     )
@@ -157,9 +174,7 @@ def test_delete_pattern_clusters_skips_missing_ids(monkeypatch) -> None:
     )
 
     assert result == {"v1_deleted": 1, "v2_deleted": 1}
-    assert client.collections["pattern_clusters"].deletes == [
-        {"ids": ["checkout-api:FP-EXISTS"]}
-    ]
+    assert client.collections["pattern_clusters"].deletes == [{"ids": ["checkout-api:FP-EXISTS"]}]
     assert client.collections["pattern_templates_v2"].deletes == [
         {"ids": ["pattern-template-v2:checkout-api:FP-EXISTS"]}
     ]
@@ -250,9 +265,7 @@ def test_pattern_cluster_v2_batches_and_skips_existing_ids(monkeypatch) -> None:
     ]
 
 
-def test_pattern_cluster_v2_logs_embedding_batch_progress(
-    monkeypatch, caplog
-) -> None:
+def test_pattern_cluster_v2_logs_embedding_batch_progress(monkeypatch, caplog) -> None:
     client = FakeClient()
     embedding_client = FakeOpenAIClient()
     monkeypatch.setattr(chroma_store, "_client", lambda: client)
@@ -278,10 +291,7 @@ def test_pattern_cluster_v2_logs_embedding_batch_progress(
     assert len(embedding_client.embeddings.calls) == 3
     assert any("Pattern embedding 1/3 running" in message for message in messages)
     assert any("Pattern embedding 3/3 finished" in message for message in messages)
-    assert any(
-        "Pattern embedding finished (batches=3, saved=5" in message
-        for message in messages
-    )
+    assert any("Pattern embedding finished (batches=3, saved=5" in message for message in messages)
 
 
 def test_pattern_cluster_v2_splits_failed_batches_and_records_item_failure(
@@ -459,9 +469,7 @@ def test_analysis_documents_route_to_v2_collections(monkeypatch) -> None:
         == "case_card"
     )
     assert (
-        client.collections["known_patterns_v2"].upserts[0]["metadatas"][0][
-            "document_type"
-        ]
+        client.collections["known_patterns_v2"].upserts[0]["metadatas"][0]["document_type"]
         == "known_pattern"
     )
 
@@ -680,3 +688,53 @@ def test_save_new_pattern_clusters_skips_empty_save(monkeypatch) -> None:
 
     assert result is None
     assert called is False
+
+
+def test_pattern_cluster_search_fuses_bm25_with_vector_results(monkeypatch) -> None:
+    client = FakeClient()
+    monkeypatch.setattr(chroma_store, "_client", lambda: client)
+    collection = client.get_or_create_collection("pattern_clusters")
+    collection.upsert(
+        ids=["checkout-api:FP-BM25", "checkout-api:FP-OTHER"],
+        documents=[
+            "service=checkout-api\nfingerprint=FP-BM25\nnormalized_message=ORA-00060 deadlock detected",
+            "service=checkout-api\nfingerprint=FP-OTHER\nnormalized_message=payment timeout",
+        ],
+        metadatas=[{"fingerprint": "FP-BM25"}, {"fingerprint": "FP-OTHER"}],
+    )
+
+    matches = chroma_store.find_similar_pattern_clusters(
+        query="ORA-00060 deadlock detected", n_results=2
+    )
+
+    bm25_match = next(match for match in matches if match["id"] == "checkout-api:FP-BM25")
+    assert "bm25" in bm25_match["matched_by"]
+    assert bm25_match["bm25_score"] > 0
+
+
+def test_cluster_pattern_templates_batch_persists_hdbscan_metadata(monkeypatch) -> None:
+    client = FakeClient()
+    monkeypatch.setattr(chroma_store, "_client", lambda: client)
+    collection = client.get_or_create_collection("pattern_templates_v2")
+    collection.upsert(
+        ids=[f"pattern-template-v2:checkout-api:FP-{index}" for index in range(6)],
+        documents=[f"pattern {index}" for index in range(6)],
+        metadatas=[{"fingerprint": f"FP-{index}"} for index in range(6)],
+        embeddings=[
+            [0.0, 0.0],
+            [0.0, 0.1],
+            [0.1, 0.0],
+            [5.0, 5.0],
+            [5.1, 5.0],
+            [5.0, 5.1],
+        ],
+    )
+
+    result = chroma_store.cluster_pattern_templates_batch(min_cluster_size=2)
+
+    assert result["status"] in {"ok", "unavailable"}
+    if result["status"] == "ok":
+        metadata = client.collections["pattern_templates_v2"].upserts[-1]["metadatas"][0]
+        assert metadata["cluster_algorithm"] == "hdbscan"
+        assert metadata["cluster_id"].startswith("hdbscan:")
+        assert "outlier_score" in metadata

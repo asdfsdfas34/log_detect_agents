@@ -112,7 +112,10 @@ HDBSCAN_MAX_DISTANCE = 1.0 - HYBRID_DUPLICATE_SIMILARITY_THRESHOLD
 
 @lru_cache(maxsize=1)
 def _normalization_rules() -> tuple[tuple[str, str], ...]:
-    db_path = _resolve_db_path()
+    try:
+        db_path = _resolve_db_path()
+    except ValueError:
+        return ()
     if not Path(db_path).exists():
         return ()
     try:
