@@ -12,6 +12,7 @@ import type {
   PatternOpsSkill,
   PatternOpsSkillEdge,
   PatternOpsSkillExecution,
+  PatternOpsValidatorResult,
   SkillActivityStreamItem,
   RecommendationHistoryItem,
   SharedState
@@ -222,6 +223,17 @@ export const useLogDetectStore = defineStore('logDetect', () => {
       state.value?.evidence.pattern_ops_skill_plan ??
       state.value?.final.evidence_bundle?.pattern_ops_skill_plan ??
       null
+    )
+  })
+
+  const patternOpsValidatorResults = computed<PatternOpsValidatorResult[]>(() => {
+    const evidenceResults = state.value?.evidence.pattern_ops_validator_results
+    if (evidenceResults?.length) return evidenceResults
+    return (
+      (state.value?.final.evidence_bundle
+        ?.pattern_ops_validator_results as
+        | PatternOpsValidatorResult[]
+        | undefined) ?? []
     )
   })
 
@@ -947,6 +959,7 @@ export const useLogDetectStore = defineStore('logDetect', () => {
     skillOpsOverview,
     patternOpsSkillExecutions,
     patternOpsSkillPlan,
+    patternOpsValidatorResults,
     recommendationSummary,
     currentRecommendationFingerprint,
     currentRecommendationCause,

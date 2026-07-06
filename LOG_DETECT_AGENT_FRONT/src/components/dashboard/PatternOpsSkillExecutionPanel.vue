@@ -141,6 +141,59 @@
         <p v-else class="text-sm text-slate-500">No registry edge data.</p>
       </div>
     </div>
+
+    <div class="mt-4 grid gap-3 lg:grid-cols-2">
+      <div class="rounded border border-slate-200 p-3">
+        <h3 class="mb-2 text-xs font-semibold uppercase text-slate-500">
+          Validator Results
+        </h3>
+        <div v-if="validatorResults.length" class="max-h-56 space-y-2 overflow-y-auto">
+          <div
+            v-for="item in validatorResults"
+            :key="`${item.skill_id}-${item.validator_type}-${item.message}`"
+            class="rounded bg-slate-50 p-2 text-xs text-slate-700"
+          >
+            <div class="flex items-center justify-between gap-2">
+              <span class="font-medium">{{ item.skill_id }}</span>
+              <span
+                class="rounded px-1.5 py-0.5 font-semibold uppercase"
+                :class="item.passed ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'"
+              >
+                {{ item.passed ? 'passed' : 'failed' }}
+              </span>
+            </div>
+            <p class="mt-1 text-slate-500">{{ item.validator_type }}</p>
+            <p class="mt-1">{{ item.message }}</p>
+          </div>
+        </div>
+        <p v-else class="text-sm text-slate-500">No validator results yet.</p>
+      </div>
+
+      <div class="rounded border border-slate-200 p-3">
+        <h3 class="mb-2 text-xs font-semibold uppercase text-slate-500">
+          Edge Decisions
+        </h3>
+        <div v-if="edgeDecisions.length" class="max-h-56 space-y-2 overflow-y-auto">
+          <div
+            v-for="edge in edgeDecisions"
+            :key="`${edge.edge_id || ''}-${edge.from_skill_id}-${edge.to_skill_id}-${edge.action}`"
+            class="rounded bg-slate-50 p-2 text-xs text-slate-700"
+          >
+            <div class="flex flex-wrap items-center gap-1">
+              <span class="font-medium">{{ edge.from_skill_id }}</span>
+              <span class="text-slate-400">→</span>
+              <span class="font-medium">{{ edge.to_skill_id }}</span>
+              <span class="rounded bg-white px-1.5 py-0.5 uppercase text-slate-500">
+                {{ edge.edge_type }}
+              </span>
+            </div>
+            <p class="mt-1 font-medium text-slate-800">{{ edge.action }}</p>
+            <p class="mt-1 text-slate-500">{{ edge.reason }}</p>
+          </div>
+        </div>
+        <p v-else class="text-sm text-slate-500">No edge decisions yet.</p>
+      </div>
+    </div>
   </section>
 </template>
 
@@ -150,7 +203,8 @@ import type {
   PatternOpsSkill,
   PatternOpsSkillEdge,
   PatternOpsSkillExecution,
-  PatternOpsSkillPlan
+  PatternOpsSkillPlan,
+  PatternOpsValidatorResult
 } from '@/types/agentTypes'
 
 const props = defineProps<{
@@ -158,6 +212,7 @@ const props = defineProps<{
   plan: PatternOpsSkillPlan | null
   skills: PatternOpsSkill[]
   edges: PatternOpsSkillEdge[]
+  validatorResults?: PatternOpsValidatorResult[]
   loading?: boolean
 }>()
 
@@ -199,6 +254,19 @@ const scopedPlans = computed(() => {
     agentName: plan.agent_name,
     skills: plan.selected_skills ?? []
   }))
+})
+
+const validatorResults = computed(() => props.validatorResults ?? [])
+
+const edgeDecisions = computed(() => {
+  const scoped = Object.values(props.plan?.scoped_plans ?? {}).flatMap(
+    (plan) => plan.edge_decisions ?? []
+  )
+  return [
+    ...(props.plan?.global_plan?.edge_decisions ?? []),
+    ...(props.plan?.edge_decisions ?? []),
+    ...scoped
+  ]
 })
 
 function skillName(skillId: string): string {

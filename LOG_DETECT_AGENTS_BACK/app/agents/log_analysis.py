@@ -123,10 +123,46 @@ class LogAnalysisAgent:
             state,
             agent_name=self.name,
             scope="log_analysis",
-            operations={"known_pattern_match": self._analyze_logs},
+            operations={
+                "log_normalization": self._normalize_logs_skill,
+                "pattern_fingerprint": self._fingerprint_patterns_skill,
+                "known_pattern_match": self._match_patterns_skill,
+            },
         )
 
-    def _analyze_logs(self, state: SharedState) -> SharedState:
+    def _normalize_logs_skill(self, state: SharedState) -> SharedState:
+        logs = state["evidence"]["normalized_logs"]
+        enriched = []
+        for log in logs:
+            message = str(log.get("message", ""))
+            enriched.append(
+                {
+                    **log,
+                    "message_template": self._normalize_message(message),
+                }
+            )
+        state["evidence"]["normalized_logs"] = enriched
+        return state
+
+    def _fingerprint_patterns_skill(self, state: SharedState) -> SharedState:
+        logs = state["evidence"]["normalized_logs"]
+        enriched = []
+        for log in logs:
+            message_template = str(
+                log.get("message_template")
+                or self._normalize_message(str(log.get("message", "")))
+            )
+            enriched.append(
+                {
+                    **log,
+                    "message_template": message_template,
+                    "fingerprint": str(log.get("fingerprint") or self._fingerprint(message_template)),
+                }
+            )
+        state["evidence"]["normalized_logs"] = enriched
+        return state
+
+    def _match_patterns_skill(self, state: SharedState) -> SharedState:
         logs = state["evidence"]["normalized_logs"]
         anomalies: list[dict] = []
         suppressed_logs: list[dict] = []
@@ -136,16 +172,22 @@ class LogAnalysisAgent:
         cluster_counter: Counter[str] = Counter()
 
         normalized_frequencies = Counter(
-            self._normalize_message(str(log.get("message", ""))) for log in logs
+            str(
+                log.get("message_template")
+                or self._normalize_message(str(log.get("message", "")))
+            )
+            for log in logs
         )
         known_pattern_registry = self._known_pattern_registry()
 
         for log in logs:
             message = str(log.get("message", ""))
-            normalized_message = self._normalize_message(message)
+            normalized_message = str(
+                log.get("message_template") or self._normalize_message(message)
+            )
             level = str(log.get("level", "INFO")).upper()
             stack_trace = str(log.get("stack_trace", "") or "")
-            fingerprint = self._fingerprint(normalized_message)
+            fingerprint = str(log.get("fingerprint") or self._fingerprint(normalized_message))
             contract_matches = lookup_pattern_contracts(
                 message=message,
                 normalized_message=normalized_message,

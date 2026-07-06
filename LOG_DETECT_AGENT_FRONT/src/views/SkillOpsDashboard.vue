@@ -42,6 +42,7 @@
       :plan="store.patternOpsSkillPlan"
       :skills="store.patternOpsSkills"
       :edges="store.patternOpsSkillEdges"
+      :validator-results="store.patternOpsValidatorResults"
       :loading="store.loadingPatternOpsSkills"
       @refresh="store.fetchPatternOpsSkills"
     />

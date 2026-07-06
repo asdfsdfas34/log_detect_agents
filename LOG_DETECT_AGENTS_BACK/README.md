@@ -13,6 +13,7 @@
 cd LOG_DETECT_AGENTS_BACK
 pip install -r requirements.txt
 pip install -r requirements-dev.txt
+source .venv/bin/activate
 uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 

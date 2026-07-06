@@ -684,6 +684,9 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
             "pattern_ops_skill_executions": result["evidence"].get(
                 "pattern_ops_skill_executions", []
             ),
+            "pattern_ops_validator_results": result["evidence"].get(
+                "pattern_ops_validator_results", []
+            ),
             "fingerprint_merge_groups": scenario.get("fingerprint_merge_groups", []),
             "event_time_windows": scenario.get("event_time_windows", []),
             "system_state_vectors": scenario.get("system_state_vectors", []),
@@ -698,6 +701,9 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
             ),
             "pattern_ops_skill_executions": result["evidence"].get(
                 "pattern_ops_skill_executions", []
+            ),
+            "pattern_ops_validator_results": result["evidence"].get(
+                "pattern_ops_validator_results", []
             ),
         }
     )

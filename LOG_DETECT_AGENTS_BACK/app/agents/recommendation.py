@@ -25,10 +25,152 @@ class RecommendationAgent:
             state,
             agent_name=self.name,
             scope="recommendation",
-            operations={"recommendation_generation": self._generate_recommendation},
+            operations={
+                "knowledge_card_retrieval": self._retrieve_knowledge_cards,
+                "recommendation_generation": self._generate_recommendation_candidate,
+                "recommendation_quality_gate": self._run_recommendation_quality_gate,
+            },
         )
 
-    def _generate_recommendation(self, state: SharedState) -> SharedState:
+    def _retrieve_knowledge_cards(self, state: SharedState) -> SharedState:
+        related = state.get("rag", {}).get("related_knowledge", [])
+        state["evidence"]["related_knowledge_cards"] = related
+        state["evidence"]["referenced_knowledge_card_ids"] = self._knowledge_card_ids(
+            related
+        )
+        return state
+
+    def _generate_recommendation_candidate(self, state: SharedState) -> SharedState:
+        context = self._build_recommendation_context(state)
+        mcp = get_mcp_client()
+        try:
+            recommendation = self._generate_candidate_once(
+                mcp=mcp,
+                impact_text=context["impact_text"],
+                metrics=context["metrics"],
+                evidence_bundle=context["evidence_bundle"],
+                needs_data=context["needs_data"],
+            )
+        except Exception as exc:  # noqa: BLE001
+            recommendation = self._fallback_recommendation(
+                risk=context["risk"],
+                anomalies=context["anomalies"],
+                needs_data=context["needs_data"],
+            )
+            state["decisions"]["assumptions"].append(
+                f"LLM/RAG recommendation failed, fallback used: {exc}"
+            )
+
+        state["evidence"]["recommendation_candidate"] = recommendation
+        state["evidence"]["recommendation_evidence_bundle"] = context["evidence_bundle"]
+        return state
+
+    def _run_recommendation_quality_gate(self, state: SharedState) -> SharedState:
+        candidate = state["evidence"].get("recommendation_candidate")
+        evidence_bundle = state["evidence"].get("recommendation_evidence_bundle")
+        if not isinstance(candidate, dict) or not isinstance(evidence_bundle, dict):
+            context = self._build_recommendation_context(state)
+            candidate = self._fallback_recommendation(
+                risk=context["risk"],
+                anomalies=context["anomalies"],
+                needs_data=context["needs_data"],
+            )
+            evidence_bundle = context["evidence_bundle"]
+
+        if candidate.get("source") == "fallback":
+            return self._finalize_recommendation(
+                state=state,
+                recommendation=candidate,
+                evidence_bundle=evidence_bundle,
+            )
+
+        mcp = get_mcp_client()
+        best: dict[str, Any] | None = None
+        feedback: str | None = None
+        recommendation = candidate
+        last_error: Exception | None = None
+
+        for attempt in range(1, _MAX_QUALITY_ATTEMPTS + 1):
+            if attempt > 1:
+                try:
+                    recommendation = self._generate_candidate_once(
+                        mcp=mcp,
+                        impact_text="\n".join(state["assessment"]["rationale"]),
+                        metrics=state["metrics"],
+                        evidence_bundle=evidence_bundle,
+                        needs_data=self._needs_additional_data(state),
+                        feedback=feedback,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    last_error = exc
+                    feedback = (
+                        "The previous answer was invalid. Regenerate valid JSON that "
+                        "matches the schema and contains concrete, evidence-linked actions."
+                    )
+                    continue
+
+            try:
+                evaluation = self._evaluate_recommendation(
+                    mcp=mcp,
+                    evidence_bundle=evidence_bundle,
+                    recommendation=recommendation,
+                )
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc
+                feedback = (
+                    "The quality evaluator failed. Regenerate a recommendation with "
+                    "strong evidence links, concrete actions, and verification steps."
+                )
+                continue
+
+            evaluation = self._apply_hard_fail_checks(
+                evaluation=evaluation,
+                evidence_bundle=evidence_bundle,
+                recommendation=recommendation,
+            )
+            recommendation["quality_score"] = evaluation["score"]
+            recommendation["quality_gate_status"] = (
+                "passed" if evaluation["passed"] else "needs_improvement"
+            )
+            recommendation["quality_attempts"] = attempt
+            recommendation["quality_feedback"] = evaluation["feedback"]
+
+            if best is None or evaluation["score"] > int(best["quality_score"] or 0):
+                best = recommendation
+
+            if evaluation["passed"]:
+                return self._finalize_recommendation(
+                    state=state,
+                    recommendation=recommendation,
+                    evidence_bundle=evidence_bundle,
+                )
+
+            feedback = evaluation["feedback"]
+
+        if best is not None:
+            best["quality_gate_status"] = "best_effort"
+            return self._finalize_recommendation(
+                state=state,
+                recommendation=best,
+                evidence_bundle=evidence_bundle,
+            )
+        if last_error is not None:
+            state["decisions"]["assumptions"].append(
+                f"Recommendation quality gate failed, fallback used: {last_error}"
+            )
+        context = self._build_recommendation_context(state)
+        fallback = self._fallback_recommendation(
+            risk=context["risk"],
+            anomalies=context["anomalies"],
+            needs_data=context["needs_data"],
+        )
+        return self._finalize_recommendation(
+            state=state,
+            recommendation=fallback,
+            evidence_bundle=evidence_bundle,
+        )
+
+    def _build_recommendation_context(self, state: SharedState) -> dict[str, Any]:
         risk = state["assessment"]["risk_score"] or 0
         anomalies = state["evidence"]["anomalies"]
         impact_text = "\n".join(state["assessment"]["rationale"])
@@ -41,13 +183,18 @@ class RecommendationAgent:
         pattern_ops_skill_executions = state["evidence"].get(
             "pattern_ops_skill_executions", []
         )
-        related = state.get("rag", {}).get("related_knowledge", [])
-        referenced_knowledge_card_ids = self._knowledge_card_ids(related)
-
-        needs_data = any(
-            "additional data" in str(item).lower() or "추가" in str(item)
-            for item in state["decisions"]["assumptions"]
+        pattern_ops_validator_results = state["evidence"].get(
+            "pattern_ops_validator_results", []
         )
+        related = state["evidence"].get(
+            "related_knowledge_cards",
+            state.get("rag", {}).get("related_knowledge", []),
+        )
+        referenced_knowledge_card_ids = (
+            state["evidence"].get("referenced_knowledge_card_ids")
+            or self._knowledge_card_ids(related)
+        )
+        needs_data = self._needs_additional_data(state)
 
         evidence_bundle = {
             "request_id": state.get("request_id"),
@@ -70,6 +217,7 @@ class RecommendationAgent:
             "pattern_ops_contracts": pattern_ops_contracts[:10],
             "pattern_ops_skill_plan": pattern_ops_skill_plan,
             "pattern_ops_skill_executions": pattern_ops_skill_executions,
+            "pattern_ops_validator_results": pattern_ops_validator_results,
             "known_pattern_summary": {
                 "total_matches": len(known_matches),
                 "suppressed": len(state["evidence"].get("suppressed_logs", [])),
@@ -83,24 +231,25 @@ class RecommendationAgent:
             "similar_cases": related,
             "referenced_knowledge_card_ids": referenced_knowledge_card_ids,
         }
+        return {
+            "risk": risk,
+            "anomalies": anomalies,
+            "impact_text": impact_text,
+            "metrics": metrics,
+            "needs_data": needs_data,
+            "evidence_bundle": evidence_bundle,
+        }
 
-        mcp = get_mcp_client()
-        try:
-            recommendation = self._generate_with_quality_gate(
-                mcp=mcp,
-                impact_text=impact_text,
-                metrics=metrics,
-                evidence_bundle=evidence_bundle,
-                needs_data=needs_data,
-            )
-        except Exception as exc:  # noqa: BLE001
-            recommendation = self._fallback_recommendation(
-                risk=risk, anomalies=anomalies, needs_data=needs_data
-            )
-            state["decisions"]["assumptions"].append(
-                f"LLM/RAG recommendation failed, fallback used: {exc}"
-            )
-
+    def _finalize_recommendation(
+        self,
+        *,
+        state: SharedState,
+        recommendation: dict[str, Any],
+        evidence_bundle: dict[str, Any],
+    ) -> SharedState:
+        referenced_knowledge_card_ids = evidence_bundle.get(
+            "referenced_knowledge_card_ids", []
+        )
         recommendation["referenced_knowledge_card_ids"] = (
             self._merge_knowledge_card_ids(
                 recommendation.get("referenced_knowledge_card_ids"),
@@ -130,7 +279,14 @@ class RecommendationAgent:
         state["decisions"]["agents_run"].append(self.name)
         return state
 
-    def _generate_with_quality_gate(
+    @staticmethod
+    def _needs_additional_data(state: SharedState) -> bool:
+        return any(
+            "additional data" in str(item).lower() or "추가" in str(item)
+            for item in state["decisions"]["assumptions"]
+        )
+
+    def _generate_candidate_once(
         self,
         *,
         mcp: Any,
@@ -138,79 +294,35 @@ class RecommendationAgent:
         metrics: dict[str, Any],
         evidence_bundle: dict[str, Any],
         needs_data: bool,
+        feedback: str | None = None,
     ) -> dict[str, Any]:
-        best: dict[str, Any] | None = None
-        feedback: str | None = None
-        last_error: Exception | None = None
-
-        for attempt in range(1, _MAX_QUALITY_ATTEMPTS + 1):
-            try:
-                raw_response = mcp.call_tool(
-                    "openai.generate_text",
+        raw_response = mcp.call_tool(
+            "openai.generate_text",
+            {
+                "messages": [
                     {
-                        "messages": [
-                            {
-                                "role": "system",
-                                "content": (
-                                    "You are an SRE Recommendation Agent. Return "
-                                    "exactly one JSON object and no markdown. "
-                                    "All user-facing JSON string values must be written in Korean."
-                                ),
-                            },
-                            {
-                                "role": "user",
-                                "content": self._build_structured_prompt(
-                                    impact_text=impact_text,
-                                    metrics=metrics,
-                                    evidence_bundle=evidence_bundle,
-                                    needs_data=needs_data,
-                                    feedback=feedback,
-                                ),
-                            },
-                        ],
-                        "temperature": 0.2,
+                        "role": "system",
+                        "content": (
+                            "You are an SRE Recommendation Agent. Return "
+                            "exactly one JSON object and no markdown. "
+                            "All user-facing JSON string values must be written in Korean."
+                        ),
                     },
-                )
-                recommendation = self._parse_structured_recommendation(raw_response)
-            except Exception as exc:  # noqa: BLE001
-                last_error = exc
-                feedback = (
-                    "The previous answer was invalid. Regenerate valid JSON that "
-                    "matches the schema and contains concrete, evidence-linked actions."
-                )
-                continue
-
-            evaluation = self._evaluate_recommendation(
-                mcp=mcp,
-                evidence_bundle=evidence_bundle,
-                recommendation=recommendation,
-            )
-            evaluation = self._apply_hard_fail_checks(
-                evaluation=evaluation,
-                evidence_bundle=evidence_bundle,
-                recommendation=recommendation,
-            )
-            recommendation["quality_score"] = evaluation["score"]
-            recommendation["quality_gate_status"] = (
-                "passed" if evaluation["passed"] else "needs_improvement"
-            )
-            recommendation["quality_attempts"] = attempt
-            recommendation["quality_feedback"] = evaluation["feedback"]
-
-            if best is None or evaluation["score"] > int(best["quality_score"] or 0):
-                best = recommendation
-
-            if evaluation["passed"]:
-                return recommendation
-
-            feedback = evaluation["feedback"]
-
-        if best is not None:
-            best["quality_gate_status"] = "best_effort"
-            return best
-        if last_error is not None:
-            raise last_error
-        raise ValueError("Recommendation quality loop did not produce a candidate.")
+                    {
+                        "role": "user",
+                        "content": self._build_structured_prompt(
+                            impact_text=impact_text,
+                            metrics=metrics,
+                            evidence_bundle=evidence_bundle,
+                            needs_data=needs_data,
+                            feedback=feedback,
+                        ),
+                    },
+                ],
+                "temperature": 0.2,
+            },
+        )
+        return self._parse_structured_recommendation(raw_response)
 
     def _evaluate_recommendation(
         self,
