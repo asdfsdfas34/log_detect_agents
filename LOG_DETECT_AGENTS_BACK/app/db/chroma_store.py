@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 from typing import Any
 
@@ -168,6 +169,31 @@ def _embed_texts(texts: list[str], *, dimensions: int) -> list[list[float]] | No
         model=_embedding_model(), input=texts, dimensions=dimensions
     )
     return [list(item.embedding) for item in response.data]
+
+
+def _l2_normalize(vector: list[float]) -> list[float]:
+    norm = math.sqrt(sum(float(value) * float(value) for value in vector))
+    if norm <= 0:
+        return [0.0 for _ in vector]
+    return [float(value) / norm for value in vector]
+
+
+def embed_pattern_texts_normalized(texts: list[str]) -> list[list[float]] | None:
+    """Return L2-normalized pattern embeddings for clustering callers."""
+
+    if not texts:
+        return []
+    try:
+        embeddings = _embed_texts(texts, dimensions=_pattern_dimensions())
+    except Exception as exc:  # noqa: BLE001
+        _backend_logger().warning(
+            "Pattern embedding request failed; semantic clustering fallback used: %s",
+            exc,
+        )
+        return None
+    if embeddings is None:
+        return None
+    return [_l2_normalize(embedding) for embedding in embeddings]
 
 
 def _embed_texts_for_query(

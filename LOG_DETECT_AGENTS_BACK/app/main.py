@@ -107,6 +107,10 @@ class AnalyzeRequest(BaseModel):
         default=False,
         description="Include ChromaDB similar pattern matches in the analyze response",
     )
+    include_time_windows: bool = Field(
+        default=True,
+        description="Update and include event time windows and system state vectors",
+    )
 
 
 class AnalyzeResponse(BaseModel):
@@ -210,6 +214,7 @@ class FingerprintRecommendationRequest(BaseModel):
     service_name: str
     fingerprint: str
     analysis_date: date | None = None
+    include_time_windows: bool = True
 
 
 class ServiceListResponse(BaseModel):
@@ -567,7 +572,9 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
     # recommendations are generated only through the explicit recommendation API.
     try:
         scenario = run_detection_pipeline(
-            req.service_name, analysis_date=analysis_date.isoformat()
+            req.service_name,
+            analysis_date=analysis_date.isoformat(),
+            include_time_windows=req.include_time_windows,
         )
     except TypeError:
         scenario = run_detection_pipeline(req.service_name)
@@ -576,6 +583,7 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
             "fingerprints": [],
             "anomalies": [],
             "anomaly_daily_counts": [],
+            "semantic_clusters": [],
             "summary": {},
             "recommendation": {},
             "recommendations": [],
@@ -597,6 +605,7 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
     result["evidence"]["system_state_vectors"] = scenario.get(
         "system_state_vectors", []
     )
+    result["evidence"]["semantic_clusters"] = scenario.get("semantic_clusters", [])
     if scenario["fingerprints"]:
         result["evidence"]["pattern_ops_matches"] = _patternops_matches_from_fingerprints(
             service_name=req.service_name,
@@ -687,6 +696,7 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
             "fingerprint_merge_groups": scenario.get("fingerprint_merge_groups", []),
             "event_time_windows": scenario.get("event_time_windows", []),
             "system_state_vectors": scenario.get("system_state_vectors", []),
+            "semantic_clusters": scenario.get("semantic_clusters", []),
         }
     )
     result["decisions"]["skipped_agents"].append("RecommendationAgent")
@@ -738,7 +748,9 @@ def recommend_for_fingerprint(req: FingerprintRecommendationRequest) -> AnalyzeR
     """Build a recommendation preview for one selected fingerprint without persisting it."""
     analysis_date = req.analysis_date or date.today()
     scenario = run_detection_pipeline(
-        req.service_name, analysis_date=analysis_date.isoformat()
+        req.service_name,
+        analysis_date=analysis_date.isoformat(),
+        include_time_windows=req.include_time_windows,
     )
     selected = next(
         (
@@ -785,6 +797,11 @@ def recommend_for_fingerprint(req: FingerprintRecommendationRequest) -> AnalyzeR
         "AnomalyDetectionAgent",
     ]
     if selected:
+        selected_semantic_clusters = [
+            cluster
+            for cluster in scenario.get("semantic_clusters", [])
+            if req.fingerprint in cluster.get("fingerprints", [])
+        ]
         state["evidence"]["pattern_ops_matches"] = _patternops_matches_from_fingerprints(
             service_name=req.service_name,
             fingerprints=[selected],
@@ -823,6 +840,7 @@ def recommend_for_fingerprint(req: FingerprintRecommendationRequest) -> AnalyzeR
             for item in scenario.get("anomalies", [])
             if item.get("pattern") == req.fingerprint
         ]
+        state["evidence"]["semantic_clusters"] = selected_semantic_clusters
     state["evidence"]["known_pattern_matches"] = [
         {
             "fingerprint": req.fingerprint,

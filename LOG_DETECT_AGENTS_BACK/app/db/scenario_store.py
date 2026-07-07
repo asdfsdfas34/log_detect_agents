@@ -18,6 +18,7 @@ from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
 from app.db.chroma_store import (
     delete_pattern_clusters,
+    embed_pattern_texts_normalized,
     find_similar_analysis_documents,
     find_similar_analysis_documents_batch,
     find_similar_pattern_clusters,
@@ -108,6 +109,12 @@ HYBRID_WEIGHTS = {
 HDBSCAN_MIN_CLUSTER_SIZE = 3
 HDBSCAN_MIN_SAMPLES = 2
 HDBSCAN_MAX_DISTANCE = 1.0 - HYBRID_DUPLICATE_SIMILARITY_THRESHOLD
+SEMANTIC_CLUSTER_MIN_CLUSTER_SIZE = 3
+SEMANTIC_CLUSTER_MIN_SAMPLES = 2
+SEMANTIC_CLUSTER_UMAP_COMPONENTS = 5
+SEMANTIC_CLUSTER_UMAP_NEIGHBORS = 10
+TIME_WINDOW_RETURN_LIMIT = 12
+TIME_WINDOW_RECENT_RECALC_LIMIT = 48
 
 
 @lru_cache(maxsize=1)
@@ -308,6 +315,90 @@ def normalize_stacktrace(value: str) -> str:
     if str(value).strip().lower() == "nan":
         return ""
     return normalize_log_text(value)
+
+
+def drain_log_template(value: str) -> str:
+    """Build a fallback event template for single-message callers.
+
+    Real Drain3 mining is intentionally kept in _apply_drain_templates() so
+    TemplateMiner is created once per batch instead of once per log row.
+    """
+
+    return _fallback_drain_template(value)
+
+
+def _drain_input(value: str) -> str:
+    text = _apply_normalization_rules(value or "")
+    text = EXCEL_NEWLINE_RE.sub(" ", text)
+    return WHITESPACE_RE.sub(" ", text).strip()
+
+
+def _fallback_drain_template(value: str) -> str:
+    """Fallback used only when the Drain3 package is not available."""
+
+    template = normalize_log_text(value)
+    template = re.sub(r'"?\*"?', "<*>", template)
+    template = re.sub(r"\b[a-f0-9]{8,}\b", "<*>", template, flags=re.IGNORECASE)
+    template = re.sub(r"\s+", " ", template)
+    return template.strip()
+
+
+def _drain3_template_miner() -> Any | None:
+    try:
+        from drain3 import TemplateMiner
+        from drain3.template_miner_config import TemplateMinerConfig
+    except Exception:  # noqa: BLE001
+        return None
+    config = TemplateMinerConfig()
+    return TemplateMiner(config=config)
+
+
+def _mine_drain_templates(messages: list[str]) -> list[str]:
+    if not messages:
+        return []
+    miner = _drain3_template_miner()
+    if miner is None:
+        return [_fallback_drain_template(message) for message in messages]
+
+    prepared = [_drain_input(message) for message in messages]
+    for message in prepared:
+        if message:
+            miner.add_log_message(message)
+
+    templates: list[str] = []
+    for message in prepared:
+        if not message:
+            templates.append("")
+            continue
+        result = miner.add_log_message(message)
+        templates.append(str(result.get("template_mined") or message))
+    return templates
+
+
+def _apply_drain_templates(groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not groups:
+        return []
+
+    enriched = [dict(group) for group in groups]
+    missing_indexes = [
+        index
+        for index, group in enumerate(enriched)
+        if not str(group.get("drain_template") or "").strip()
+    ]
+    if not missing_indexes:
+        return enriched
+
+    templates = _mine_drain_templates(
+        [str(enriched[index].get("message") or "") for index in missing_indexes]
+    )
+    for offset, index in enumerate(missing_indexes):
+        message = str(enriched[index].get("message") or "")
+        enriched[index]["drain_template"] = (
+            templates[offset]
+            if offset < len(templates) and templates[offset]
+            else _fallback_drain_template(message)
+        )
+    return enriched
 
 
 def fingerprint_id(service_name: str, level: str, message: str, stacktrace: str) -> str:
@@ -527,6 +618,16 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(scope_key, bucket_start, bucket_size, feature_schema_version)
         );
+        CREATE INDEX IF NOT EXISTS idx_ptsm_service_bucket
+            ON pattern_time_series_metrics(service_name, bucket_size, bucket_start);
+        CREATE INDEX IF NOT EXISTS idx_ptsm_window_top
+            ON pattern_time_series_metrics(
+                service_name, bucket_start, bucket_size, total_count DESC
+            );
+        CREATE INDEX IF NOT EXISTS idx_event_windows_service_bucket
+            ON event_time_windows(service_name, bucket_size, bucket_start DESC);
+        CREATE INDEX IF NOT EXISTS idx_state_vectors_service_bucket
+            ON system_state_vectors(service_name, bucket_size, bucket_start DESC);
         """)
 
     for column, definition in {
@@ -622,6 +723,7 @@ def _pattern_cluster_context(item: dict[str, Any]) -> str:
             f"service={item.get('service_name', '')}",
             f"fingerprint={item.get('fingerprint', '')}",
             f"log_level={item.get('log_level', '')}",
+            f"drain_template={item.get('drain_template') or item.get('normalized_message', '')}",
             f"normalized_message={item.get('normalized_message', '')}",
             f"context={item.get('stacktrace') or item.get('message') or ''}",
         ]
@@ -1259,6 +1361,231 @@ def _hdbscan_duplicate_groups(
             if len(items) >= 2 and _hdbscan_component_allowed(items, pair_scores)
         )
     return clustered
+
+
+def _cosine_distance_matrix(embeddings: list[list[float]]) -> list[list[float]]:
+    matrix: list[list[float]] = []
+    for left in embeddings:
+        row: list[float] = []
+        for right in embeddings:
+            similarity = sum(
+                float(left_value) * float(right_value)
+                for left_value, right_value in zip(left, right, strict=False)
+            )
+            row.append(1.0 - max(-1.0, min(1.0, similarity)))
+        matrix.append(row)
+    return matrix
+
+
+def _umap_reduce_embeddings(embeddings: list[list[float]]) -> list[list[float]] | None:
+    if len(embeddings) <= SEMANTIC_CLUSTER_MIN_CLUSTER_SIZE:
+        return None
+    try:
+        numpy = importlib.import_module("numpy")
+        umap_module = importlib.import_module("umap")
+        n_neighbors = min(SEMANTIC_CLUSTER_UMAP_NEIGHBORS, len(embeddings) - 1)
+        n_components = min(SEMANTIC_CLUSTER_UMAP_COMPONENTS, len(embeddings) - 2)
+        if n_neighbors < 2 or n_components < 2:
+            return None
+        reducer = umap_module.UMAP(
+            n_components=n_components,
+            n_neighbors=n_neighbors,
+            metric="cosine",
+            random_state=42,
+        )
+        reduced = reducer.fit_transform(numpy.array(embeddings))
+    except Exception:  # noqa: BLE001
+        return None
+    return [[float(value) for value in row] for row in reduced.tolist()]
+
+
+def _hdbscan_vector_cluster_labels(vectors: list[list[float]]) -> list[int]:
+    if len(vectors) < SEMANTIC_CLUSTER_MIN_CLUSTER_SIZE:
+        return []
+    try:
+        numpy = importlib.import_module("numpy")
+        hdbscan = importlib.import_module("hdbscan")
+        clusterer = hdbscan.HDBSCAN(
+            metric="euclidean",
+            min_cluster_size=SEMANTIC_CLUSTER_MIN_CLUSTER_SIZE,
+            min_samples=SEMANTIC_CLUSTER_MIN_SAMPLES,
+            cluster_selection_method="eom",
+        )
+        labels = clusterer.fit_predict(numpy.array(vectors))
+    except Exception:  # noqa: BLE001
+        return []
+    return [int(label) for label in labels]
+
+
+def _semantic_cluster_labels_from_embeddings(
+    embeddings: list[list[float]],
+) -> tuple[list[int], str]:
+    reduced = _umap_reduce_embeddings(embeddings)
+    if reduced is not None:
+        labels = _hdbscan_vector_cluster_labels(reduced)
+        if labels and len(labels) == len(embeddings):
+            return labels, "openai_l2_umap_hdbscan"
+    labels = _hdbscan_cluster_labels(
+        _cosine_distance_matrix(embeddings),
+        min_cluster_size=SEMANTIC_CLUSTER_MIN_CLUSTER_SIZE,
+        min_samples=SEMANTIC_CLUSTER_MIN_SAMPLES,
+    )
+    if labels and len(labels) == len(embeddings):
+        return labels, "openai_l2_hdbscan"
+    return [], "drain3_template_fallback"
+
+
+def _representative_cluster_item(items: list[dict[str, Any]]) -> dict[str, Any]:
+    return max(
+        items,
+        key=lambda item: (
+            int(item.get("occurrence_count") or 0),
+            str(item.get("log_level") or "") in {"ERROR", "CRITICAL"},
+            str(item.get("last_seen") or ""),
+        ),
+    )
+
+
+def _build_semantic_cluster_record(
+    *,
+    index: int,
+    items: list[dict[str, Any]],
+    algorithm: str,
+    recommendations_by_fp: dict[str, dict[str, Any]],
+    impacts_by_fp: dict[str, dict[str, Any]],
+    anomalies_by_fp: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    representative = _representative_cluster_item(items)
+    representative_fp = str(representative.get("fingerprint") or "")
+    representative_recommendation = recommendations_by_fp.get(representative_fp, {})
+    risk_scores = [
+        int(impacts_by_fp.get(str(item.get("fingerprint") or ""), {}).get("risk_score") or 0)
+        for item in items
+    ]
+    fingerprints = [str(item.get("fingerprint") or "") for item in items]
+    return {
+        "cluster_id": f"SC-{index:03d}",
+        "algorithm": algorithm,
+        "count": sum(int(item.get("occurrence_count") or 0) for item in items),
+        "fingerprint_count": len(items),
+        "fingerprints": fingerprints,
+        "service_name": str(representative.get("service_name") or ""),
+        "log_level": str(representative.get("log_level") or ""),
+        "drain_template": str(
+            representative.get("drain_template")
+            or drain_log_template(str(representative.get("message") or ""))
+        ),
+        "representative_fingerprint": representative_fp,
+        "representative_log": str(representative.get("message") or ""),
+        "representative_cause": str(representative_recommendation.get("cause") or ""),
+        "recommendation_hint": str(
+            representative_recommendation.get("recommendation") or ""
+        ),
+        "risk_score": max(risk_scores, default=0),
+        "anomaly_count": sum(1 for fp in fingerprints if fp in anomalies_by_fp),
+        "pattern_statuses": sorted(
+            {
+                str(item.get("pattern_status") or "")
+                for item in items
+                if str(item.get("pattern_status") or "")
+            }
+        ),
+    }
+
+
+def _fallback_semantic_cluster_groups(
+    groups: list[dict[str, Any]],
+) -> list[list[dict[str, Any]]]:
+    buckets: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    for group in groups:
+        key = (
+            str(group.get("service_name") or ""),
+            str(group.get("log_level") or ""),
+            str(group.get("drain_template") or drain_log_template(str(group.get("message") or ""))),
+        )
+        buckets.setdefault(key, []).append(group)
+    return sorted(
+        buckets.values(),
+        key=lambda items: (
+            -sum(int(item.get("occurrence_count") or 0) for item in items),
+            str(_representative_cluster_item(items).get("fingerprint") or ""),
+        ),
+    )
+
+
+def build_semantic_log_clusters(
+    groups: list[dict[str, Any]],
+    *,
+    recommendations: list[dict[str, Any]] | None = None,
+    impacts: list[dict[str, Any]] | None = None,
+    anomalies: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Cluster Drain templates with OpenAI embeddings, UMAP, and HDBSCAN."""
+
+    if not groups:
+        return []
+    enriched_groups = _apply_drain_templates(groups)
+    recommendations_by_fp = {
+        str(item.get("fingerprint") or ""): item for item in recommendations or []
+    }
+    impacts_by_fp = {str(item.get("fingerprint") or ""): item for item in impacts or []}
+    anomalies_by_fp = {
+        str(item.get("pattern") or ""): item for item in anomalies or [] if item.get("pattern")
+    }
+
+    cluster_groups: list[list[dict[str, Any]]] = []
+    algorithm = "drain3_template_fallback"
+    texts = [
+        "\n".join(
+            [
+                f"service={item.get('service_name', '')}",
+                f"level={item.get('log_level', '')}",
+                f"drain_template={item.get('drain_template', '')}",
+                f"stacktrace={item.get('stacktrace', '')}",
+            ]
+        )
+        for item in enriched_groups
+    ]
+    embeddings = embed_pattern_texts_normalized(texts)
+    if embeddings and len(embeddings) == len(enriched_groups):
+        labels, algorithm = _semantic_cluster_labels_from_embeddings(embeddings)
+        if labels:
+            by_label: dict[int, list[dict[str, Any]]] = {}
+            noise_items: list[dict[str, Any]] = []
+            for label, item in zip(labels, enriched_groups, strict=False):
+                if label < 0:
+                    noise_items.append(item)
+                else:
+                    by_label.setdefault(label, []).append(item)
+            cluster_groups = [
+                items
+                for items in by_label.values()
+                if len(items) >= SEMANTIC_CLUSTER_MIN_SAMPLES
+            ]
+            if noise_items:
+                cluster_groups.extend(_fallback_semantic_cluster_groups(noise_items))
+    if not cluster_groups:
+        cluster_groups = _fallback_semantic_cluster_groups(enriched_groups)
+        algorithm = "drain3_template_fallback"
+
+    cluster_groups = sorted(
+        cluster_groups,
+        key=lambda items: (
+            -sum(int(item.get("occurrence_count") or 0) for item in items),
+            str(_representative_cluster_item(items).get("fingerprint") or ""),
+        ),
+    )
+    return [
+        _build_semantic_cluster_record(
+            index=index,
+            items=items,
+            algorithm=algorithm,
+            recommendations_by_fp=recommendations_by_fp,
+            impacts_by_fp=impacts_by_fp,
+            anomalies_by_fp=anomalies_by_fp,
+        )
+        for index, items in enumerate(cluster_groups, start=1)
+    ]
 
 
 def _semantic_duplicate_groups(groups: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
@@ -2176,7 +2503,7 @@ def _increment_pattern_metric(
     level: str,
     created_at: str,
     bucket_size: str,
-) -> None:
+) -> str:
     bucket = _bucket_start(created_at, bucket_size)
     level_upper = level.upper()
     conn.execute(
@@ -2206,6 +2533,7 @@ def _increment_pattern_metric(
             created_at,
         ),
     )
+    return bucket
 
 
 def _metric_baseline(
@@ -2415,14 +2743,101 @@ def _vector_id(scope_key: str, bucket_start: str, bucket_size: str, version: str
     return "SSV-" + hashlib.sha1(raw.encode("utf-8")).hexdigest()[:14].upper()
 
 
-def _upsert_event_time_windows(
-    conn: sqlite3.Connection, *, service_name: str | None
-) -> list[dict[str, Any]]:
+MetricBucket = tuple[str, str, str]
+
+
+def _metric_bucket_where(
+    alias: str, buckets: set[MetricBucket]
+) -> tuple[str, list[Any]]:
+    if not buckets:
+        return "", []
+    clauses: list[str] = []
+    params: list[Any] = []
+    for svc, bucket_start, bucket_size in sorted(buckets):
+        clauses.append(
+            f"({alias}.service_name=? AND {alias}.bucket_start=? AND {alias}.bucket_size=?)"
+        )
+        params.extend([svc, bucket_start, bucket_size])
+    return f"WHERE {' OR '.join(clauses)}", params
+
+
+def _recent_metric_buckets(
+    conn: sqlite3.Connection,
+    *,
+    service_name: str | None,
+    limit: int = TIME_WINDOW_RECENT_RECALC_LIMIT,
+) -> set[MetricBucket]:
     params: list[Any] = []
     where = ""
     if service_name:
-        where = "WHERE pt.service_name=?"
+        where = "WHERE service_name=?"
         params.append(service_name)
+    params.append(limit)
+    rows = conn.execute(
+        f"""
+        SELECT DISTINCT service_name, bucket_start, bucket_size
+        FROM pattern_time_series_metrics
+        {where}
+        ORDER BY bucket_size DESC, bucket_start DESC
+        LIMIT ?
+        """,
+        params,
+    ).fetchall()
+    return {(str(row[0]), str(row[1]), str(row[2])) for row in rows}
+
+
+def _top_fingerprints_by_window(
+    conn: sqlite3.Connection, buckets: set[MetricBucket]
+) -> dict[MetricBucket, list[dict[str, Any]]]:
+    where_sql, params = _metric_bucket_where("pt", buckets)
+    if not where_sql:
+        return {}
+    rows = conn.execute(
+        f"""
+        WITH ranked AS (
+            SELECT
+                pt.service_name,
+                pt.bucket_start,
+                pt.bucket_size,
+                pt.fingerprint,
+                pt.total_count,
+                ROW_NUMBER() OVER (
+                    PARTITION BY pt.service_name, pt.bucket_start, pt.bucket_size
+                    ORDER BY pt.total_count DESC, pt.fingerprint ASC
+                ) AS rn
+            FROM pattern_time_series_metrics pt
+            {where_sql}
+        )
+        SELECT service_name, bucket_start, bucket_size, fingerprint, total_count
+        FROM ranked
+        WHERE rn <= 5
+        ORDER BY service_name, bucket_start, bucket_size, rn
+        """,
+        params,
+    ).fetchall()
+    grouped: dict[MetricBucket, list[dict[str, Any]]] = {}
+    for svc, bucket_start, bucket_size, fingerprint, count in rows:
+        key = (str(svc), str(bucket_start), str(bucket_size))
+        grouped.setdefault(key, []).append(
+            {"fingerprint": str(fingerprint), "count": int(count or 0)}
+        )
+    return grouped
+
+
+def _upsert_event_time_windows(
+    conn: sqlite3.Connection,
+    *,
+    service_name: str | None,
+    dirty_buckets: set[MetricBucket] | None = None,
+) -> list[dict[str, Any]]:
+    target_buckets = set(dirty_buckets or set())
+    if not target_buckets:
+        target_buckets = _recent_metric_buckets(conn, service_name=service_name)
+    if not target_buckets:
+        return []
+
+    where_sql, params = _metric_bucket_where("pt", target_buckets)
+    top_by_window = _top_fingerprints_by_window(conn, target_buckets)
     rows = conn.execute(
         f"""
         SELECT
@@ -2437,7 +2852,7 @@ def _upsert_event_time_windows(
         LEFT JOIN log_analysis_results lar ON lar.fingerprint=pt.fingerprint
         LEFT JOIN anomaly_results ar ON ar.fingerprint=pt.fingerprint
         LEFT JOIN impact_evaluations ie ON ie.fingerprint=pt.fingerprint
-        {where}
+        {where_sql}
         GROUP BY pt.service_name, pt.bucket_start, pt.bucket_size
         ORDER BY pt.bucket_size, pt.bucket_start DESC
         """,
@@ -2448,20 +2863,7 @@ def _upsert_event_time_windows(
         svc = str(row[0] or "")
         bucket_start = str(row[1] or "")
         bucket_size = str(row[2] or "")
-        top_rows = conn.execute(
-            """
-            SELECT fingerprint, total_count
-            FROM pattern_time_series_metrics
-            WHERE service_name=? AND bucket_start=? AND bucket_size=?
-            ORDER BY total_count DESC, fingerprint ASC
-            LIMIT 5
-            """,
-            (svc, bucket_start, bucket_size),
-        ).fetchall()
-        top_fingerprints = [
-            {"fingerprint": str(fp), "count": int(count or 0)}
-            for fp, count in top_rows
-        ]
+        top_fingerprints = top_by_window.get((svc, bucket_start, bucket_size), [])
         window = {
             "window_id": _window_id(svc, bucket_start, bucket_size),
             "service_name": svc,
@@ -2478,27 +2880,29 @@ def _upsert_event_time_windows(
             "max_risk_score": int(row[11] or 0),
             "top_fingerprints": top_fingerprints,
         }
-        conn.execute(
-            """
-            INSERT INTO event_time_windows(
-                window_id, service_name, bucket_start, bucket_size,
-                total_events, error_events, warn_events, info_events,
-                unique_fingerprints, known_fingerprint_count, new_fingerprint_count,
-                anomaly_count, max_risk_score, top_fingerprints_json, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-            ON CONFLICT(service_name, bucket_start, bucket_size) DO UPDATE SET
-                total_events=excluded.total_events,
-                error_events=excluded.error_events,
-                warn_events=excluded.warn_events,
-                info_events=excluded.info_events,
-                unique_fingerprints=excluded.unique_fingerprints,
-                known_fingerprint_count=excluded.known_fingerprint_count,
-                new_fingerprint_count=excluded.new_fingerprint_count,
-                anomaly_count=excluded.anomaly_count,
-                max_risk_score=excluded.max_risk_score,
-                top_fingerprints_json=excluded.top_fingerprints_json,
-                updated_at=CURRENT_TIMESTAMP
-            """,
+        windows.append(window)
+    conn.executemany(
+        """
+        INSERT INTO event_time_windows(
+            window_id, service_name, bucket_start, bucket_size,
+            total_events, error_events, warn_events, info_events,
+            unique_fingerprints, known_fingerprint_count, new_fingerprint_count,
+            anomaly_count, max_risk_score, top_fingerprints_json, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(service_name, bucket_start, bucket_size) DO UPDATE SET
+            total_events=excluded.total_events,
+            error_events=excluded.error_events,
+            warn_events=excluded.warn_events,
+            info_events=excluded.info_events,
+            unique_fingerprints=excluded.unique_fingerprints,
+            known_fingerprint_count=excluded.known_fingerprint_count,
+            new_fingerprint_count=excluded.new_fingerprint_count,
+            anomaly_count=excluded.anomaly_count,
+            max_risk_score=excluded.max_risk_score,
+            top_fingerprints_json=excluded.top_fingerprints_json,
+            updated_at=CURRENT_TIMESTAMP
+        """,
+        [
             (
                 window["window_id"],
                 window["service_name"],
@@ -2513,11 +2917,63 @@ def _upsert_event_time_windows(
                 window["new_fingerprint_count"],
                 window["anomaly_count"],
                 window["max_risk_score"],
-                _json_list(top_fingerprints),
-            ),
-        )
-        windows.append(window)
+                _json_list(window["top_fingerprints"]),
+            )
+            for window in windows
+        ],
+    )
     return windows
+
+
+def _fetch_event_time_windows(
+    conn: sqlite3.Connection,
+    *,
+    service_name: str | None,
+    limit: int = TIME_WINDOW_RETURN_LIMIT,
+) -> list[dict[str, Any]]:
+    params: list[Any] = []
+    where = ""
+    if service_name:
+        where = "WHERE service_name=?"
+        params.append(service_name)
+    params.append(limit)
+    rows = conn.execute(
+        f"""
+        SELECT
+            window_id, service_name, bucket_start, bucket_size,
+            total_events, error_events, warn_events, info_events,
+            unique_fingerprints, known_fingerprint_count, new_fingerprint_count,
+            anomaly_count, max_risk_score, top_fingerprints_json
+        FROM event_time_windows
+        {where}
+        ORDER BY bucket_size DESC, bucket_start DESC
+        LIMIT ?
+        """,
+        params,
+    ).fetchall()
+    return [
+        {
+            "window_id": str(row[0]),
+            "service_name": str(row[1]),
+            "bucket_start": str(row[2]),
+            "bucket_size": str(row[3]),
+            "total_events": int(row[4] or 0),
+            "error_events": int(row[5] or 0),
+            "warn_events": int(row[6] or 0),
+            "info_events": int(row[7] or 0),
+            "unique_fingerprints": int(row[8] or 0),
+            "known_fingerprint_count": int(row[9] or 0),
+            "new_fingerprint_count": int(row[10] or 0),
+            "anomaly_count": int(row[11] or 0),
+            "max_risk_score": int(row[12] or 0),
+            "top_fingerprints": [
+                item
+                for item in _load_json_list(str(row[13] or "[]"))
+                if isinstance(item, dict)
+            ],
+        }
+        for row in rows
+    ]
 
 
 def _state_vector_from_window(window: dict[str, Any]) -> dict[str, Any]:
@@ -2586,21 +3042,23 @@ def _upsert_system_state_vectors(
             "label": label,
             "incident_id": "",
         }
-        conn.execute(
-            """
-            INSERT INTO system_state_vectors(
-                vector_id, scope_key, service_name, bucket_start, bucket_size,
-                feature_schema_version, features_json, vector_json, label,
-                incident_id, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-            ON CONFLICT(scope_key, bucket_start, bucket_size, feature_schema_version)
-            DO UPDATE SET
-                features_json=excluded.features_json,
-                vector_json=excluded.vector_json,
-                label=excluded.label,
-                incident_id=excluded.incident_id,
-                updated_at=CURRENT_TIMESTAMP
-            """,
+        vectors.append(vector)
+    conn.executemany(
+        """
+        INSERT INTO system_state_vectors(
+            vector_id, scope_key, service_name, bucket_start, bucket_size,
+            feature_schema_version, features_json, vector_json, label,
+            incident_id, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(scope_key, bucket_start, bucket_size, feature_schema_version)
+        DO UPDATE SET
+            features_json=excluded.features_json,
+            vector_json=excluded.vector_json,
+            label=excluded.label,
+            incident_id=excluded.incident_id,
+            updated_at=CURRENT_TIMESTAMP
+        """,
+        [
             (
                 vector["vector_id"],
                 vector["scope_key"],
@@ -2612,10 +3070,56 @@ def _upsert_system_state_vectors(
                 _json_list(vector["vector"]),
                 vector["label"],
                 vector["incident_id"],
-            ),
-        )
-        vectors.append(vector)
+            )
+            for vector in vectors
+        ],
+    )
     return vectors
+
+
+def _fetch_system_state_vectors(
+    conn: sqlite3.Connection,
+    *,
+    service_name: str | None,
+    limit: int = TIME_WINDOW_RETURN_LIMIT,
+) -> list[dict[str, Any]]:
+    params: list[Any] = []
+    where = ""
+    if service_name:
+        where = "WHERE service_name=?"
+        params.append(service_name)
+    params.append(limit)
+    rows = conn.execute(
+        f"""
+        SELECT
+            vector_id, scope_key, service_name, bucket_start, bucket_size,
+            feature_schema_version, features_json, vector_json, label, incident_id
+        FROM system_state_vectors
+        {where}
+        ORDER BY bucket_size DESC, bucket_start DESC
+        LIMIT ?
+        """,
+        params,
+    ).fetchall()
+    return [
+        {
+            "vector_id": str(row[0]),
+            "scope_key": str(row[1]),
+            "service_name": str(row[2]),
+            "bucket_start": str(row[3]),
+            "bucket_size": str(row[4]),
+            "feature_schema_version": str(row[5]),
+            "features": _load_json_dict(str(row[6] or "{}")),
+            "vector": [
+                float(item)
+                for item in _load_json_list(str(row[7] or "[]"))
+                if isinstance(item, (int, float))
+            ],
+            "label": str(row[8]),
+            "incident_id": str(row[9] or ""),
+        }
+        for row in rows
+    ]
 
 
 def _upsert_anomaly_daily_count(
@@ -2754,6 +3258,7 @@ def _load_fingerprint_groups(
             "log_level": str(row[2] or "").upper(),
             "message": str(row[3] or ""),
             "normalized_message": normalize_log_text(str(row[3] or "")),
+            "drain_template": "",
             "stacktrace": str(row[4] or ""),
             "service_name": str(row[5] or ""),
             "first_seen": str(row[6] or ""),
@@ -2948,6 +3453,7 @@ def run_detection_pipeline(
     *,
     days_back: int | None = None,
     analysis_date: str | None = None,
+    include_time_windows: bool = True,
 ) -> dict[str, Any]:
     """Run SC-001~SC-005 over stored logs and return dashboard-ready summary data."""
     db_path = _resolve_db_path()
@@ -2977,6 +3483,7 @@ def run_detection_pipeline(
             service_name,
             days_back,
             analysis_date,
+            include_time_windows,
             signature_count,
             0 if analysis_date else last_rowid,
             signature_max_created,
@@ -3014,6 +3521,7 @@ def run_detection_pipeline(
         }
         known_signature_map = _known_pattern_signature_map(conn)
         groups: dict[str, dict[str, Any]] = {}
+        dirty_metric_buckets: set[MetricBucket] = set()
         max_rowid = last_rowid
         max_created = ""
         for rowid, svc, level, msg, stack, created in rows:
@@ -3064,6 +3572,7 @@ def run_detection_pipeline(
                         else normalize_stacktrace(stack)
                     ),
                     "service_name": svc,
+                    "drain_template": "",
                     "first_seen": (
                         created
                         if analysis_date
@@ -3093,7 +3602,7 @@ def run_detection_pipeline(
             )
             if cur.rowcount:
                 for bucket_size in ("day", "hour"):
-                    _increment_pattern_metric(
+                    bucket = _increment_pattern_metric(
                         conn,
                         service_name=svc,
                         fingerprint=fp,
@@ -3101,7 +3610,9 @@ def run_detection_pipeline(
                         created_at=created,
                         bucket_size=bucket_size,
                     )
-        group_items = list(groups.values())
+                    dirty_metric_buckets.add((str(svc), bucket, bucket_size))
+        group_items = _apply_drain_templates(list(groups.values()))
+        groups = {str(item.get("fingerprint") or ""): item for item in group_items}
         group_contexts = [_pattern_cluster_context(item) for item in group_items]
         approved_match_groups = find_similar_analysis_documents_batch(
             queries=group_contexts
@@ -3304,23 +3815,27 @@ def run_detection_pipeline(
         merge_groups = _fetch_fingerprint_merge_groups(
             model_conn, status="pending", limit=50
         )
-        event_time_windows = _upsert_event_time_windows(
-            model_conn, service_name=service_name
-        )
-        system_state_vectors = _upsert_system_state_vectors(
-            model_conn, windows=event_time_windows
-        )
+        if include_time_windows:
+            updated_event_time_windows = _upsert_event_time_windows(
+                model_conn,
+                service_name=service_name,
+                dirty_buckets=dirty_metric_buckets,
+            )
+            _upsert_system_state_vectors(
+                model_conn, windows=updated_event_time_windows
+            )
+            event_time_windows = _fetch_event_time_windows(
+                model_conn, service_name=service_name
+            )
+            system_state_vectors = _fetch_system_state_vectors(
+                model_conn, service_name=service_name
+            )
+        else:
+            event_time_windows = []
+            system_state_vectors = []
         model_conn.commit()
-    latest_event_time_windows = sorted(
-        event_time_windows,
-        key=lambda item: (str(item["bucket_size"]), str(item["bucket_start"])),
-        reverse=True,
-    )[:12]
-    latest_system_state_vectors = sorted(
-        system_state_vectors,
-        key=lambda item: (str(item["bucket_size"]), str(item["bucket_start"])),
-        reverse=True,
-    )[:12]
+    latest_event_time_windows = event_time_windows
+    latest_system_state_vectors = system_state_vectors
     visible_impacts = [
         impact
         for impact in impacts
@@ -3332,6 +3847,12 @@ def run_detection_pipeline(
     anomalies = [
         item for item in anomalies if item["pattern"] not in ignored_fingerprints
     ]
+    semantic_clusters = build_semantic_log_clusters(
+        visible_groups,
+        recommendations=visible_recs,
+        impacts=visible_impacts,
+        anomalies=anomalies,
+    )
     known_count = sum(
         1
         for group in visible_groups
@@ -3369,6 +3890,7 @@ def run_detection_pipeline(
         "impacts": visible_impacts,
         "recommendations": visible_recs,
         "recommendation": top_rec,
+        "semantic_clusters": semantic_clusters,
         "duplicate_pattern_candidates": duplicate_candidates,
         "fingerprint_merge_groups": merge_groups,
         "event_time_windows": latest_event_time_windows,
@@ -3379,6 +3901,7 @@ def run_detection_pipeline(
             "total_fingerprints": len(visible_groups),
             "known_patterns": known_count,
             "new_patterns": new_count,
+            "semantic_clusters": len(semantic_clusters),
             "anomalies_detected": len(anomalies),
             "exception_registered_count": exception_count,
             "exception_excluded_logs": exception_excluded_logs,

@@ -335,6 +335,158 @@ def test_hdbscan_duplicate_groups_use_optional_cluster_labels(monkeypatch) -> No
     }
 
 
+def test_semantic_log_clusters_fallback_to_drain_templates(monkeypatch) -> None:
+    monkeypatch.setattr(scenario_store, "embed_pattern_texts_normalized", lambda texts: None)
+    monkeypatch.setattr(
+        scenario_store,
+        "_mine_drain_templates",
+        lambda messages: ["Payment failed for orderId=<*> request_id=<*>"]
+        * len(messages),
+    )
+    groups = [
+        {
+            "fingerprint": "FP-A",
+            "service_name": "checkout-api",
+            "log_level": "ERROR",
+            "message": "Payment failed for orderId=100 request_id=abc",
+            "occurrence_count": 3,
+            "pattern_status": "new_pattern",
+        },
+        {
+            "fingerprint": "FP-B",
+            "service_name": "checkout-api",
+            "log_level": "ERROR",
+            "message": "Payment failed for orderId=200 request_id=def",
+            "occurrence_count": 2,
+            "pattern_status": "new_pattern",
+        },
+    ]
+
+    clusters = scenario_store.build_semantic_log_clusters(
+        groups,
+        recommendations=[
+            {
+                "fingerprint": "FP-A",
+                "cause": "payment provider timeout",
+                "recommendation": "review payment timeout handling",
+            }
+        ],
+        impacts=[{"fingerprint": "FP-A", "risk_score": 70}],
+    )
+
+    assert len(clusters) == 1
+    assert clusters[0]["algorithm"] == "drain3_template_fallback"
+    assert clusters[0]["count"] == 5
+    assert clusters[0]["fingerprints"] == ["FP-A", "FP-B"]
+    assert clusters[0]["representative_cause"] == "payment provider timeout"
+    assert "<*>" in clusters[0]["drain_template"]
+
+
+def test_semantic_log_clusters_use_openai_umap_hdbscan_labels(monkeypatch) -> None:
+    groups = [
+        {
+            "fingerprint": "FP-A",
+            "service_name": "checkout-api",
+            "log_level": "ERROR",
+            "message": "Payment failed for orderId=100",
+            "occurrence_count": 3,
+        },
+        {
+            "fingerprint": "FP-B",
+            "service_name": "checkout-api",
+            "log_level": "ERROR",
+            "message": "Payment failed for orderId=200",
+            "occurrence_count": 2,
+        },
+        {
+            "fingerprint": "FP-C",
+            "service_name": "checkout-api",
+            "log_level": "WARN",
+            "message": "Cache warming delayed shard=7",
+            "occurrence_count": 1,
+        },
+    ]
+    monkeypatch.setattr(
+        scenario_store,
+        "embed_pattern_texts_normalized",
+        lambda texts: [[1.0, 0.0], [0.99, 0.01], [0.0, 1.0]],
+    )
+    monkeypatch.setattr(
+        scenario_store,
+        "_semantic_cluster_labels_from_embeddings",
+        lambda embeddings: ([0, 0, -1], "openai_l2_umap_hdbscan"),
+    )
+
+    clusters = scenario_store.build_semantic_log_clusters(groups)
+
+    assert clusters[0]["algorithm"] == "openai_l2_umap_hdbscan"
+    assert clusters[0]["fingerprint_count"] == 2
+    assert clusters[0]["fingerprints"] == ["FP-A", "FP-B"]
+    assert clusters[0]["representative_fingerprint"] == "FP-A"
+
+
+def test_semantic_log_clusters_reuse_existing_drain_templates(monkeypatch) -> None:
+    calls = 0
+
+    def fake_mine(messages: list[str]) -> list[str]:
+        nonlocal calls
+        calls += 1
+        return [f"template:{index}" for index, _ in enumerate(messages)]
+
+    monkeypatch.setattr(scenario_store, "_mine_drain_templates", fake_mine)
+    monkeypatch.setattr(scenario_store, "embed_pattern_texts_normalized", lambda texts: None)
+
+    groups = [
+        {
+            "fingerprint": "FP-A",
+            "service_name": "checkout-api",
+            "log_level": "ERROR",
+            "message": "Payment failed orderId=100",
+            "drain_template": "Payment failed <*>",
+            "occurrence_count": 2,
+        },
+        {
+            "fingerprint": "FP-B",
+            "service_name": "checkout-api",
+            "log_level": "ERROR",
+            "message": "Payment failed orderId=200",
+            "drain_template": "Payment failed <*>",
+            "occurrence_count": 1,
+        },
+    ]
+
+    clusters = scenario_store.build_semantic_log_clusters(groups)
+
+    assert calls == 0
+    assert clusters[0]["drain_template"] == "Payment failed <*>"
+
+
+def test_apply_drain_templates_creates_one_miner_batch(monkeypatch) -> None:
+    batches: list[list[str]] = []
+
+    def fake_mine(messages: list[str]) -> list[str]:
+        batches.append(messages)
+        return ["Payment failed <*>"] * len(messages)
+
+    monkeypatch.setattr(scenario_store, "_mine_drain_templates", fake_mine)
+
+    groups = [
+        {"message": "Payment failed orderId=100"},
+        {"message": "Payment failed orderId=200"},
+        {"message": "Payment failed orderId=300"},
+    ]
+
+    enriched = scenario_store._apply_drain_templates(groups)
+
+    assert len(batches) == 1
+    assert len(batches[0]) == 3
+    assert [item["drain_template"] for item in enriched] == [
+        "Payment failed <*>",
+        "Payment failed <*>",
+        "Payment failed <*>",
+    ]
+
+
 def test_duplicate_candidate_groups_string_value_variants_after_approval(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -1318,6 +1470,67 @@ def test_detection_pipeline_processes_only_new_raw_logs_and_tracks_metrics(
 
     assert processed_count == 1
     assert metric_rows == [("day", 1, 1), ("hour", 1, 1)]
+
+
+def test_detection_pipeline_can_skip_time_window_modeling(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db_path = tmp_path / "logs.db"
+    monkeypatch.setenv("SQLITE_PATH", str(db_path))
+
+    with sqlite3.connect(db_path) as conn:
+        ensure_schema(conn)
+        conn.execute(
+            """
+            INSERT INTO service_logs(service_name, level, message, stack_trace, created_at)
+            VALUES ('billing-service', 'ERROR', 'Payment failed orderId=100', '', ?)
+            """,
+            ("2026-06-16T10:00:00",),
+        )
+        conn.commit()
+
+    result = run_detection_pipeline("billing-service", include_time_windows=False)
+
+    assert result["event_time_windows"] == []
+    assert result["system_state_vectors"] == []
+    with sqlite3.connect(db_path) as conn:
+        window_count = conn.execute("SELECT COUNT(*) FROM event_time_windows").fetchone()[0]
+        vector_count = conn.execute("SELECT COUNT(*) FROM system_state_vectors").fetchone()[0]
+
+    assert window_count == 0
+    assert vector_count == 0
+
+
+def test_time_window_modeling_reuses_recent_bounded_windows_on_rerun(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db_path = tmp_path / "logs.db"
+    monkeypatch.setenv("SQLITE_PATH", str(db_path))
+
+    with sqlite3.connect(db_path) as conn:
+        ensure_schema(conn)
+        conn.executemany(
+            """
+            INSERT INTO service_logs(service_name, level, message, stack_trace, created_at)
+            VALUES ('billing-service', 'ERROR', ?, '', ?)
+            """,
+            [
+                (f"Payment failed orderId={index}", f"2026-06-16T10:{index:02d}:00")
+                for index in range(3)
+            ],
+        )
+        conn.commit()
+
+    first = run_detection_pipeline("billing-service")
+    second = run_detection_pipeline("billing-service")
+
+    assert first["event_time_windows"]
+    assert first["system_state_vectors"]
+    assert second["summary"]["processed_new_logs"] == 0
+    assert second["event_time_windows"]
+    assert second["system_state_vectors"]
+    assert len(second["event_time_windows"]) <= scenario_store.TIME_WINDOW_RETURN_LIMIT
+    assert len(second["system_state_vectors"]) <= scenario_store.TIME_WINDOW_RETURN_LIMIT
 
 
 def test_detection_pipeline_reports_spike_and_drop_anomaly_types(

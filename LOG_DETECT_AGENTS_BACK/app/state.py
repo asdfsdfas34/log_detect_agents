@@ -29,6 +29,7 @@ class Evidence(TypedDict):
     anomalies: list[dict]
     anomaly_daily_counts: list[dict]
     clusters: list[dict]
+    semantic_clusters: list[dict]
     stack_traces: list[str]
     incident_candidates: list[dict]
     source_code_evidence: list[dict]
@@ -118,6 +119,7 @@ def create_initial_state(
             "anomalies": [],
             "anomaly_daily_counts": [],
             "clusters": [],
+            "semantic_clusters": [],
             "stack_traces": [],
             "incident_candidates": [],
             "source_code_evidence": [],
