@@ -162,7 +162,11 @@ DEFAULT_SKILLS: list[dict[str, Any]] = [
         "category": "recommendation",
         "priority": 110,
         "requires": ["analysis_evidence"],
-        "produces": ["recommended_actions", "verification_steps"],
+        "produces": [
+            "recommendation_candidate",
+            "recommended_actions",
+            "verification_steps",
+        ],
         "operation_type": "agent",
         "operation_ref": "RecommendationAgent",
         "validators": ["evidence_linked_actions", "owner_present"],
@@ -467,6 +471,7 @@ def plan_skill_graphs(
     """Select skill graphs based on current evidence and skill relationships."""
 
     skills = fetch_pattern_skills()
+    skill_by_id = {skill.skill_id: skill for skill in skills}
     if scope:
         allowed_categories = SCOPE_CATEGORIES.get(scope, set())
         skills = [
@@ -474,6 +479,7 @@ def plan_skill_graphs(
             for skill in skills
             if skill.category in allowed_categories or skill.skill_id == scope
         ]
+        skill_by_id = {skill.skill_id: skill for skill in skills}
     edges = fetch_pattern_skill_edges()
     skill_ids = {skill.skill_id for skill in skills}
     scoped_edges = [
@@ -485,50 +491,47 @@ def plan_skill_graphs(
     selected: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     selected_ids: set[str] = set()
+    precondition_decisions: list[dict[str, Any]] = []
 
     for skill in skills:
         score, reasons = _score_skill(skill.skill_id, evidence, state)
+        precondition = evaluate_skill_precondition(skill, state)
+        precondition_decisions.append(
+            {
+                "skill_id": skill.skill_id,
+                "passed": precondition["passed"],
+                "satisfied": precondition["satisfied"],
+                "missing": precondition["missing"],
+                "reason": precondition["reason"],
+            }
+        )
         item = {
             "skill_id": skill.skill_id,
             "name": skill.name,
             "category": skill.category,
+            "priority": skill.priority,
             "score": score,
-            "reasons": reasons,
+            "reasons": [*reasons, precondition["reason"]],
             "graph": skill.graph,
+            "precondition": skill.precondition,
+            "precondition_eval": precondition,
             "operation": skill.operation,
             "artifact": skill.artifact,
             "validators": skill.validators,
         }
-        if score > 0:
+        if score > 0 and precondition["passed"]:
             selected.append(item)
             selected_ids.add(skill.skill_id)
         else:
             skipped.append(item)
 
-    for edge in scoped_edges:
-        if edge["edge_type"] != "dependency":
-            continue
-        if edge["to_skill_id"] in selected_ids and edge["from_skill_id"] not in selected_ids:
-            dependency = next(
-                (skill for skill in skills if skill.skill_id == edge["from_skill_id"]),
-                None,
-            )
-            if dependency is None:
-                continue
-            selected.append(
-                {
-                    "skill_id": dependency.skill_id,
-                    "name": dependency.name,
-                    "category": dependency.category,
-                    "score": 0.5,
-                    "reasons": [f"dependency_for:{edge['to_skill_id']}"],
-                    "graph": dependency.graph,
-                    "operation": dependency.operation,
-                    "artifact": dependency.artifact,
-                    "validators": dependency.validators,
-                }
-            )
-            selected_ids.add(dependency.skill_id)
+    selected, skipped, edge_decisions = execute_skill_edges(
+        selected=selected,
+        skipped=skipped,
+        edges=scoped_edges,
+        skill_by_id=skill_by_id,
+        state=state,
+    )
 
     selected.sort(key=lambda item: (float(item["score"]) * -1, str(item["skill_id"])))
     selected = _dedupe_plan(selected)
@@ -536,9 +539,284 @@ def plan_skill_graphs(
         "selected_skills": selected,
         "skipped_skills": skipped,
         "skill_edges": scoped_edges,
+        "precondition_decisions": precondition_decisions,
+        "edge_decisions": edge_decisions,
         "excluded_skills": sorted(EXCLUDED_SKILL_IDS),
         "scope": scope or "global",
     }
+
+
+def evaluate_skill_precondition(
+    skill: PatternSkill, state: dict[str, Any]
+) -> dict[str, Any]:
+    """Evaluate a skill precondition against the current SharedState snapshot."""
+
+    required = [
+        str(item)
+        for item in skill.precondition.get("requires", [])
+        if str(item).strip()
+    ]
+    satisfied: list[str] = []
+    missing: list[str] = []
+    for requirement in required:
+        if _requirement_satisfied(requirement, state):
+            satisfied.append(requirement)
+        else:
+            missing.append(requirement)
+    passed = not missing
+    return {
+        "passed": passed,
+        "satisfied": satisfied,
+        "missing": missing,
+        "reason": (
+            "precondition_passed"
+            if passed
+            else f"precondition_missing:{','.join(missing)}"
+        ),
+    }
+
+
+def execute_skill_edges(
+    *,
+    selected: list[dict[str, Any]],
+    skipped: list[dict[str, Any]],
+    edges: list[dict[str, Any]],
+    skill_by_id: dict[str, PatternSkill],
+    state: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Apply graph-of-graphs edge semantics to the selected skill set."""
+
+    selected_by_id = {str(item.get("skill_id")): item for item in selected}
+    skipped_by_id = {str(item.get("skill_id")): item for item in skipped}
+    decisions: list[dict[str, Any]] = []
+
+    for edge in edges:
+        edge_type = str(edge.get("edge_type", ""))
+        from_skill_id = str(edge.get("from_skill_id", ""))
+        to_skill_id = str(edge.get("to_skill_id", ""))
+        from_selected = from_skill_id in selected_by_id
+        to_selected = to_skill_id in selected_by_id
+        action = "observed"
+        reason = f"{edge_type}:{from_skill_id}->{to_skill_id}"
+
+        if edge_type == "dependency" and to_selected and not from_selected:
+            dependency = skill_by_id.get(from_skill_id)
+            if dependency is not None:
+                selected_by_id[from_skill_id] = _edge_selected_item(
+                    dependency,
+                    score=0.5,
+                    reasons=[f"dependency_for:{to_skill_id}"],
+                    state=state,
+                )
+                skipped_by_id.pop(from_skill_id, None)
+                action = "selected_upstream_dependency"
+        elif edge_type == "dependency" and from_selected and not to_selected:
+            target = skill_by_id.get(to_skill_id)
+            if target is not None and _edge_can_satisfy_target(
+                source=skill_by_id.get(from_skill_id),
+                target=target,
+            ):
+                selected_by_id[to_skill_id] = _edge_selected_item(
+                    target,
+                    score=0.5,
+                    reasons=[f"dependency_after:{from_skill_id}"],
+                    state=state,
+                )
+                skipped_by_id.pop(to_skill_id, None)
+                action = "selected_downstream_dependency"
+        elif edge_type == "guard" and from_selected and to_selected:
+            selected_by_id[to_skill_id]["reasons"] = [
+                *selected_by_id[to_skill_id].get("reasons", []),
+                f"guard_checked:{from_skill_id}",
+            ]
+            action = "guard_checked"
+        elif edge_type == "alternative" and from_selected:
+            action = "alternative_available" if to_selected else "alternative_not_ready"
+        elif edge_type == "approval_required":
+            action = "approval_required"
+        elif edge_type == "adapter":
+            action = "adapter_available" if from_selected or to_selected else "observed"
+
+        decisions.append(
+            {
+                "edge_id": edge.get("edge_id"),
+                "from_skill_id": from_skill_id,
+                "to_skill_id": to_skill_id,
+                "edge_type": edge_type,
+                "action": action,
+                "reason": reason,
+            }
+        )
+
+    return list(selected_by_id.values()), list(skipped_by_id.values()), decisions
+
+
+def _edge_selected_item(
+    skill: PatternSkill,
+    *,
+    score: float,
+    reasons: list[str],
+    state: dict[str, Any],
+) -> dict[str, Any]:
+    precondition = evaluate_skill_precondition(skill, state)
+    return {
+        "skill_id": skill.skill_id,
+        "name": skill.name,
+        "category": skill.category,
+        "priority": skill.priority,
+        "score": score,
+        "reasons": [*reasons, precondition["reason"]],
+        "graph": skill.graph,
+        "precondition": skill.precondition,
+        "precondition_eval": precondition,
+        "operation": skill.operation,
+        "artifact": skill.artifact,
+        "validators": skill.validators,
+    }
+
+
+def _edge_can_satisfy_target(
+    *, source: PatternSkill | None, target: PatternSkill
+) -> bool:
+    if source is None:
+        return False
+    produced = set(target.artifact.get("produces", []))
+    produced.update(source.artifact.get("produces", []))
+    required = set(target.precondition.get("requires", []))
+    return any(_artifact_matches_requirement(artifact, requirement) for artifact in produced for requirement in required)
+
+
+def _artifact_matches_requirement(artifact: str, requirement: str) -> bool:
+    direct_matches = {
+        "service_scope": {"service_scope"},
+        "raw_log_message": {"normalized_logs", "raw_log_message"},
+        "normalized_message": {"normalized_message", "message_template"},
+        "fingerprint_or_template": {
+            "fingerprint",
+            "normalized_message",
+            "message_template",
+        },
+        "fingerprint_groups": {"fingerprint", "occurrence_count"},
+        "approved_duplicate_candidate": {"canonical_fingerprint"},
+        "fingerprint_time_series": {
+            "fingerprint",
+            "occurrence_count",
+            "anomaly_daily_counts",
+        },
+        "fingerprint_or_root_cause_hint": {
+            "fingerprint",
+            "known_pattern_matches",
+            "incident_candidates",
+        },
+        "pattern_context_query": {"similar_clusters", "related_knowledge", "anomalies"},
+        "analysis_evidence": {
+            "anomalies",
+            "known_pattern_matches",
+            "pattern_ops_matches",
+            "recommendation_candidate",
+        },
+        "recommendation_candidate": {
+            "recommendation_candidate",
+            "recommended_actions",
+            "verification_steps",
+        },
+        "fingerprint": {"fingerprint"},
+        "reason": {"reason"},
+        "sample_message": {"sample_message", "normalized_message"},
+        "approved_resolution": {"knowledge_card", "rag_document"},
+    }
+    return artifact in direct_matches.get(requirement, {requirement})
+
+
+def _requirement_satisfied(requirement: str, state: dict[str, Any]) -> bool:
+    evidence = state.get("evidence", {})
+    final = state.get("final", {}) or {}
+    scope = state.get("scope", {}) or {}
+
+    if requirement == "service_scope":
+        return bool(scope.get("systems"))
+    if requirement == "raw_log_message":
+        return bool(evidence.get("normalized_logs"))
+    if requirement == "normalized_message":
+        return any(
+            str(item.get("message_template") or item.get("message") or "").strip()
+            for item in evidence.get("normalized_logs", [])
+            if isinstance(item, dict)
+        )
+    if requirement == "fingerprint_or_template":
+        return any(
+            str(
+                item.get("fingerprint")
+                or item.get("message_template")
+                or item.get("message")
+                or ""
+            ).strip()
+            for item in evidence.get("normalized_logs", [])
+            if isinstance(item, dict)
+        ) or bool(evidence.get("pattern_ops_matches"))
+    if requirement == "fingerprint_groups":
+        return bool(
+            evidence.get("duplicate_pattern_candidates")
+            or evidence.get("clusters")
+            or any(
+                item.get("fingerprint")
+                for item in evidence.get("normalized_logs", [])
+                if isinstance(item, dict)
+            )
+        )
+    if requirement == "approved_duplicate_candidate":
+        return any(
+            str(item.get("status", "pending")) == "approved"
+            for item in evidence.get("duplicate_pattern_candidates", [])
+            if isinstance(item, dict)
+        )
+    if requirement == "fingerprint_time_series":
+        return bool(
+            evidence.get("anomaly_daily_counts")
+            or evidence.get("clusters")
+            or evidence.get("normalized_logs")
+        )
+    if requirement == "fingerprint_or_root_cause_hint":
+        return bool(
+            evidence.get("known_pattern_matches")
+            or evidence.get("incident_candidates")
+            or scope.get("filters", {}).get("fingerprint")
+        )
+    if requirement == "pattern_context_query":
+        return bool(
+            evidence.get("clusters")
+            or evidence.get("anomalies")
+            or evidence.get("normalized_logs")
+        )
+    if requirement == "analysis_evidence":
+        return bool(
+            evidence.get("anomalies")
+            or evidence.get("known_pattern_matches")
+            or evidence.get("pattern_ops_matches")
+            or evidence.get("incident_candidates")
+        )
+    if requirement == "recommendation_candidate":
+        return bool(
+            evidence.get("recommendation_candidate")
+            or final.get("recommended_actions")
+        )
+    if requirement == "fingerprint":
+        return bool(
+            scope.get("filters", {}).get("fingerprint")
+            or evidence.get("suppressed_logs")
+            or any(
+                item.get("fingerprint")
+                for item in evidence.get("normalized_logs", [])
+                if isinstance(item, dict)
+            )
+        )
+    if requirement == "reason":
+        return bool(evidence.get("suppressed_logs") or evidence.get("recommendation"))
+    if requirement == "sample_message":
+        return bool(evidence.get("new_pattern_candidates") or evidence.get("normalized_logs"))
+    if requirement == "approved_resolution":
+        return bool(final.get("generated_answer"))
+    return bool(evidence.get(requirement) or final.get(requirement))
 
 
 def record_skill_executions(
@@ -648,8 +926,12 @@ def _score_skill(
     ):
         score = 0.76
         reasons.append("analysis_evidence_available")
-    elif skill_id == "recommendation_quality_gate" and state.get("final", {}).get(
-        "recommended_actions"
+    elif skill_id == "recommendation_quality_gate" and (
+        state.get("final", {}).get("recommended_actions")
+        or evidence.get("recommendation_candidate")
+        or evidence.get("anomalies")
+        or evidence.get("known_pattern_matches")
+        or evidence.get("pattern_ops_matches")
     ):
         score = 0.7
         reasons.append("recommendation_candidate_available")

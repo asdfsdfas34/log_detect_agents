@@ -232,12 +232,38 @@ export interface PatternOpsSkillExecution {
   output_refs?: string[]
 }
 
+export interface PatternOpsPreconditionDecision {
+  skill_id: string
+  passed: boolean
+  satisfied: string[]
+  missing: string[]
+  reason: string
+}
+
+export interface PatternOpsEdgeDecision {
+  edge_id?: string
+  from_skill_id: string
+  to_skill_id: string
+  edge_type: string
+  action: string
+  reason: string
+}
+
+export interface PatternOpsValidatorResult {
+  skill_id: string
+  validator_type: string
+  passed: boolean
+  message: string
+}
+
 export interface PatternOpsSkillPlanItem {
   skill_id: string
   name: string
   category: string
   score: number
   reasons: string[]
+  precondition?: Record<string, unknown>
+  precondition_eval?: Record<string, unknown>
   graph?: Record<string, unknown>
   operation?: Record<string, unknown>
   artifact?: Record<string, unknown>
@@ -250,6 +276,8 @@ export interface PatternOpsSkillScopedPlan {
   selected_skills?: PatternOpsSkillPlanItem[]
   skipped_skills?: PatternOpsSkillPlanItem[]
   skill_edges?: PatternOpsSkillEdge[]
+  precondition_decisions?: PatternOpsPreconditionDecision[]
+  edge_decisions?: PatternOpsEdgeDecision[]
   excluded_skills?: string[]
 }
 
@@ -258,7 +286,10 @@ export interface PatternOpsSkillPlan {
   selected_skills?: PatternOpsSkillPlanItem[]
   skipped_skills?: PatternOpsSkillPlanItem[]
   skill_edges?: PatternOpsSkillEdge[]
+  precondition_decisions?: PatternOpsPreconditionDecision[]
+  edge_decisions?: PatternOpsEdgeDecision[]
   excluded_skills?: string[]
+  global_plan?: PatternOpsSkillScopedPlan
   scoped_plans?: Record<string, PatternOpsSkillScopedPlan>
 }
 
@@ -471,6 +502,7 @@ export interface SharedState {
     pattern_ops_skill_graphs?: PatternOpsSkill[]
     pattern_ops_skill_plan?: PatternOpsSkillPlan
     pattern_ops_skill_executions?: PatternOpsSkillExecution[]
+    pattern_ops_validator_results?: PatternOpsValidatorResult[]
     fingerprint_merge_groups?: FingerprintMergeGroup[]
     event_time_windows?: EventTimeWindow[]
     system_state_vectors?: SystemStateVector[]
@@ -519,6 +551,7 @@ export interface SharedState {
       system_state_vectors?: SystemStateVector[]
       pattern_ops_skill_plan?: PatternOpsSkillPlan
       pattern_ops_skill_executions?: PatternOpsSkillExecution[]
+      pattern_ops_validator_results?: PatternOpsValidatorResult[]
       pattern_ops_contracts?: PatternOpsContract[]
       pattern_ops_matches?: Array<Record<string, unknown>>
     } | null

@@ -10,6 +10,7 @@ from app.patternops.skill_graph import (
     plan_skill_graphs,
     record_skill_executions,
 )
+from app.patternops.validators import validate_skill_result
 from app.state import SharedState
 
 
@@ -32,7 +33,11 @@ class PatternSkillRunner:
         plan = plan_skill_graphs(state, scope=scope)
         operations = operations or {}
         executions: list[dict[str, Any]] = []
-        for item in plan.get("selected_skills", []):
+        selected_skills = sorted(
+            plan.get("selected_skills", []),
+            key=lambda item: (int(item.get("priority", 100)), str(item.get("skill_id", ""))),
+        )
+        for item in selected_skills:
             skill_id = str(item.get("skill_id", ""))
             operation = operations.get(skill_id)
             if operation is None:
@@ -42,6 +47,34 @@ class PatternSkillRunner:
                 try:
                     result_state = operation(state)
                     status = "success"
+                    validator_results = validate_skill_result(
+                        skill_id=skill_id,
+                        state=result_state,
+                        validators=item.get("validators", []),
+                    )
+                    result_state["evidence"]["pattern_ops_validator_results"] = [
+                        *result_state["evidence"].get(
+                            "pattern_ops_validator_results", []
+                        ),
+                        *validator_results,
+                    ]
+                    failed_validators = [
+                        result for result in validator_results if not result["passed"]
+                    ]
+                    if failed_validators:
+                        status = "failed"
+                        for failed in failed_validators:
+                            result_state["decisions"]["failures"].append(
+                                {
+                                    "node": agent_name,
+                                    "skill_id": skill_id,
+                                    "error": (
+                                        f"Validator {failed['validator_type']} failed: "
+                                        f"{failed['message']}"
+                                    ),
+                                    "retry_count": 0,
+                                }
+                            )
                 except Exception as exc:
                     result_state = state
                     status = "failed"
@@ -98,6 +131,7 @@ class PatternSkillRunner:
             "lifecycle": skill.lifecycle,
             "priority": skill.priority,
             "graph": skill.graph,
+            "precondition": skill.precondition,
             "operation": skill.operation,
             "artifact": skill.artifact,
             "validators": skill.validators,
@@ -124,6 +158,16 @@ class PatternSkillRunner:
                 "scope": "agent_scoped",
                 "scoped_plans": scoped,
                 "selected_skills": list(selected.values()),
+                "edge_decisions": [
+                    decision
+                    for scoped_plan in scoped.values()
+                    for decision in scoped_plan.get("edge_decisions", [])
+                ],
+                "precondition_decisions": [
+                    decision
+                    for scoped_plan in scoped.values()
+                    for decision in scoped_plan.get("precondition_decisions", [])
+                ],
                 "excluded_skills": sorted(
                     {
                         item
