@@ -27,6 +27,9 @@ class Evidence(TypedDict):
     fingerprint_merge_groups: list[dict]
     event_time_windows: list[dict]
     system_state_vectors: list[dict]
+    trajectories: list[dict]
+    trajectory_clusters: list[dict]
+    nearest_trajectory_patterns: list[dict]
     anomalies: list[dict]
     anomaly_daily_counts: list[dict]
     clusters: list[dict]
@@ -118,6 +121,9 @@ def create_initial_state(
             "fingerprint_merge_groups": [],
             "event_time_windows": [],
             "system_state_vectors": [],
+            "trajectories": [],
+            "trajectory_clusters": [],
+            "nearest_trajectory_patterns": [],
             "anomalies": [],
             "anomaly_daily_counts": [],
             "clusters": [],

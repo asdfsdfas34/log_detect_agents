@@ -117,6 +117,18 @@ HDBSCAN_MIN_CLUSTER_SIZE = 3
 HDBSCAN_MIN_SAMPLES = 2
 HDBSCAN_MAX_DISTANCE = 1.0 - PATTERN_DUPLICATE_SIMILARITY_THRESHOLD
 RECURRENCE_MIN_SILENCE_DAYS = 7
+SEMANTIC_CLUSTER_MIN_CLUSTER_SIZE = 3
+SEMANTIC_CLUSTER_MIN_SAMPLES = 2
+SEMANTIC_CLUSTER_UMAP_NEIGHBORS = 8
+SEMANTIC_CLUSTER_UMAP_COMPONENTS = 3
+TIME_WINDOW_RECENT_RECALC_LIMIT = 200
+TIME_WINDOW_RETURN_LIMIT = 24
+TRAJECTORY_FIXED_WINDOW_LENGTH = 6
+TRAJECTORY_RETURN_LIMIT = 12
+TRAJECTORY_CLUSTER_RETURN_LIMIT = 8
+TRAJECTORY_NEAREST_RETURN_LIMIT = 3
+TRAJECTORY_CLUSTER_MIN_SIZE = 3
+TRAJECTORY_CLUSTER_MIN_SAMPLES = 2
 
 
 @lru_cache(maxsize=1)
@@ -620,6 +632,41 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(scope_key, bucket_start, bucket_size, feature_schema_version)
         );
+        CREATE TABLE IF NOT EXISTS trajectories (
+            trajectory_id TEXT PRIMARY KEY,
+            service_name TEXT NOT NULL,
+            bucket_size TEXT NOT NULL,
+            window_length INTEGER NOT NULL,
+            start_bucket TEXT NOT NULL,
+            end_bucket TEXT NOT NULL,
+            vector_ids_json TEXT NOT NULL,
+            top_fingerprints_json TEXT NOT NULL DEFAULT '[]',
+            features_json TEXT NOT NULL DEFAULT '{}',
+            flat_vector_json TEXT NOT NULL DEFAULT '[]',
+            label TEXT NOT NULL DEFAULT '',
+            max_risk_score INTEGER NOT NULL DEFAULT 0,
+            anomaly_count INTEGER NOT NULL DEFAULT 0,
+            total_events INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(service_name, bucket_size, window_length, start_bucket, end_bucket)
+        );
+        CREATE TABLE IF NOT EXISTS trajectory_clusters (
+            cluster_id TEXT PRIMARY KEY,
+            service_name TEXT NOT NULL,
+            bucket_size TEXT NOT NULL,
+            algorithm TEXT NOT NULL,
+            representative_trajectory_id TEXT NOT NULL,
+            member_trajectory_ids_json TEXT NOT NULL,
+            top_fingerprints_json TEXT NOT NULL DEFAULT '[]',
+            label TEXT NOT NULL DEFAULT '',
+            member_count INTEGER NOT NULL DEFAULT 0,
+            max_risk_score INTEGER NOT NULL DEFAULT 0,
+            anomaly_count INTEGER NOT NULL DEFAULT 0,
+            avg_distance REAL NOT NULL DEFAULT 0,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
         CREATE INDEX IF NOT EXISTS idx_ptsm_service_bucket
             ON pattern_time_series_metrics(service_name, bucket_size, bucket_start);
         CREATE INDEX IF NOT EXISTS idx_ptsm_window_top
@@ -630,6 +677,10 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             ON event_time_windows(service_name, bucket_size, bucket_start DESC);
         CREATE INDEX IF NOT EXISTS idx_state_vectors_service_bucket
             ON system_state_vectors(service_name, bucket_size, bucket_start DESC);
+        CREATE INDEX IF NOT EXISTS idx_trajectories_service_bucket
+            ON trajectories(service_name, bucket_size, end_bucket DESC);
+        CREATE INDEX IF NOT EXISTS idx_trajectory_clusters_service_bucket
+            ON trajectory_clusters(service_name, bucket_size, member_count DESC);
         """)
 
     for column, definition in {
@@ -3279,6 +3330,616 @@ def _fetch_system_state_vectors(
     ]
 
 
+def _trajectory_id(
+    service_name: str,
+    bucket_size: str,
+    window_length: int,
+    start_bucket: str,
+    end_bucket: str,
+) -> str:
+    raw = f"{service_name}|{bucket_size}|{window_length}|{start_bucket}|{end_bucket}"
+    return "TRJ-" + hashlib.sha1(raw.encode("utf-8")).hexdigest()[:14].upper()
+
+
+def _trajectory_cluster_id(
+    service_name: str, bucket_size: str, member_ids: list[str]
+) -> str:
+    raw = f"{service_name}|{bucket_size}|{'|'.join(sorted(member_ids))}"
+    return "TC-" + hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12].upper()
+
+
+def _trajectory_step_vector(features: dict[str, Any]) -> list[float]:
+    return [
+        math.log1p(float(features.get("total_events") or 0)),
+        float(features.get("error_ratio") or 0),
+        float(features.get("warn_ratio") or 0),
+        math.log1p(float(features.get("unique_fingerprint_count") or 0)),
+        float(features.get("unique_fingerprint_ratio") or 0),
+        float(features.get("new_fingerprint_ratio") or 0),
+        math.log1p(float(features.get("anomaly_count") or 0)),
+        float(features.get("max_risk_score") or 0) / 100.0,
+    ]
+
+
+def _trajectory_distance(left: list[float], right: list[float]) -> float:
+    if not left or not right or len(left) != len(right):
+        return 1.0
+    total = sum((float(a) - float(b)) ** 2 for a, b in zip(left, right, strict=False))
+    return math.sqrt(total / max(1, len(left)))
+
+
+def _fetch_state_vectors_for_trajectories(
+    conn: sqlite3.Connection, *, service_name: str | None
+) -> list[dict[str, Any]]:
+    params: list[Any] = []
+    where = ""
+    if service_name:
+        where = "WHERE service_name=?"
+        params.append(service_name)
+    rows = conn.execute(
+        f"""
+        SELECT
+            vector_id, scope_key, service_name, bucket_start, bucket_size,
+            feature_schema_version, features_json, vector_json, label, incident_id
+        FROM system_state_vectors
+        {where}
+        ORDER BY service_name ASC, bucket_size ASC, bucket_start ASC
+        """,
+        params,
+    ).fetchall()
+    return [
+        {
+            "vector_id": str(row[0]),
+            "scope_key": str(row[1]),
+            "service_name": str(row[2]),
+            "bucket_start": str(row[3]),
+            "bucket_size": str(row[4]),
+            "feature_schema_version": str(row[5]),
+            "features": _load_json_dict(str(row[6] or "{}")),
+            "vector": [
+                float(item)
+                for item in _load_json_list(str(row[7] or "[]"))
+                if isinstance(item, (int, float))
+            ],
+            "label": str(row[8]),
+            "incident_id": str(row[9] or ""),
+        }
+        for row in rows
+    ]
+
+
+def _event_window_lookup(
+    conn: sqlite3.Connection, *, service_name: str | None
+) -> dict[tuple[str, str, str], dict[str, Any]]:
+    params: list[Any] = []
+    where = ""
+    if service_name:
+        where = "WHERE service_name=?"
+        params.append(service_name)
+    rows = conn.execute(
+        f"""
+        SELECT service_name, bucket_start, bucket_size, top_fingerprints_json
+        FROM event_time_windows
+        {where}
+        """,
+        params,
+    ).fetchall()
+    return {
+        (str(row[0]), str(row[1]), str(row[2])): {
+            "top_fingerprints": [
+                item
+                for item in _load_json_list(str(row[3] or "[]"))
+                if isinstance(item, dict)
+            ]
+        }
+        for row in rows
+    }
+
+
+def _trajectory_top_fingerprints(
+    items: list[dict[str, Any]],
+    windows: dict[tuple[str, str, str], dict[str, Any]],
+) -> list[dict[str, Any]]:
+    counts: dict[str, int] = {}
+    for item in items:
+        key = (
+            str(item.get("service_name") or ""),
+            str(item.get("bucket_start") or ""),
+            str(item.get("bucket_size") or ""),
+        )
+        for fp_item in windows.get(key, {}).get("top_fingerprints", []):
+            fingerprint = str(fp_item.get("fingerprint") or "")
+            if not fingerprint:
+                continue
+            counts[fingerprint] = counts.get(fingerprint, 0) + int(
+                fp_item.get("count") or 0
+            )
+    return [
+        {"fingerprint": fingerprint, "count": count}
+        for fingerprint, count in sorted(
+            counts.items(), key=lambda pair: (-pair[1], pair[0])
+        )[:5]
+    ]
+
+
+def _trajectory_label(
+    top_fingerprints: list[dict[str, Any]], labels: list[str], risk_delta: int
+) -> str:
+    fingerprints = [
+        str(item.get("fingerprint") or "")
+        for item in top_fingerprints[:3]
+        if str(item.get("fingerprint") or "")
+    ]
+    if fingerprints:
+        suffix = "escalation" if risk_delta >= 10 else "trajectory"
+        return f"{' -> '.join(fingerprints)} {suffix}"
+    compact_labels = [label for label in labels if label and label != "normal"]
+    if compact_labels:
+        return f"{' -> '.join(compact_labels[:3])} trajectory"
+    return "normal trajectory"
+
+
+def _build_trajectory_record(
+    items: list[dict[str, Any]],
+    windows: dict[tuple[str, str, str], dict[str, Any]],
+) -> dict[str, Any]:
+    service_name = str(items[0].get("service_name") or "")
+    bucket_size = str(items[0].get("bucket_size") or "")
+    start_bucket = str(items[0].get("bucket_start") or "")
+    end_bucket = str(items[-1].get("bucket_start") or "")
+    features_by_step = [
+        _load_json_dict(_json_dict(item.get("features", {}))) for item in items
+    ]
+    risks = [int(features.get("max_risk_score") or 0) for features in features_by_step]
+    labels = [str(item.get("label") or "normal") for item in items]
+    flat_vector = [
+        value
+        for features in features_by_step
+        for value in _trajectory_step_vector(features)
+    ]
+    top_fingerprints = _trajectory_top_fingerprints(items, windows)
+    risk_delta = (risks[-1] if risks else 0) - (risks[0] if risks else 0)
+    total_events = sum(int(features.get("total_events") or 0) for features in features_by_step)
+    anomaly_count = sum(int(features.get("anomaly_count") or 0) for features in features_by_step)
+    max_risk_score = max(risks, default=0)
+    window_length = len(items)
+    return {
+        "trajectory_id": _trajectory_id(
+            service_name, bucket_size, window_length, start_bucket, end_bucket
+        ),
+        "service_name": service_name,
+        "bucket_size": bucket_size,
+        "window_length": window_length,
+        "start_bucket": start_bucket,
+        "end_bucket": end_bucket,
+        "vector_ids": [str(item.get("vector_id") or "") for item in items],
+        "top_fingerprints": top_fingerprints,
+        "features": {
+            "start_label": labels[0] if labels else "normal",
+            "end_label": labels[-1] if labels else "normal",
+            "risk_delta": risk_delta,
+            "total_events": total_events,
+            "anomaly_count": anomaly_count,
+            "max_risk_score": max_risk_score,
+        },
+        "flat_vector": flat_vector,
+        "label": _trajectory_label(top_fingerprints, labels, risk_delta),
+        "max_risk_score": max_risk_score,
+        "anomaly_count": anomaly_count,
+        "total_events": total_events,
+    }
+
+
+def _upsert_trajectories(
+    conn: sqlite3.Connection, *, service_name: str | None
+) -> list[dict[str, Any]]:
+    if service_name:
+        conn.execute("DELETE FROM trajectories WHERE service_name=?", (service_name,))
+    else:
+        conn.execute("DELETE FROM trajectories")
+
+    vectors = _fetch_state_vectors_for_trajectories(conn, service_name=service_name)
+    if not vectors:
+        return []
+    windows = _event_window_lookup(conn, service_name=service_name)
+    buckets: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for vector in vectors:
+        key = (str(vector.get("service_name") or ""), str(vector.get("bucket_size") or ""))
+        buckets.setdefault(key, []).append(vector)
+
+    trajectories: list[dict[str, Any]] = []
+    for items in buckets.values():
+        if not items:
+            continue
+        window_length = min(TRAJECTORY_FIXED_WINDOW_LENGTH, len(items))
+        if window_length <= 0:
+            continue
+        for index in range(0, len(items) - window_length + 1):
+            trajectories.append(
+                _build_trajectory_record(items[index : index + window_length], windows)
+            )
+
+    conn.executemany(
+        """
+        INSERT INTO trajectories(
+            trajectory_id, service_name, bucket_size, window_length,
+            start_bucket, end_bucket, vector_ids_json, top_fingerprints_json,
+            features_json, flat_vector_json, label, max_risk_score,
+            anomaly_count, total_events, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(service_name, bucket_size, window_length, start_bucket, end_bucket)
+        DO UPDATE SET
+            vector_ids_json=excluded.vector_ids_json,
+            top_fingerprints_json=excluded.top_fingerprints_json,
+            features_json=excluded.features_json,
+            flat_vector_json=excluded.flat_vector_json,
+            label=excluded.label,
+            max_risk_score=excluded.max_risk_score,
+            anomaly_count=excluded.anomaly_count,
+            total_events=excluded.total_events,
+            updated_at=CURRENT_TIMESTAMP
+        """,
+        [
+            (
+                item["trajectory_id"],
+                item["service_name"],
+                item["bucket_size"],
+                item["window_length"],
+                item["start_bucket"],
+                item["end_bucket"],
+                _json_list(item["vector_ids"]),
+                _json_list(item["top_fingerprints"]),
+                _json_dict(item["features"]),
+                _json_list(item["flat_vector"]),
+                item["label"],
+                item["max_risk_score"],
+                item["anomaly_count"],
+                item["total_events"],
+            )
+            for item in trajectories
+        ],
+    )
+    return trajectories
+
+
+def _fetch_trajectories(
+    conn: sqlite3.Connection,
+    *,
+    service_name: str | None,
+    limit: int = TRAJECTORY_RETURN_LIMIT,
+) -> list[dict[str, Any]]:
+    params: list[Any] = []
+    where = ""
+    if service_name:
+        where = "WHERE service_name=?"
+        params.append(service_name)
+    params.append(limit)
+    rows = conn.execute(
+        f"""
+        SELECT
+            trajectory_id, service_name, bucket_size, window_length,
+            start_bucket, end_bucket, vector_ids_json, top_fingerprints_json,
+            features_json, flat_vector_json, label, max_risk_score,
+            anomaly_count, total_events
+        FROM trajectories
+        {where}
+        ORDER BY end_bucket DESC, bucket_size DESC
+        LIMIT ?
+        """,
+        params,
+    ).fetchall()
+    return [
+        {
+            "trajectory_id": str(row[0]),
+            "service_name": str(row[1]),
+            "bucket_size": str(row[2]),
+            "window_length": int(row[3] or 0),
+            "start_bucket": str(row[4]),
+            "end_bucket": str(row[5]),
+            "vector_ids": [str(item) for item in _load_json_list(str(row[6] or "[]"))],
+            "top_fingerprints": [
+                item
+                for item in _load_json_list(str(row[7] or "[]"))
+                if isinstance(item, dict)
+            ],
+            "features": _load_json_dict(str(row[8] or "{}")),
+            "flat_vector": [
+                float(item)
+                for item in _load_json_list(str(row[9] or "[]"))
+                if isinstance(item, (int, float))
+            ],
+            "label": str(row[10] or ""),
+            "max_risk_score": int(row[11] or 0),
+            "anomaly_count": int(row[12] or 0),
+            "total_events": int(row[13] or 0),
+        }
+        for row in rows
+    ]
+
+
+def _hdbscan_trajectory_labels(vectors: list[list[float]]) -> list[int]:
+    if len(vectors) < TRAJECTORY_CLUSTER_MIN_SIZE:
+        return []
+    try:
+        numpy = importlib.import_module("numpy")
+        hdbscan = importlib.import_module("hdbscan")
+        clusterer = hdbscan.HDBSCAN(
+            metric="euclidean",
+            min_cluster_size=TRAJECTORY_CLUSTER_MIN_SIZE,
+            min_samples=TRAJECTORY_CLUSTER_MIN_SAMPLES,
+            cluster_selection_method="eom",
+        )
+        labels = clusterer.fit_predict(numpy.array(vectors))
+    except Exception:  # noqa: BLE001
+        return []
+    return [int(label) for label in labels]
+
+
+def _fallback_trajectory_groups(
+    trajectories: list[dict[str, Any]]
+) -> list[list[dict[str, Any]]]:
+    buckets: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    for item in trajectories:
+        top = [
+            str(fp_item.get("fingerprint") or "")
+            for fp_item in item.get("top_fingerprints", [])[:2]
+            if str(fp_item.get("fingerprint") or "")
+        ]
+        key = (
+            str(item.get("service_name") or ""),
+            str(item.get("bucket_size") or ""),
+            " -> ".join(top) or str(item.get("label") or "normal"),
+        )
+        buckets.setdefault(key, []).append(item)
+    return [
+        group
+        for group in buckets.values()
+        if len(group) >= 2 or any(int(item.get("max_risk_score") or 0) >= 70 for item in group)
+    ]
+
+
+def _representative_trajectory(items: list[dict[str, Any]]) -> dict[str, Any]:
+    return max(
+        items,
+        key=lambda item: (
+            int(item.get("max_risk_score") or 0),
+            int(item.get("anomaly_count") or 0),
+            int(item.get("total_events") or 0),
+            str(item.get("end_bucket") or ""),
+        ),
+    )
+
+
+def _cluster_top_fingerprints(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    counts: dict[str, int] = {}
+    for item in items:
+        for fp_item in item.get("top_fingerprints", []):
+            fingerprint = str(fp_item.get("fingerprint") or "")
+            if not fingerprint:
+                continue
+            counts[fingerprint] = counts.get(fingerprint, 0) + int(
+                fp_item.get("count") or 0
+            )
+    return [
+        {"fingerprint": fingerprint, "count": count}
+        for fingerprint, count in sorted(
+            counts.items(), key=lambda pair: (-pair[1], pair[0])
+        )[:5]
+    ]
+
+
+def _trajectory_cluster_record(
+    *,
+    items: list[dict[str, Any]],
+    algorithm: str,
+) -> dict[str, Any]:
+    representative = _representative_trajectory(items)
+    member_ids = [str(item.get("trajectory_id") or "") for item in items]
+    rep_vector = [
+        float(item)
+        for item in representative.get("flat_vector", [])
+        if isinstance(item, (int, float))
+    ]
+    distances = [
+        _trajectory_distance(rep_vector, item.get("flat_vector", []))
+        for item in items
+        if item.get("trajectory_id") != representative.get("trajectory_id")
+    ]
+    top_fingerprints = _cluster_top_fingerprints(items)
+    label = _trajectory_label(
+        top_fingerprints,
+        [str(item.get("label") or "") for item in items],
+        max(int(item.get("features", {}).get("risk_delta") or 0) for item in items),
+    )
+    return {
+        "cluster_id": _trajectory_cluster_id(
+            str(representative.get("service_name") or ""),
+            str(representative.get("bucket_size") or ""),
+            member_ids,
+        ),
+        "service_name": str(representative.get("service_name") or ""),
+        "bucket_size": str(representative.get("bucket_size") or ""),
+        "algorithm": algorithm,
+        "representative_trajectory_id": str(representative.get("trajectory_id") or ""),
+        "member_trajectory_ids": member_ids,
+        "top_fingerprints": top_fingerprints,
+        "label": label,
+        "member_count": len(items),
+        "max_risk_score": max(int(item.get("max_risk_score") or 0) for item in items),
+        "anomaly_count": sum(int(item.get("anomaly_count") or 0) for item in items),
+        "avg_distance": round(sum(distances) / len(distances), 6) if distances else 0.0,
+    }
+
+
+def _upsert_trajectory_clusters(
+    conn: sqlite3.Connection, *, service_name: str | None
+) -> list[dict[str, Any]]:
+    if service_name:
+        conn.execute("DELETE FROM trajectory_clusters WHERE service_name=?", (service_name,))
+    else:
+        conn.execute("DELETE FROM trajectory_clusters")
+
+    trajectories = list(reversed(_fetch_trajectories(conn, service_name=service_name, limit=500)))
+    buckets: dict[tuple[str, str, int], list[dict[str, Any]]] = {}
+    for item in trajectories:
+        if not item.get("flat_vector"):
+            continue
+        key = (
+            str(item.get("service_name") or ""),
+            str(item.get("bucket_size") or ""),
+            int(item.get("window_length") or 0),
+        )
+        buckets.setdefault(key, []).append(item)
+
+    clusters: list[dict[str, Any]] = []
+    for items in buckets.values():
+        bucket_clusters: list[dict[str, Any]] = []
+        labels = _hdbscan_trajectory_labels(
+            [item.get("flat_vector", []) for item in items]
+        )
+        if labels and len(labels) == len(items):
+            by_label: dict[int, list[dict[str, Any]]] = {}
+            for label, item in zip(labels, items, strict=False):
+                if label < 0:
+                    continue
+                by_label.setdefault(label, []).append(item)
+            bucket_clusters.extend(
+                _trajectory_cluster_record(items=group, algorithm="fixed_window_hdbscan")
+                for group in by_label.values()
+                if len(group) >= 2
+            )
+        if not bucket_clusters:
+            bucket_clusters.extend(
+                _trajectory_cluster_record(
+                    items=group, algorithm="fixed_window_signature_fallback"
+                )
+                for group in _fallback_trajectory_groups(items)
+            )
+        clusters.extend(bucket_clusters)
+
+    conn.executemany(
+        """
+        INSERT INTO trajectory_clusters(
+            cluster_id, service_name, bucket_size, algorithm,
+            representative_trajectory_id, member_trajectory_ids_json,
+            top_fingerprints_json, label, member_count, max_risk_score,
+            anomaly_count, avg_distance, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(cluster_id) DO UPDATE SET
+            algorithm=excluded.algorithm,
+            representative_trajectory_id=excluded.representative_trajectory_id,
+            member_trajectory_ids_json=excluded.member_trajectory_ids_json,
+            top_fingerprints_json=excluded.top_fingerprints_json,
+            label=excluded.label,
+            member_count=excluded.member_count,
+            max_risk_score=excluded.max_risk_score,
+            anomaly_count=excluded.anomaly_count,
+            avg_distance=excluded.avg_distance,
+            updated_at=CURRENT_TIMESTAMP
+        """,
+        [
+            (
+                item["cluster_id"],
+                item["service_name"],
+                item["bucket_size"],
+                item["algorithm"],
+                item["representative_trajectory_id"],
+                _json_list(item["member_trajectory_ids"]),
+                _json_list(item["top_fingerprints"]),
+                item["label"],
+                item["member_count"],
+                item["max_risk_score"],
+                item["anomaly_count"],
+                item["avg_distance"],
+            )
+            for item in clusters
+        ],
+    )
+    return clusters
+
+
+def _fetch_trajectory_clusters(
+    conn: sqlite3.Connection,
+    *,
+    service_name: str | None,
+    limit: int = TRAJECTORY_CLUSTER_RETURN_LIMIT,
+) -> list[dict[str, Any]]:
+    params: list[Any] = []
+    where = ""
+    if service_name:
+        where = "WHERE service_name=?"
+        params.append(service_name)
+    params.append(limit)
+    rows = conn.execute(
+        f"""
+        SELECT
+            cluster_id, service_name, bucket_size, algorithm,
+            representative_trajectory_id, member_trajectory_ids_json,
+            top_fingerprints_json, label, member_count, max_risk_score,
+            anomaly_count, avg_distance
+        FROM trajectory_clusters
+        {where}
+        ORDER BY max_risk_score DESC, member_count DESC, cluster_id ASC
+        LIMIT ?
+        """,
+        params,
+    ).fetchall()
+    return [
+        {
+            "cluster_id": str(row[0]),
+            "service_name": str(row[1]),
+            "bucket_size": str(row[2]),
+            "algorithm": str(row[3]),
+            "representative_trajectory_id": str(row[4]),
+            "member_trajectory_ids": [
+                str(item) for item in _load_json_list(str(row[5] or "[]"))
+            ],
+            "top_fingerprints": [
+                item
+                for item in _load_json_list(str(row[6] or "[]"))
+                if isinstance(item, dict)
+            ],
+            "label": str(row[7] or ""),
+            "member_count": int(row[8] or 0),
+            "max_risk_score": int(row[9] or 0),
+            "anomaly_count": int(row[10] or 0),
+            "avg_distance": float(row[11] or 0),
+        }
+        for row in rows
+    ]
+
+
+def _nearest_trajectory_patterns(
+    trajectories: list[dict[str, Any]],
+    clusters: list[dict[str, Any]],
+    *,
+    limit: int = TRAJECTORY_NEAREST_RETURN_LIMIT,
+) -> list[dict[str, Any]]:
+    if not trajectories or not clusters:
+        return []
+    latest = max(trajectories, key=lambda item: str(item.get("end_bucket") or ""))
+    latest_vector = latest.get("flat_vector", [])
+    by_id = {str(item.get("trajectory_id") or ""): item for item in trajectories}
+    matches: list[dict[str, Any]] = []
+    for cluster in clusters:
+        representative = by_id.get(str(cluster.get("representative_trajectory_id") or ""))
+        if not representative:
+            continue
+        distance = _trajectory_distance(latest_vector, representative.get("flat_vector", []))
+        matches.append(
+            {
+                "trajectory_id": latest.get("trajectory_id"),
+                "cluster_id": cluster.get("cluster_id"),
+                "label": cluster.get("label"),
+                "similarity": round(max(0.0, 1.0 - distance), 6),
+                "distance": round(distance, 6),
+                "representative_trajectory_id": representative.get("trajectory_id"),
+                "top_fingerprints": cluster.get("top_fingerprints", []),
+            }
+        )
+    return sorted(matches, key=lambda item: item["similarity"], reverse=True)[:limit]
+
+
 def _upsert_anomaly_daily_count(
     conn: sqlite3.Connection,
     *,
@@ -3981,18 +4642,36 @@ def run_detection_pipeline(
             _upsert_system_state_vectors(
                 model_conn, windows=updated_event_time_windows
             )
+            _upsert_trajectories(model_conn, service_name=service_name)
+            _upsert_trajectory_clusters(model_conn, service_name=service_name)
             event_time_windows = _fetch_event_time_windows(
                 model_conn, service_name=service_name
             )
             system_state_vectors = _fetch_system_state_vectors(
                 model_conn, service_name=service_name
             )
+            all_trajectories = _fetch_trajectories(
+                model_conn, service_name=service_name, limit=500
+            )
+            trajectories = all_trajectories[:TRAJECTORY_RETURN_LIMIT]
+            trajectory_clusters = _fetch_trajectory_clusters(
+                model_conn, service_name=service_name
+            )
+            nearest_trajectory_patterns = _nearest_trajectory_patterns(
+                all_trajectories, trajectory_clusters
+            )
         else:
             event_time_windows = []
             system_state_vectors = []
+            trajectories = []
+            trajectory_clusters = []
+            nearest_trajectory_patterns = []
         model_conn.commit()
     latest_event_time_windows = event_time_windows
     latest_system_state_vectors = system_state_vectors
+    latest_trajectories = trajectories
+    latest_trajectory_clusters = trajectory_clusters
+    latest_nearest_trajectory_patterns = nearest_trajectory_patterns
     visible_impacts = [
         impact
         for impact in impacts
@@ -4052,6 +4731,9 @@ def run_detection_pipeline(
         "fingerprint_merge_groups": merge_groups,
         "event_time_windows": latest_event_time_windows,
         "system_state_vectors": latest_system_state_vectors,
+        "trajectories": latest_trajectories,
+        "trajectory_clusters": latest_trajectory_clusters,
+        "nearest_trajectory_patterns": latest_nearest_trajectory_patterns,
         "summary": {
             "total_logs": total_logs,
             "processed_new_logs": len(rows),
@@ -4059,6 +4741,8 @@ def run_detection_pipeline(
             "known_patterns": known_count,
             "new_patterns": new_count,
             "semantic_clusters": len(semantic_clusters),
+            "trajectories": len(latest_trajectories),
+            "trajectory_clusters": len(latest_trajectory_clusters),
             "anomalies_detected": len(anomalies),
             "exception_registered_count": exception_count,
             "exception_excluded_logs": exception_excluded_logs,

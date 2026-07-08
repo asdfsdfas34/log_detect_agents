@@ -1,10 +1,11 @@
+import logging
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 
 from app.db.sqlite_store import save_recommendation_result
 from app.langsmith_tracing import record_agent_event
-from app.main import app
+from app.main import app, configure_logging
 
 
 def test_health() -> None:
@@ -13,6 +14,23 @@ def test_health() -> None:
     assert response.status_code == 200
     payload = response.json()
     assert payload["status"] == "ok"
+
+
+def test_configure_logging_suppresses_noisy_dependency_logs(caplog) -> None:
+    configure_logging()
+    assert logging.getLogger("drain3.template_miner").getEffectiveLevel() >= logging.WARNING
+
+    chroma_logger = logging.getLogger(
+        "chromadb.segment.impl.vector.local_persistent_hnsw"
+    )
+    caplog.set_level(logging.WARNING, logger=chroma_logger.name)
+
+    chroma_logger.warning("Delete of nonexisting embedding ID: test_appl:FP-66DA46")
+    chroma_logger.warning("Other Chroma warning")
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert "Delete of nonexisting embedding ID: test_appl:FP-66DA46" not in messages
+    assert "Other Chroma warning" in messages
 
 
 def test_list_saved_recommendations(tmp_path: Path, monkeypatch) -> None:

@@ -77,7 +77,8 @@ function buildDefaultRequest(
     goal: `${serviceName} service log anomaly investigation`,
     save_to_chromadb: true,
     analysis_date: analysisDate || undefined,
-    include_similar_clusters: false
+    include_similar_clusters: false,
+    include_time_windows: true
   }
 }
 

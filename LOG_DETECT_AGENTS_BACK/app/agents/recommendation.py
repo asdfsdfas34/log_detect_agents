@@ -207,6 +207,11 @@ class RecommendationAgent:
             "anomalies": anomalies[:5],
             "clusters": state["evidence"].get("clusters", [])[:5],
             "semantic_clusters": state["evidence"].get("semantic_clusters", [])[:5],
+            "trajectories": state["evidence"].get("trajectories", [])[:5],
+            "trajectory_clusters": state["evidence"].get("trajectory_clusters", [])[:5],
+            "nearest_trajectory_patterns": state["evidence"].get(
+                "nearest_trajectory_patterns", []
+            )[:3],
             "stack_traces": state["evidence"].get("stack_traces", [])[:3],
             "normalized_logs": state["evidence"].get("normalized_logs", [])[:10],
             "incident_candidates": state["evidence"].get("incident_candidates", [])[:5],

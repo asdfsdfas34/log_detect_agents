@@ -54,6 +54,27 @@ from app.patternops.skill_graph import (
 from app.state import Scope, SharedState, create_initial_state
 
 
+class _SuppressMessagePrefixFilter(logging.Filter):
+    """Drop a known noisy dependency message while preserving other records."""
+
+    def __init__(self, message_prefix: str) -> None:
+        super().__init__()
+        self.message_prefix = message_prefix
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not record.getMessage().startswith(self.message_prefix)
+
+
+def _add_message_prefix_filter_once(logger: logging.Logger, message_prefix: str) -> None:
+    for existing_filter in logger.filters:
+        if (
+            isinstance(existing_filter, _SuppressMessagePrefixFilter)
+            and existing_filter.message_prefix == message_prefix
+        ):
+            return
+    logger.addFilter(_SuppressMessagePrefixFilter(message_prefix))
+
+
 def configure_logging() -> None:
     """Apply LOG_LEVEL to app loggers used by background analysis work."""
 
@@ -69,6 +90,11 @@ def configure_logging() -> None:
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     logging.getLogger("openai").setLevel(logging.WARNING)
+    logging.getLogger("drain3.template_miner").setLevel(logging.WARNING)
+    _add_message_prefix_filter_once(
+        logging.getLogger("chromadb.segment.impl.vector.local_persistent_hnsw"),
+        "Delete of nonexisting embedding ID:",
+    )
 
 
 configure_logging()
@@ -751,6 +777,9 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
             "anomalies": [],
             "anomaly_daily_counts": [],
             "semantic_clusters": [],
+            "trajectories": [],
+            "trajectory_clusters": [],
+            "nearest_trajectory_patterns": [],
             "summary": {},
             "recommendation": {},
             "recommendations": [],
@@ -773,6 +802,13 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
         "system_state_vectors", []
     )
     result["evidence"]["semantic_clusters"] = scenario.get("semantic_clusters", [])
+    result["evidence"]["trajectories"] = scenario.get("trajectories", [])
+    result["evidence"]["trajectory_clusters"] = scenario.get(
+        "trajectory_clusters", []
+    )
+    result["evidence"]["nearest_trajectory_patterns"] = scenario.get(
+        "nearest_trajectory_patterns", []
+    )
     if scenario["fingerprints"]:
         result["evidence"]["pattern_ops_matches"] = _patternops_matches_from_fingerprints(
             service_name=req.service_name,
@@ -867,6 +903,11 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
             "event_time_windows": scenario.get("event_time_windows", []),
             "system_state_vectors": scenario.get("system_state_vectors", []),
             "semantic_clusters": scenario.get("semantic_clusters", []),
+            "trajectories": scenario.get("trajectories", []),
+            "trajectory_clusters": scenario.get("trajectory_clusters", []),
+            "nearest_trajectory_patterns": scenario.get(
+                "nearest_trajectory_patterns", []
+            ),
         }
     )
     result["decisions"]["skipped_agents"].append("RecommendationAgent")
@@ -1014,6 +1055,13 @@ def recommend_for_fingerprint(req: FingerprintRecommendationRequest) -> AnalyzeR
             if item.get("pattern") == req.fingerprint
         ]
         state["evidence"]["semantic_clusters"] = selected_semantic_clusters
+        state["evidence"]["trajectories"] = scenario.get("trajectories", [])
+        state["evidence"]["trajectory_clusters"] = scenario.get(
+            "trajectory_clusters", []
+        )
+        state["evidence"]["nearest_trajectory_patterns"] = scenario.get(
+            "nearest_trajectory_patterns", []
+        )
     state["evidence"]["known_pattern_matches"] = [
         {
             "fingerprint": req.fingerprint,

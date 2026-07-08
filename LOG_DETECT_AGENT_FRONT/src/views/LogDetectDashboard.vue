@@ -106,6 +106,9 @@
         :merge-groups="trajectoryMergeGroups"
         :event-windows="trajectoryEventWindows"
         :state-vectors="trajectoryStateVectors"
+        :trajectories="trajectories"
+        :trajectory-clusters="trajectoryClusters"
+        :nearest-patterns="nearestTrajectoryPatterns"
       />
       <PatternClusterTable
         ref="patternClusterTable"
@@ -243,7 +246,10 @@ import type {
   DuplicatePatternCandidate,
   EventTimeWindow,
   FingerprintMergeGroup,
-  SystemStateVector
+  NearestTrajectoryPattern,
+  SystemStateVector,
+  Trajectory,
+  TrajectoryCluster
 } from '@/types/agentTypes'
 
 const store = useLogDetectStore()
@@ -286,6 +292,24 @@ const trajectoryStateVectors = computed(() => {
   const evidenceItems = store.state?.evidence.system_state_vectors
   if (evidenceItems?.length) return evidenceItems
   return (evidenceBundle.value?.system_state_vectors ?? []) as SystemStateVector[]
+})
+
+const trajectories = computed(() => {
+  const evidenceItems = store.state?.evidence.trajectories
+  if (evidenceItems?.length) return evidenceItems
+  return (evidenceBundle.value?.trajectories ?? []) as Trajectory[]
+})
+
+const trajectoryClusters = computed(() => {
+  const evidenceItems = store.state?.evidence.trajectory_clusters
+  if (evidenceItems?.length) return evidenceItems
+  return (evidenceBundle.value?.trajectory_clusters ?? []) as TrajectoryCluster[]
+})
+
+const nearestTrajectoryPatterns = computed(() => {
+  const evidenceItems = store.state?.evidence.nearest_trajectory_patterns
+  if (evidenceItems?.length) return evidenceItems
+  return (evidenceBundle.value?.nearest_trajectory_patterns ?? []) as NearestTrajectoryPattern[]
 })
 
 async function openServiceLayer() {

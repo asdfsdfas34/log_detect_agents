@@ -16,6 +16,7 @@ export interface AnalyzeRequest {
   save_to_chromadb?: boolean
   analysis_date?: string
   include_similar_clusters?: boolean
+  include_time_windows?: boolean
 }
 
 export interface FingerprintRecommendationRequest {
@@ -438,6 +439,48 @@ export interface SystemStateVector {
   incident_id?: string
 }
 
+export interface Trajectory {
+  trajectory_id: string
+  service_name: string
+  bucket_size: string
+  window_length: number
+  start_bucket: string
+  end_bucket: string
+  vector_ids: string[]
+  top_fingerprints: Array<{ fingerprint: string; count: number }>
+  features: Record<string, number | string>
+  flat_vector: number[]
+  label: string
+  max_risk_score: number
+  anomaly_count: number
+  total_events: number
+}
+
+export interface TrajectoryCluster {
+  cluster_id: string
+  service_name: string
+  bucket_size: string
+  algorithm: string
+  representative_trajectory_id: string
+  member_trajectory_ids: string[]
+  top_fingerprints: Array<{ fingerprint: string; count: number }>
+  label: string
+  member_count: number
+  max_risk_score: number
+  anomaly_count: number
+  avg_distance: number
+}
+
+export interface NearestTrajectoryPattern {
+  trajectory_id: string
+  cluster_id: string
+  label: string
+  similarity: number
+  distance: number
+  representative_trajectory_id: string
+  top_fingerprints: Array<{ fingerprint: string; count: number }>
+}
+
 export interface Cluster {
   cluster: string
   count: number
@@ -516,6 +559,9 @@ export interface SharedState {
     fingerprint_merge_groups?: FingerprintMergeGroup[]
     event_time_windows?: EventTimeWindow[]
     system_state_vectors?: SystemStateVector[]
+    trajectories?: Trajectory[]
+    trajectory_clusters?: TrajectoryCluster[]
+    nearest_trajectory_patterns?: NearestTrajectoryPattern[]
     anomaly_daily_counts?: AnomalyDailyCount[]
     summary?: ScenarioSummary
     recommendation?: Record<string, unknown>
@@ -559,6 +605,9 @@ export interface SharedState {
       fingerprint_merge_groups?: FingerprintMergeGroup[]
       event_time_windows?: EventTimeWindow[]
       system_state_vectors?: SystemStateVector[]
+      trajectories?: Trajectory[]
+      trajectory_clusters?: TrajectoryCluster[]
+      nearest_trajectory_patterns?: NearestTrajectoryPattern[]
       pattern_ops_skill_plan?: PatternOpsSkillPlan
       pattern_ops_skill_executions?: PatternOpsSkillExecution[]
       pattern_ops_validator_results?: PatternOpsValidatorResult[]
