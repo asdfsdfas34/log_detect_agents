@@ -16,6 +16,9 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
+from drain3 import TemplateMiner
+from drain3.template_miner_config import TemplateMinerConfig
+
 from app.db.chroma_store import (
     delete_pattern_clusters,
     embed_pattern_texts_normalized,
@@ -96,25 +99,24 @@ DUPLICATE_SIMILARITY_THRESHOLD = 0.93
 DUPLICATE_MIN_TOTAL_OCCURRENCE = 2
 DUPLICATE_MIN_STRUCTURE_SIMILARITY = 0.74
 DUPLICATE_MAX_VARIABLE_TOKEN_RATIO = 0.35
-HYBRID_KNOWN_SIMILARITY_THRESHOLD = 0.86
-HYBRID_DUPLICATE_SIMILARITY_THRESHOLD = 0.90
-HYBRID_WEIGHTS = {
-    "embedding": 0.45,
-    "message": 0.20,
-    "tokens": 0.15,
-    "structure": 0.10,
+PATTERN_KNOWN_SIMILARITY_THRESHOLD = 0.88
+PATTERN_DUPLICATE_SIMILARITY_THRESHOLD = 0.92
+PATTERN_WEIGHTS = {
+    "drain_template": 0.30,
+    "fixed_token_lexical": 0.25,
+    "sequence_structure": 0.15,
+    "key_value_schema": 0.10,
+    "metadata": 0.10,
     "stacktrace": 0.05,
-    "metadata": 0.05,
+    "embedding": 0.05,
 }
+HYBRID_KNOWN_SIMILARITY_THRESHOLD = PATTERN_KNOWN_SIMILARITY_THRESHOLD
+HYBRID_DUPLICATE_SIMILARITY_THRESHOLD = PATTERN_DUPLICATE_SIMILARITY_THRESHOLD
+HYBRID_WEIGHTS = PATTERN_WEIGHTS
 HDBSCAN_MIN_CLUSTER_SIZE = 3
 HDBSCAN_MIN_SAMPLES = 2
-HDBSCAN_MAX_DISTANCE = 1.0 - HYBRID_DUPLICATE_SIMILARITY_THRESHOLD
-SEMANTIC_CLUSTER_MIN_CLUSTER_SIZE = 3
-SEMANTIC_CLUSTER_MIN_SAMPLES = 2
-SEMANTIC_CLUSTER_UMAP_COMPONENTS = 5
-SEMANTIC_CLUSTER_UMAP_NEIGHBORS = 10
-TIME_WINDOW_RETURN_LIMIT = 12
-TIME_WINDOW_RECENT_RECALC_LIMIT = 48
+HDBSCAN_MAX_DISTANCE = 1.0 - PATTERN_DUPLICATE_SIMILARITY_THRESHOLD
+RECURRENCE_MIN_SILENCE_DAYS = 7
 
 
 @lru_cache(maxsize=1)
@@ -747,6 +749,10 @@ def _token_set(text: str) -> set[str]:
     return set(re.findall(r"[a-z0-9_./:-]+", normalize_log_text(text).lower()))
 
 
+def _token_list(text: str) -> list[str]:
+    return re.findall(r"[a-z0-9_./:-]+", normalize_log_text(text).lower())
+
+
 def _sequence_similarity(left: str, right: str) -> float:
     left_norm = normalize_log_text(left)
     right_norm = normalize_log_text(right)
@@ -776,8 +782,113 @@ def _template_structure(text: str) -> str:
     return normalized.strip()
 
 
+def _drain_template_miner() -> TemplateMiner:
+    config = TemplateMinerConfig()
+    config.profiling_enabled = False
+    config.drain_depth = 4
+    config.drain_sim_th = 0.4
+    config.drain_max_children = 100
+    return TemplateMiner(config=config)
+
+
+def _drain_template(text: str) -> str:
+    normalized = normalize_log_text(text).lower()
+    result = _drain_template_miner().add_log_message(normalized)
+    template = str(result.get("template_mined") or "").strip()
+    return template or normalized.strip()
+
+
+def _drain_template_similarity(left: str, right: str) -> float:
+    left_normalized = normalize_log_text(left).lower()
+    right_normalized = normalize_log_text(right).lower()
+    if not left_normalized and not right_normalized:
+        return 0.0
+    miner = _drain_template_miner()
+    left_result = miner.add_log_message(left_normalized)
+    right_result = miner.add_log_message(right_normalized)
+    left_template = str(left_result.get("template_mined") or left_normalized).strip()
+    right_template = str(right_result.get("template_mined") or right_normalized).strip()
+    if left_template == right_template:
+        return 1.0
+    same_cluster_bonus = 0.1 if left_result.get("cluster_id") == right_result.get("cluster_id") else 0.0
+    return min(1.0, _sequence_similarity(left_template, right_template) + same_cluster_bonus)
+
+
 def _template_structure_similarity(left: str, right: str) -> float:
     return _sequence_similarity(_template_structure(left), _template_structure(right))
+
+
+def _key_value_schema(text: str) -> set[str]:
+    keys = {
+        match.group(1).lower()
+        for match in re.finditer(r"\b([a-zA-Z_][\w.-]*)\s*[:=]\s*", text)
+    }
+    keys.update(
+        match.group(1).lower()
+        for match in re.finditer(r"\b([a-zA-Z_][\w.-]*)\s+\*", normalize_log_text(text))
+    )
+    return keys
+
+
+def _key_value_schema_similarity(left: str, right: str) -> float:
+    left_keys = _key_value_schema(left)
+    right_keys = _key_value_schema(right)
+    if not left_keys and not right_keys:
+        return 0.0
+    if not left_keys or not right_keys:
+        return 0.0
+    return len(left_keys & right_keys) / len(left_keys | right_keys)
+
+
+def _fixed_tokens(text: str) -> list[str]:
+    tokens = _token_list(text)
+    variable_tokens = {"*", "value", "number", "uuid", "timestamp", "id"}
+    fixed: list[str] = []
+    for token in tokens:
+        stripped = token.strip("*<>").lower()
+        if not stripped or stripped in variable_tokens:
+            continue
+        if stripped.isdigit():
+            continue
+        if len(stripped) <= 1:
+            continue
+        fixed.append(stripped)
+    return fixed
+
+
+def _bm25_pair_similarity(left: str, right: str) -> float:
+    query_tokens = _fixed_tokens(left)
+    document_tokens = _fixed_tokens(right)
+    if not query_tokens or not document_tokens:
+        return 0.0
+    doc_counts: dict[str, int] = {}
+    for token in document_tokens:
+        doc_counts[token] = doc_counts.get(token, 0) + 1
+    avgdl = max(1.0, (len(query_tokens) + len(document_tokens)) / 2)
+    k1 = 1.2
+    b = 0.75
+    score = 0.0
+    max_score = 0.0
+    for token in query_tokens:
+        idf = 1.0 + math.log(1.0 + (len(token) / 8.0))
+        tf = doc_counts.get(token, 0)
+        denom = tf + k1 * (1 - b + b * len(document_tokens) / avgdl)
+        if tf:
+            score += idf * ((tf * (k1 + 1)) / denom)
+        max_score += idf * ((k1 + 1) / (1 + k1 * (1 - b + b * len(document_tokens) / avgdl)))
+    return 0.0 if max_score <= 0 else max(0.0, min(1.0, score / max_score))
+
+
+def _fixed_token_lexical_similarity(left: str, right: str) -> float:
+    left_tokens = set(_fixed_tokens(left))
+    right_tokens = set(_fixed_tokens(right))
+    jaccard = (
+        0.0
+        if not left_tokens or not right_tokens
+        else len(left_tokens & right_tokens) / len(left_tokens | right_tokens)
+    )
+    bm25 = max(_bm25_pair_similarity(left, right), _bm25_pair_similarity(right, left))
+    return max(jaccard, bm25)
 
 
 def _optional_text_similarity(left: str, right: str) -> float:
@@ -814,7 +925,7 @@ def _match_message(match: dict[str, Any]) -> str:
     )
 
 
-def _hybrid_similarity(item: dict[str, Any], match: dict[str, Any]) -> float:
+def _pattern_similarity(item: dict[str, Any], match: dict[str, Any]) -> float:
     embedding_similarity = max(0.0, min(1.0, float(match.get("similarity") or 0.0)))
     item_message = str(
         item.get("normalized_message") or item.get("message") or item.get("context") or ""
@@ -822,30 +933,81 @@ def _hybrid_similarity(item: dict[str, Any], match: dict[str, Any]) -> float:
     match_message = _match_message(match)
     item_stacktrace = str(item.get("stacktrace") or item.get("stack_trace") or "")
     match_stacktrace = str(_metadata_from_match(match).get("stacktrace") or "")
-    score = (
-        HYBRID_WEIGHTS["embedding"] * embedding_similarity
-        + HYBRID_WEIGHTS["message"] * _sequence_similarity(item_message, match_message)
-        + HYBRID_WEIGHTS["tokens"] * _jaccard_similarity(item_message, match_message)
-        + HYBRID_WEIGHTS["structure"]
-        * _template_structure_similarity(item_message, match_message)
-        + HYBRID_WEIGHTS["stacktrace"]
-        * _optional_text_similarity(item_stacktrace, match_stacktrace)
-        + HYBRID_WEIGHTS["metadata"] * _metadata_match_score(item, match)
-    )
+    weighted_scores = [
+        (
+            PATTERN_WEIGHTS["drain_template"],
+            _drain_template_similarity(item_message, match_message),
+        ),
+        (
+            PATTERN_WEIGHTS["fixed_token_lexical"],
+            _fixed_token_lexical_similarity(item_message, match_message),
+        ),
+        (
+            PATTERN_WEIGHTS["sequence_structure"],
+            _template_structure_similarity(item_message, match_message),
+        ),
+        (PATTERN_WEIGHTS["metadata"], _metadata_match_score(item, match)),
+        (PATTERN_WEIGHTS["embedding"], embedding_similarity),
+    ]
+    if _key_value_schema(item_message) or _key_value_schema(match_message):
+        weighted_scores.append(
+            (
+                PATTERN_WEIGHTS["key_value_schema"],
+                _key_value_schema_similarity(item_message, match_message),
+            )
+        )
+    if item_stacktrace.strip() or match_stacktrace.strip():
+        weighted_scores.append(
+            (
+                PATTERN_WEIGHTS["stacktrace"],
+                _optional_text_similarity(item_stacktrace, match_stacktrace),
+            )
+        )
+    total_weight = sum(weight for weight, _ in weighted_scores) or 1.0
+    score = sum(weight * value for weight, value in weighted_scores) / total_weight
     return round(max(0.0, min(1.0, score)), 4)
+
+
+def _hybrid_similarity(item: dict[str, Any], match: dict[str, Any]) -> float:
+    return _pattern_similarity(item, match)
 
 
 def _with_hybrid_similarity(
     item: dict[str, Any], matches: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
-    return [
-        {
-            **match,
-            "hybrid_similarity": _hybrid_similarity(item, match),
-            "raw_similarity": match.get("similarity"),
-        }
-        for match in matches
-    ]
+    enriched: list[dict[str, Any]] = []
+    for match in matches:
+        pattern_similarity = _pattern_similarity(item, match)
+        enriched.append(
+            {
+                **match,
+                "pattern_similarity": pattern_similarity,
+                "hybrid_similarity": pattern_similarity,
+                "raw_similarity": match.get("similarity"),
+            }
+        )
+    return enriched
+
+
+def _match_with_group_context(
+    match: dict[str, Any], target_group: dict[str, Any]
+) -> dict[str, Any]:
+    metadata = dict(_metadata_from_match(match))
+    metadata.setdefault("fingerprint", target_group.get("fingerprint", ""))
+    metadata.setdefault("service_name", target_group.get("service_name", ""))
+    metadata.setdefault("log_level", target_group.get("log_level", ""))
+    metadata.setdefault(
+        "normalized_message",
+        target_group.get("normalized_message")
+        or normalize_log_text(str(target_group.get("message") or "")),
+    )
+    metadata.setdefault("message", target_group.get("message", ""))
+    metadata.setdefault("stacktrace", target_group.get("stacktrace", ""))
+    return {
+        **match,
+        "metadata": metadata,
+        "document": match.get("document") or metadata.get("normalized_message") or "",
+    }
 
 
 def duplicate_candidate_signature(message: str) -> str:
@@ -1314,7 +1476,7 @@ def _hdbscan_component_allowed(
     if not scores:
         return False
     return (
-        max(scores) >= HYBRID_DUPLICATE_SIMILARITY_THRESHOLD
+        max(scores) >= PATTERN_DUPLICATE_SIMILARITY_THRESHOLD
         and sum(scores) / len(scores) >= 1.0 - (HDBSCAN_MAX_DISTANCE * 1.5)
     )
 
@@ -1607,7 +1769,7 @@ def _semantic_duplicate_groups(groups: list[dict[str, Any]]) -> list[list[dict[s
         source_group = lookup.get(source)
         if not source or source_group is None:
             continue
-        for match in _with_hybrid_similarity(source_group, matches):
+        for match in matches:
             target = _fingerprint_from_match(match)
             target_group = lookup.get(target)
             if (
@@ -1618,16 +1780,22 @@ def _semantic_duplicate_groups(groups: list[dict[str, Any]]) -> list[list[dict[s
                 != str(source_group.get("log_level") or "").upper()
             ):
                 continue
-            similarity = float(match.get("similarity") or 0)
-            hybrid_similarity = float(match.get("hybrid_similarity") or 0)
+            match = _match_with_group_context(match, target_group)
+            pattern_similarity = _pattern_similarity(source_group, match)
+            match = {
+                **match,
+                "pattern_similarity": pattern_similarity,
+                "hybrid_similarity": pattern_similarity,
+                "raw_similarity": match.get("similarity"),
+            }
+            pattern_similarity = float(
+                match.get("pattern_similarity") or match.get("hybrid_similarity") or 0
+            )
             pair_scores[(source, target)] = max(
                 pair_scores.get((source, target), 0.0),
-                hybrid_similarity,
+                pattern_similarity,
             )
-            if (
-                hybrid_similarity < HYBRID_DUPLICATE_SIMILARITY_THRESHOLD
-                and similarity < DUPLICATE_SIMILARITY_THRESHOLD
-            ):
+            if pattern_similarity < PATTERN_DUPLICATE_SIMILARITY_THRESHOLD:
                 continue
             edges[source].add(target)
             edges[target].add(source)
@@ -2159,19 +2327,20 @@ def _top_similarity(matches: list[dict[str, Any]]) -> dict[str, Any] | None:
     scored = [
         m
         for m in matches
-        if m.get("hybrid_similarity") is not None or m.get("similarity") is not None
+        if m.get("pattern_similarity") is not None
+        or m.get("hybrid_similarity") is not None
+        or m.get("similarity") is not None
     ]
     if not scored:
         return None
-    return max(
-        scored,
-        key=lambda item: float(
-            item.get("hybrid_similarity")
-            if item.get("hybrid_similarity") is not None
-            else item.get("similarity")
-            or 0
-        ),
-    )
+    return max(scored, key=_match_score)
+
+
+def _match_score(match: dict[str, Any]) -> float:
+    for key in ("pattern_similarity", "hybrid_similarity", "similarity"):
+        if match.get(key) is not None:
+            return float(match.get(key) or 0)
+    return 0.0
 
 
 def _exact_known_match(conn: sqlite3.Connection, fp: str) -> tuple[bool, str]:
@@ -2290,22 +2459,10 @@ def _pattern_status_from_matches(
         ]
     )
     best_match = _top_similarity([m for m in [approved_match, observed_match] if m])
-    best_score = (
-        float(best_match.get("hybrid_similarity") or best_match.get("similarity") or 0)
-        if best_match
-        else 0.0
-    )
-    raw_score = (
-        float(best_match.get("similarity") or 0)
-        if best_match
-        else 0.0
-    )
+    best_score = _match_score(best_match) if best_match else 0.0
     if (
         best_match
-        and (
-            best_score >= HYBRID_KNOWN_SIMILARITY_THRESHOLD
-            or raw_score >= KNOWN_SIMILARITY_THRESHOLD
-        )
+        and best_score >= PATTERN_KNOWN_SIMILARITY_THRESHOLD
     ):
         metadata = best_match.get("metadata") or {}
         similar_fp = str(metadata.get("fingerprint") or best_match.get("id") or "")
@@ -3215,7 +3372,7 @@ def _anomaly_type_for(
             current = datetime.fromisoformat(
                 str(group["first_seen"]).replace("Z", "+00:00")
             )
-            if current - previous >= timedelta(days=1):
+            if current - previous >= timedelta(days=RECURRENCE_MIN_SILENCE_DAYS):
                 return True, "RECURRENCE", "MEDIUM"
         except ValueError:
             pass
@@ -4415,8 +4572,27 @@ def save_known_pattern(
                 confidence,
             ),
         )
-        conn.commit()
         pattern_id = int(cur.lastrowid)
+        cur.execute(
+            """
+            INSERT INTO log_analysis_results(
+                fingerprint, category, sub_category, is_known_pattern,
+                is_new_pattern, pattern_status, match_source,
+                similar_fingerprint, similarity_score
+            ) VALUES (?, ?, ?, 1, 0, 'known_exact', 'known_patterns', '', NULL)
+            ON CONFLICT(fingerprint) DO UPDATE SET
+                category=excluded.category,
+                sub_category=excluded.sub_category,
+                is_known_pattern=1,
+                is_new_pattern=0,
+                pattern_status='known_exact',
+                match_source='known_patterns',
+                similar_fingerprint='',
+                similarity_score=NULL
+            """,
+            (fingerprint, category, sub_category),
+        )
+        conn.commit()
         row = conn.execute(
             """
             SELECT message, stacktrace, service_name, log_level
@@ -4457,6 +4633,7 @@ def save_known_pattern(
             "schema_version": "known-pattern-v1",
         },
     )
+    _PIPELINE_CACHE.clear()
     return pattern_id
 
 

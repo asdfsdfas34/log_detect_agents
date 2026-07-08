@@ -246,6 +246,44 @@ def test_hybrid_similarity_promotes_structurally_identical_known_match(
     assert status["similarity_score"] >= scenario_store.HYBRID_KNOWN_SIMILARITY_THRESHOLD
 
 
+def test_high_embedding_similarity_does_not_override_low_pattern_similarity(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db_path = tmp_path / "logs.db"
+    monkeypatch.setenv("SQLITE_PATH", str(db_path))
+    with sqlite3.connect(db_path) as conn:
+        ensure_schema(conn)
+        status = scenario_store._pattern_status_from_matches(
+            conn=conn,
+            item={
+                "fingerprint": "FP-NEW",
+                "service_name": "checkout-api",
+                "log_level": "ERROR",
+                "message": "DB timeout while saving payment order 123",
+                "normalized_message": "db timeout while saving payment order *",
+                "stacktrace": "",
+            },
+            existing_fingerprints=set(),
+            approved_matches=[
+                {
+                    "id": "known-pattern:1",
+                    "document": "api timeout while calling partner callback",
+                    "metadata": {
+                        "source": "known_pattern",
+                        "fingerprint": "FP-OLD",
+                        "service_name": "checkout-api",
+                        "log_level": "ERROR",
+                        "normalized_message": "api timeout while calling partner callback",
+                    },
+                    "similarity": 0.94,
+                }
+            ],
+            observed_matches=[],
+        )
+
+    assert status["pattern_status"] == "new_pattern"
+
+
 def test_semantic_duplicate_groups_use_hybrid_score_below_raw_duplicate_threshold(
     monkeypatch,
 ) -> None:
@@ -672,7 +710,7 @@ def test_duplicate_candidates_use_chroma_similarity_for_near_patterns(
     assert candidates[0]["confidence"] > 0.87
 
 
-def test_duplicate_candidates_accept_balanced_semantic_similarity(
+def test_duplicate_candidates_reject_semantic_similarity_without_pattern_match(
     tmp_path: Path, monkeypatch
 ) -> None:
     db_path = tmp_path / "logs.db"
@@ -717,17 +755,7 @@ def test_duplicate_candidates_accept_balanced_semantic_similarity(
 
     candidates = detect_duplicate_pattern_candidates(groups)
 
-    assert len(candidates) == 1
-    assert candidates[0]["fingerprints"] == ["FP-2AC59D", "FP-451DF2"]
-    assert candidates[0]["confidence"] > 0.87
-    assert all(
-        re.search(
-            candidates[0]["suggested_regex"],
-            str(group["message"]),
-            flags=re.IGNORECASE,
-        )
-        for group in groups
-    )
+    assert candidates == []
 
 
 def test_approved_semantic_duplicate_aliases_are_known_on_date_rerun(
@@ -1308,6 +1336,58 @@ def test_known_similar_is_not_reported_as_anomaly() -> None:
     anomaly, anomaly_type, severity = scenario_store._anomaly_type_for(
         group={"pattern_status": "known_similar", "log_level": "ERROR"},
         known=True,
+        spike_ratio=100.0,
+        metric={"latest_count": 1, "baseline_count": 0.0},
+    )
+
+    assert anomaly is False
+    assert anomaly_type == "NONE"
+    assert severity == "NONE"
+
+
+def test_known_pattern_recurrence_requires_one_week_silence() -> None:
+    anomaly, anomaly_type, severity = scenario_store._anomaly_type_for(
+        group={
+            "pattern_status": "known_exact",
+            "log_level": "ERROR",
+            "previous_last_seen": "2026-06-01T00:00:00",
+            "first_seen": "2026-06-07T23:59:59",
+        },
+        known=True,
+        spike_ratio=100.0,
+        metric={"latest_count": 1, "baseline_count": 0.0},
+    )
+
+    assert anomaly is False
+    assert anomaly_type == "NONE"
+    assert severity == "NONE"
+
+    anomaly, anomaly_type, severity = scenario_store._anomaly_type_for(
+        group={
+            "pattern_status": "known_exact",
+            "log_level": "ERROR",
+            "previous_last_seen": "2026-06-01T00:00:00",
+            "first_seen": "2026-06-08T00:00:00",
+        },
+        known=True,
+        spike_ratio=100.0,
+        metric={"latest_count": 1, "baseline_count": 0.0},
+    )
+
+    assert anomaly is True
+    assert anomaly_type == "RECURRENCE"
+    assert severity == "MEDIUM"
+
+
+def test_observed_existing_is_not_recurrence_without_known_status() -> None:
+    anomaly, anomaly_type, severity = scenario_store._anomaly_type_for(
+        group={
+            "pattern_status": "observed_existing",
+            "log_level": "ERROR",
+            "previous_last_seen": "2026-06-01T00:00:00",
+            "first_seen": "2026-06-10T00:00:00",
+        },
+        known=False,
         spike_ratio=100.0,
         metric={"latest_count": 1, "baseline_count": 0.0},
     )

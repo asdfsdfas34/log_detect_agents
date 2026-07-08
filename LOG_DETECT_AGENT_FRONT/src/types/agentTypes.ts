@@ -69,6 +69,7 @@ export interface ExceptionRegisterResponse {
 
 export interface KnownPatternSaveRequest {
   fingerprint: string
+  service_name?: string
   category?: string
   sub_category?: string
   cause: string
@@ -76,10 +77,17 @@ export interface KnownPatternSaveRequest {
   confidence?: string
 }
 
+export interface PatternClusterPartialRefreshResponse {
+  affected_fingerprints: string[]
+  updated_clusters: Cluster[]
+  missing_fingerprints: string[]
+}
+
 export interface KnownPatternSaveResponse {
   status: string
   id: number
   fingerprint: string
+  partial_refresh?: PatternClusterPartialRefreshResponse
 }
 
 export interface FingerprintManualMergeRequest {
@@ -96,6 +104,7 @@ export interface FingerprintManualMergeResponse {
   rule_id?: number
   known_pattern_id?: number
   canonical_fingerprint?: string
+  partial_refresh?: PatternClusterPartialRefreshResponse
   merge?: {
     merged: boolean
     canonical_fingerprint?: string
@@ -171,6 +180,7 @@ export interface DuplicatePatternCandidateActionResponse {
   status: string
   rule_id?: number
   candidate?: DuplicatePatternCandidate | null
+  partial_refresh?: PatternClusterPartialRefreshResponse
   merge?: {
     merged: boolean
     canonical_fingerprint?: string

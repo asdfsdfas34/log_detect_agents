@@ -8,5 +8,5 @@ pydantic>=2.6
 chromadb>=0.5.0
 drain3>=0.9.11
 hdbscan>=0.8.33
-umap-learn>=0.5.6
+drain3>=0.9.11
 # sqlite3 is part of Python standard library (no extra package needed)

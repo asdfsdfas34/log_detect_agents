@@ -16,6 +16,7 @@ import type {
   KnownPatternSaveRequest,
   KnownPatternSaveResponse,
   KnowledgeCardListResponse,
+  PatternClusterPartialRefreshResponse,
   PatternRuleProposal,
   PatternRuleSaveRequest,
   PatternRuleSaveResponse,
@@ -75,6 +76,17 @@ export const agentApi = {
   },
   saveKnownPattern(payload: KnownPatternSaveRequest) {
     return apiClient.post<KnownPatternSaveResponse>('/known-patterns', payload)
+  },
+  refreshSelectedPatternClusters(payload: {
+    service_name?: string
+    fingerprints: string[]
+    include_similar_clusters?: boolean
+    limit?: number
+  }) {
+    return apiClient.post<PatternClusterPartialRefreshResponse>(
+      '/pattern-clusters/refresh-selected',
+      payload
+    )
   },
   manualMergeFingerprints(payload: FingerprintManualMergeRequest) {
     return apiClient.post<FingerprintManualMergeResponse>(
