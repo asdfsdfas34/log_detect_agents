@@ -424,11 +424,21 @@
                   <div class="font-mono text-xs font-semibold text-slate-700">
                     {{ similarMatchId(match) }}
                   </div>
-                  <span
-                    class="rounded bg-cyan-100 px-2 py-1 text-xs font-semibold text-cyan-700"
-                  >
-                    {{ similarMatchPercent(match) }}%
-                  </span>
+                  <div class="flex items-center gap-2">
+                    <span
+                      class="rounded bg-cyan-100 px-2 py-1 text-xs font-semibold text-cyan-700"
+                    >
+                      {{ similarMatchPercent(match) }}%
+                    </span>
+                    <button
+                      class="rounded border border-emerald-200 px-2 py-1 text-xs font-semibold text-emerald-700 hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-50"
+                      type="button"
+                      :disabled="!canMergeSimilarMatch(match)"
+                      @click="requestMergeKnownForSimilarMatch(match)"
+                    >
+                      Merge + Known
+                    </button>
+                  </div>
                 </div>
                 <dl class="grid gap-2 text-xs text-slate-600 md:grid-cols-3">
                   <div>
@@ -719,6 +729,19 @@ function clearSelectedFingerprints() {
 
 function requestManualMergeKnown() {
   emit('manual-merge-known', [...selectedFingerprints.value])
+}
+
+function canMergeSimilarMatch(match: Record<string, unknown>): boolean {
+  const current = selectedSimilarCluster.value?.cluster
+  const target = similarMatchFingerprint(match)
+  return Boolean(current && target && target !== '-' && target !== current)
+}
+
+function requestMergeKnownForSimilarMatch(match: Record<string, unknown>) {
+  const current = selectedSimilarCluster.value?.cluster
+  const target = similarMatchFingerprint(match)
+  if (!current || !target || target === '-' || target === current) return
+  emit('manual-merge-known', [current, target])
 }
 
 defineExpose({ clearSelectedFingerprints })

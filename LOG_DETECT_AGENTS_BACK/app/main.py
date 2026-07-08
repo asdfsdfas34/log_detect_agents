@@ -74,6 +74,8 @@ def configure_logging() -> None:
 configure_logging()
 configure_langsmith()
 
+SIMILAR_PATTERN_LIST_THRESHOLD = 0.8
+
 app = FastAPI(title="Failure Prevention AI Backend", version="0.2.0")
 
 origins = ["http://localhost:5173", "http://127.0.0.1:5173"]
@@ -126,6 +128,7 @@ class KnownPatternSaveRequest(BaseModel):
     """Request body for human-selected known pattern registration."""
 
     fingerprint: str
+    service_name: str = ""
     category: str = "Manual"
     sub_category: str = "Known Pattern"
     cause: str
@@ -174,6 +177,15 @@ class PatternRuleSaveRequest(BaseModel):
 
 class DuplicatePatternCandidatesResponse(BaseModel):
     candidates: list[dict]
+
+
+class PatternClusterPartialRefreshRequest(BaseModel):
+    """Request body for selected pattern cluster row refresh."""
+
+    service_name: str = ""
+    fingerprints: list[str] = Field(default_factory=list)
+    include_similar_clusters: bool = True
+    limit: int = 5
 
 
 class ApprovalRequest(BaseModel):
@@ -265,6 +277,86 @@ def _pattern_cluster_context(
     )
 
 
+def _is_same_pattern_match(
+    match: dict, *, service_name: str, fingerprint: str
+) -> bool:
+    metadata = match.get("metadata") if isinstance(match.get("metadata"), dict) else {}
+    match_fingerprint = str(metadata.get("fingerprint") or "")
+    if match_fingerprint != fingerprint:
+        return False
+    match_service = str(metadata.get("service_name") or "")
+    return not match_service or match_service == service_name
+
+
+def _stored_similar_pattern_match(
+    *, item: dict, service_name: str, fingerprint: str
+) -> dict[str, object] | None:
+    similar_fingerprint = str(item.get("similar_fingerprint") or "").strip()
+    if not similar_fingerprint or similar_fingerprint == fingerprint:
+        return None
+    target = fetch_pattern_cluster(
+        fingerprint=similar_fingerprint,
+        service_name=service_name or str(item.get("service_name") or "") or None,
+    )
+    target_service = (
+        str((target or {}).get("service_name") or "")
+        or service_name
+        or str(item.get("service_name") or "")
+    )
+    target_level = str((target or {}).get("log_level") or item.get("log_level") or "")
+    target_message = str((target or {}).get("message") or "")
+    target_stacktrace = str((target or {}).get("stacktrace") or "")
+    score = item.get("similarity_score")
+    similarity = float(score) if score is not None else 0.0
+    document = (
+        _pattern_cluster_context(
+            service_name=target_service,
+            fingerprint=similar_fingerprint,
+            message=target_message,
+            log_level=target_level,
+            stacktrace=target_stacktrace,
+        )
+        if target
+        else f"fingerprint={similar_fingerprint}"
+    )
+    return {
+        "id": f"{target_service}:{similar_fingerprint}"
+        if target_service
+        else similar_fingerprint,
+        "document": document,
+        "metadata": {
+            "fingerprint": similar_fingerprint,
+            "service_name": target_service,
+            "log_level": target_level,
+            "source": str(item.get("match_source") or "stored_pattern_match"),
+        },
+        "distance": None,
+        "similarity": similarity,
+    }
+
+
+def _prepend_stored_similar_match(
+    *, item: dict, service_name: str, fingerprint: str, matches: list[dict]
+) -> list[dict]:
+    stored_match = _stored_similar_pattern_match(
+        item=item,
+        service_name=service_name,
+        fingerprint=fingerprint,
+    )
+    if not stored_match:
+        return matches
+    stored_fingerprint = str(
+        (stored_match.get("metadata") or {}).get("fingerprint") or ""
+    )
+    deduped = [
+        match
+        for match in matches
+        if str((match.get("metadata") or {}).get("fingerprint") or match.get("id") or "")
+        != stored_fingerprint
+    ]
+    return [stored_match, *deduped]
+
+
 def _enrich_pattern_clusters(
     *,
     service_name: str,
@@ -293,7 +385,6 @@ def _enrich_pattern_clusters(
         pattern_contexts.append(
             {
                 "item": item,
-                "doc_id": f"{service_name}:{fingerprint}",
                 "query": context,
             }
         )
@@ -313,9 +404,20 @@ def _enrich_pattern_clusters(
         similar_clusters = [
             match
             for match in similar_group
-            if match.get("id") != pattern_context["doc_id"]
+            if not _is_same_pattern_match(
+                match,
+                service_name=service_name,
+                fingerprint=str(item.get("fingerprint", "")),
+            )
+            and float(match.get("similarity") or 0) >= SIMILAR_PATTERN_LIST_THRESHOLD
         ][:n_results]
         fingerprint = str(item.get("fingerprint", ""))
+        similar_clusters = _prepend_stored_similar_match(
+            item=item,
+            service_name=service_name,
+            fingerprint=fingerprint,
+            matches=similar_clusters,
+        )[:n_results]
         message = str(item.get("message", ""))
         log_level = str(item.get("log_level", ""))
         stacktrace = str(item.get("stacktrace", ""))
@@ -346,6 +448,71 @@ def _enrich_pattern_clusters(
             }
         )
     return enriched
+
+
+def _dedupe_texts(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for value in values:
+        cleaned = str(value or "").strip()
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        deduped.append(cleaned)
+    return deduped
+
+
+def _pattern_cluster_partial_refresh(
+    *,
+    service_name: str = "",
+    fingerprints: list[str],
+    include_similar_clusters: bool = True,
+    n_results: int = 5,
+) -> dict[str, object]:
+    requested = _dedupe_texts(fingerprints)
+    missing: list[str] = []
+    groups_by_service: dict[str, list[dict]] = {}
+    for fingerprint in requested:
+        cluster = fetch_pattern_cluster(
+            fingerprint=fingerprint,
+            service_name=service_name or None,
+        )
+        if cluster is None:
+            missing.append(fingerprint)
+            continue
+        cluster_service = service_name or str(cluster.get("service_name") or "")
+        groups_by_service.setdefault(cluster_service, []).append(cluster)
+
+    updated_clusters: list[dict] = []
+    for cluster_service, cluster_rows in groups_by_service.items():
+        updated_clusters.extend(
+            _enrich_pattern_clusters(
+                service_name=cluster_service,
+                fingerprints=cluster_rows,
+                n_results=max(1, n_results),
+                include_similar_clusters=include_similar_clusters,
+            )
+        )
+
+    return {
+        "affected_fingerprints": requested,
+        "updated_clusters": updated_clusters,
+        "missing_fingerprints": missing,
+    }
+
+
+def _merge_refresh_fingerprints(result: dict[str, object]) -> list[str]:
+    merge_result = result.get("merge")
+    if not isinstance(merge_result, dict):
+        merge_result = result
+    fingerprints: list[str] = []
+    canonical = merge_result.get("canonical_fingerprint")
+    if canonical:
+        fingerprints.append(str(canonical))
+    merged = merge_result.get("merged_fingerprints")
+    if isinstance(merged, list):
+        fingerprints.extend(str(item) for item in merged)
+    return _dedupe_texts(fingerprints)
 
 
 def _anomaly_reason(anomaly: dict | None) -> str:
@@ -950,7 +1117,6 @@ def get_similar_pattern_clusters(
     cluster = fetch_pattern_cluster(fingerprint=fingerprint, service_name=service_name)
     if cluster is None:
         raise HTTPException(status_code=404, detail="Pattern cluster not found")
-    doc_id = f"{service_name}:{fingerprint}"
     query = _pattern_cluster_context(
         service_name=service_name,
         fingerprint=fingerprint,
@@ -962,8 +1128,19 @@ def get_similar_pattern_clusters(
         queries=[query], n_results=max(1, limit) + 1
     )
     matches = [
-        match for match in (groups[0] if groups else []) if match.get("id") != doc_id
+        match
+        for match in (groups[0] if groups else [])
+        if not _is_same_pattern_match(
+            match, service_name=service_name, fingerprint=fingerprint
+        )
+        and float(match.get("similarity") or 0) >= SIMILAR_PATTERN_LIST_THRESHOLD
     ][:limit]
+    matches = _prepend_stored_similar_match(
+        item=cluster,
+        service_name=service_name,
+        fingerprint=fingerprint,
+        matches=matches,
+    )[:limit]
     return {
         "fingerprint": fingerprint,
         "service_name": service_name,
@@ -976,6 +1153,20 @@ def get_similar_pattern_clusters(
     }
 
 
+@app.post("/pattern-clusters/refresh-selected")
+def refresh_selected_pattern_clusters(
+    req: PatternClusterPartialRefreshRequest,
+) -> dict[str, object]:
+    """Refresh only selected pattern cluster rows after local actions."""
+
+    return _pattern_cluster_partial_refresh(
+        service_name=req.service_name,
+        fingerprints=req.fingerprints,
+        include_similar_clusters=req.include_similar_clusters,
+        n_results=req.limit,
+    )
+
+
 @app.post("/exceptions")
 def create_exception(req: ExceptionRegisterRequest) -> dict[str, str]:
     """Register a fingerprint ignore rule for SC-006."""
@@ -984,7 +1175,7 @@ def create_exception(req: ExceptionRegisterRequest) -> dict[str, str]:
 
 
 @app.post("/known-patterns")
-def create_known_pattern(req: KnownPatternSaveRequest) -> dict[str, int | str]:
+def create_known_pattern(req: KnownPatternSaveRequest) -> dict[str, object]:
     """Register a human-selected known pattern."""
     pattern_id = save_known_pattern(
         fingerprint=req.fingerprint,
@@ -1003,7 +1194,15 @@ def create_known_pattern(req: KnownPatternSaveRequest) -> dict[str, int | str]:
         result={"known_pattern_id": pattern_id},
         reason="Human-selected known pattern registration",
     )
-    return {"status": "saved", "id": pattern_id, "fingerprint": req.fingerprint}
+    return {
+        "status": "saved",
+        "id": pattern_id,
+        "fingerprint": req.fingerprint,
+        "partial_refresh": _pattern_cluster_partial_refresh(
+            service_name=req.service_name,
+            fingerprints=[req.fingerprint],
+        ),
+    }
 
 
 @app.post("/fingerprints/manual-merge")
@@ -1027,7 +1226,14 @@ def manual_merge_fingerprints(req: FingerprintManualMergeRequest) -> dict[str, o
             result=result,
             reason="Manual selected fingerprint merge",
         )
-        return {**result, "pattern_ops_action_id": action_id}
+        return {
+            **result,
+            "pattern_ops_action_id": action_id,
+            "partial_refresh": _pattern_cluster_partial_refresh(
+                service_name=req.service_name,
+                fingerprints=_merge_refresh_fingerprints(result),
+            ),
+        }
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -1118,6 +1324,10 @@ def approve_duplicate_pattern_candidate(candidate_key: str) -> dict[str, object]
         "candidate": updated,
         "merge": merge_result,
         "pattern_ops_action_id": action_id,
+        "partial_refresh": _pattern_cluster_partial_refresh(
+            service_name=str(candidate.get("service_name") or ""),
+            fingerprints=_merge_refresh_fingerprints(merge_result),
+        ),
     }
 
 

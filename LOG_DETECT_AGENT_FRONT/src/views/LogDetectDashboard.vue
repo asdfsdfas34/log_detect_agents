@@ -329,15 +329,12 @@ async function handleSaveKnownPattern(cluster: Cluster) {
     `${cluster.cluster} 패턴을 Known Pattern으로 저장하시겠습니까?`
   )
   if (!approved) return
-  const saved = await store.saveKnownPattern(
+  await store.saveKnownPattern(
     cluster.cluster,
     cause.trim(),
-    recommendation.trim()
+    recommendation.trim(),
+    serviceName.value.trim()
   )
-  if (saved) {
-    cluster.pattern_status = 'known_exact'
-    cluster.match_source = 'known_patterns'
-  }
 }
 
 async function handleManualMergeKnown(fingerprints: string[]) {

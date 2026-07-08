@@ -5,10 +5,12 @@ import { connectExecutionStream } from '@/services/streamingService'
 import type {
   AgentStepStatus,
   AnalyzeRequest,
+  Cluster,
   DuplicatePatternCandidate,
   ExceptionRegistryItem,
   ExecutionStatus,
   KnowledgeCardItem,
+  PatternClusterPartialRefreshResponse,
   PatternOpsSkill,
   PatternOpsSkillEdge,
   PatternOpsSkillExecution,
@@ -94,6 +96,8 @@ export const useLogDetectStore = defineStore('logDetect', () => {
   const loadingExceptions = ref(false)
   const loadingDuplicatePatternCandidates = ref(false)
   const loadingPatternOpsSkills = ref(false)
+  const backendActionCount = ref(0)
+  const backendActionLabel = ref('')
   const error = ref<string | null>(null)
   const serviceOptions = ref<string[]>([])
   const state = ref<SharedState | null>(null)
@@ -257,12 +261,76 @@ export const useLogDetectStore = defineStore('logDetect', () => {
     }
   })
 
+  const backendActionPending = computed(() => backendActionCount.value > 0)
+
+  async function withBackendAction<T>(
+    label: string,
+    action: () => Promise<T>
+  ): Promise<T> {
+    backendActionCount.value += 1
+    backendActionLabel.value = label
+    try {
+      return await action()
+    } finally {
+      backendActionCount.value = Math.max(0, backendActionCount.value - 1)
+      if (backendActionCount.value === 0) {
+        backendActionLabel.value = ''
+      }
+    }
+  }
+
   function addToast(level: 'info' | 'error', message: string) {
     const id = Date.now() + Math.floor(Math.random() * 1000)
     toasts.value.push({ id, level, message })
     setTimeout(() => {
       toasts.value = toasts.value.filter((item) => item.id !== id)
     }, 3500)
+  }
+
+  function applyPatternClusterPartialRefresh(
+    refresh?: PatternClusterPartialRefreshResponse
+  ) {
+    if (!state.value || !refresh) return
+    const updatedClusters = refresh.updated_clusters
+    const updatedByCluster = new Map<string, Cluster>(
+      updatedClusters.map((cluster) => [cluster.cluster, cluster])
+    )
+    const removed = new Set(refresh.missing_fingerprints)
+    refresh.affected_fingerprints.forEach((fingerprint) => {
+      if (!updatedByCluster.has(fingerprint)) removed.add(fingerprint)
+    })
+    const nextClusters = state.value.evidence.clusters.filter((cluster) => {
+      if (removed.has(cluster.cluster)) return false
+      const updated = updatedByCluster.get(cluster.cluster)
+      if (!updated) return true
+      Object.assign(cluster, updated)
+      updatedByCluster.delete(cluster.cluster)
+      return true
+    })
+    nextClusters.push(...updatedByCluster.values())
+    nextClusters.sort((left, right) => right.count - left.count)
+    state.value.evidence.clusters = nextClusters
+    refreshScenarioSummaryFromClusters()
+  }
+
+  function refreshScenarioSummaryFromClusters() {
+    if (!state.value) return
+    const clusters = state.value.evidence.clusters
+    const knownCount = clusters.filter((cluster) =>
+      ['known_exact', 'known_similar'].includes(cluster.pattern_status ?? '')
+    ).length
+    const newCount = clusters.filter(
+      (cluster) => cluster.pattern_status === 'new_pattern'
+    ).length
+    const summaries = [
+      state.value.evidence.summary,
+      state.value.final.evidence_bundle?.summary
+    ].filter((summary) => summary !== undefined)
+    summaries.forEach((summary) => {
+      summary.total_fingerprints = clusters.length
+      summary.known_patterns = knownCount
+      summary.new_patterns = newCount
+    })
   }
 
   function appendSkillActivity(
@@ -448,143 +516,162 @@ export const useLogDetectStore = defineStore('logDetect', () => {
   }
 
   async function fetchServices() {
-    loadingServices.value = true
-    try {
-      const { data } = await agentApi.services()
-      serviceOptions.value = data.services
-    } catch {
-      addToast('error', '서비스 목록을 불러오지 못했습니다.')
-    } finally {
-      loadingServices.value = false
-    }
+    return withBackendAction('서비스 목록 조회', async () => {
+      loadingServices.value = true
+      try {
+        const { data } = await agentApi.services()
+        serviceOptions.value = data.services
+      } catch {
+        addToast('error', '서비스 목록을 불러오지 못했습니다.')
+      } finally {
+        loadingServices.value = false
+      }
+    })
   }
 
   async function fetchPatternOpsSkills() {
-    loadingPatternOpsSkills.value = true
-    try {
-      const { data } = await agentApi.patternOpsSkills({ limit: 100 })
-      patternOpsSkills.value = data.skills
-      patternOpsSkillEdges.value = data.edges
-    } catch {
-      addToast('error', 'PatternOps Skill Registry를 불러오지 못했습니다.')
-    } finally {
-      loadingPatternOpsSkills.value = false
-    }
+    return withBackendAction('PatternOps 조회', async () => {
+      loadingPatternOpsSkills.value = true
+      try {
+        const { data } = await agentApi.patternOpsSkills({ limit: 100 })
+        patternOpsSkills.value = data.skills
+        patternOpsSkillEdges.value = data.edges
+      } catch {
+        addToast('error', 'PatternOps Skill Registry를 불러오지 못했습니다.')
+      } finally {
+        loadingPatternOpsSkills.value = false
+      }
+    })
   }
 
   async function fetchRecommendations(serviceName?: string) {
-    loadingRecommendations.value = true
-    try {
-      const { data } = await agentApi.recommendations({
-        service_name: serviceName || undefined,
-        limit: 20
-      })
-      recommendationHistory.value = data.recommendations
-    } catch {
-      addToast('error', '저장된 Recommendation 목록을 불러오지 못했습니다.')
-    } finally {
-      loadingRecommendations.value = false
-    }
+    return withBackendAction('Recommendation 조회', async () => {
+      loadingRecommendations.value = true
+      try {
+        const { data } = await agentApi.recommendations({
+          service_name: serviceName || undefined,
+          limit: 20
+        })
+        recommendationHistory.value = data.recommendations
+      } catch {
+        addToast('error', '저장된 Recommendation 목록을 불러오지 못했습니다.')
+      } finally {
+        loadingRecommendations.value = false
+      }
+    })
   }
 
   async function deleteSavedRecommendation(recommendationId: number) {
-    try {
-      const { data } = await agentApi.deleteRecommendation(recommendationId)
-      if (data.status !== 'deleted') {
-        addToast('error', `Recommendation 삭제 대상이 없습니다: ${recommendationId}`)
+    return withBackendAction('Recommendation 삭제', async () => {
+      try {
+        const { data } = await agentApi.deleteRecommendation(recommendationId)
+        if (data.status !== 'deleted') {
+          addToast('error', `Recommendation 삭제 대상이 없습니다: ${recommendationId}`)
+          return false
+        }
+        recommendationHistory.value = recommendationHistory.value.filter(
+          (item) => item.id !== recommendationId
+        )
+        addToast('info', `Recommendation 삭제 완료: ${recommendationId}`)
+        return true
+      } catch (caught) {
+        error.value = (caught as Error).message
+        addToast('error', `Recommendation 삭제 실패: ${error.value}`)
         return false
       }
-      recommendationHistory.value = recommendationHistory.value.filter(
-        (item) => item.id !== recommendationId
-      )
-      addToast('info', `Recommendation 삭제 완료: ${recommendationId}`)
-      return true
-    } catch (caught) {
-      error.value = (caught as Error).message
-      addToast('error', `Recommendation 삭제 실패: ${error.value}`)
-      return false
-    }
+    })
   }
 
   async function fetchKnowledgeCards(fingerprint?: string) {
-    loadingKnowledgeCards.value = true
-    try {
-      const { data } = await agentApi.knowledgeCards({
-        fingerprint: fingerprint || undefined,
-        limit: 20
-      })
-      knowledgeCards.value = data.knowledge_cards
-    } catch {
-      addToast('error', 'Knowledge Card 목록을 불러오지 못했습니다.')
-    } finally {
-      loadingKnowledgeCards.value = false
-    }
+    return withBackendAction('Knowledge Card 조회', async () => {
+      loadingKnowledgeCards.value = true
+      try {
+        const { data } = await agentApi.knowledgeCards({
+          fingerprint: fingerprint || undefined,
+          limit: 20
+        })
+        knowledgeCards.value = data.knowledge_cards
+      } catch {
+        addToast('error', 'Knowledge Card 목록을 불러오지 못했습니다.')
+      } finally {
+        loadingKnowledgeCards.value = false
+      }
+    })
   }
 
   async function fetchExceptionRegistry(fingerprint?: string) {
-    loadingExceptions.value = true
-    try {
-      const { data } = await agentApi.exceptions({
-        fingerprint: fingerprint || undefined,
-        limit: 20
-      })
-      exceptionRegistry.value = data.exceptions
-    } catch {
-      addToast('error', '예외처리 목록을 불러오지 못했습니다.')
-    } finally {
-      loadingExceptions.value = false
-    }
+    return withBackendAction('예외처리 조회', async () => {
+      loadingExceptions.value = true
+      try {
+        const { data } = await agentApi.exceptions({
+          fingerprint: fingerprint || undefined,
+          limit: 20
+        })
+        exceptionRegistry.value = data.exceptions
+      } catch {
+        addToast('error', '예외처리 목록을 불러오지 못했습니다.')
+      } finally {
+        loadingExceptions.value = false
+      }
+    })
   }
 
   async function fetchDuplicatePatternCandidates() {
-    loadingDuplicatePatternCandidates.value = true
-    try {
-      const { data } = await agentApi.duplicatePatternCandidates({
-        status: 'pending',
-        limit: 50
-      })
-      duplicatePatternCandidates.value = data.candidates
-    } catch {
-      addToast('error', 'Duplicate pattern 후보를 불러오지 못했습니다.')
-    } finally {
-      loadingDuplicatePatternCandidates.value = false
-    }
+    return withBackendAction('Duplicate 후보 조회', async () => {
+      loadingDuplicatePatternCandidates.value = true
+      try {
+        const { data } = await agentApi.duplicatePatternCandidates({
+          status: 'pending',
+          limit: 50
+        })
+        duplicatePatternCandidates.value = data.candidates
+      } catch {
+        addToast('error', 'Duplicate pattern 후보를 불러오지 못했습니다.')
+      } finally {
+        loadingDuplicatePatternCandidates.value = false
+      }
+    })
   }
 
   async function approveDuplicatePatternCandidate(candidateKey: string) {
-    try {
-      const { data } = await agentApi.approveDuplicatePatternCandidate(candidateKey)
-      duplicatePatternCandidates.value = duplicatePatternCandidates.value.filter(
-        (candidate) => candidate.candidate_key !== candidateKey
-      )
-      const canonical = data.merge?.canonical_fingerprint
-      addToast(
-        'info',
-        canonical
-          ? `Duplicate pattern 승인 완료: ${canonical}`
-          : `Duplicate pattern 승인 완료: ${candidateKey}`
-      )
-      return true
-    } catch (caught) {
-      error.value = (caught as Error).message
-      addToast('error', `Duplicate pattern 승인 실패: ${error.value}`)
-      return false
-    }
+    return withBackendAction('Duplicate 승인', async () => {
+      try {
+        const { data } = await agentApi.approveDuplicatePatternCandidate(candidateKey)
+        applyPatternClusterPartialRefresh(data.partial_refresh)
+        duplicatePatternCandidates.value = duplicatePatternCandidates.value.filter(
+          (candidate) => candidate.candidate_key !== candidateKey
+        )
+        const canonical = data.merge?.canonical_fingerprint
+        addToast(
+          'info',
+          canonical
+            ? `Duplicate pattern 승인 완료: ${canonical}`
+            : `Duplicate pattern 승인 완료: ${candidateKey}`
+        )
+        return true
+      } catch (caught) {
+        error.value = (caught as Error).message
+        addToast('error', `Duplicate pattern 승인 실패: ${error.value}`)
+        return false
+      }
+    })
   }
 
   async function rejectDuplicatePatternCandidate(candidateKey: string) {
-    try {
-      await agentApi.rejectDuplicatePatternCandidate(candidateKey)
-      duplicatePatternCandidates.value = duplicatePatternCandidates.value.filter(
-        (candidate) => candidate.candidate_key !== candidateKey
-      )
-      addToast('info', `Duplicate pattern 거절 완료: ${candidateKey}`)
-      return true
-    } catch (caught) {
-      error.value = (caught as Error).message
-      addToast('error', `Duplicate pattern 거절 실패: ${error.value}`)
-      return false
-    }
+    return withBackendAction('Duplicate 거절', async () => {
+      try {
+        await agentApi.rejectDuplicatePatternCandidate(candidateKey)
+        duplicatePatternCandidates.value = duplicatePatternCandidates.value.filter(
+          (candidate) => candidate.candidate_key !== candidateKey
+        )
+        addToast('info', `Duplicate pattern 거절 완료: ${candidateKey}`)
+        return true
+      } catch (caught) {
+        error.value = (caught as Error).message
+        addToast('error', `Duplicate pattern 거절 실패: ${error.value}`)
+        return false
+      }
+    })
   }
 
   async function manualMergeFingerprints(payload: {
@@ -594,27 +681,31 @@ export const useLogDetectStore = defineStore('logDetect', () => {
     recommendation: string
     confidence?: string
   }) {
-    try {
-      const { data } = await agentApi.manualMergeFingerprints({
-        service_name: payload.service_name,
-        fingerprints: payload.fingerprints,
-        cause: payload.cause,
-        recommendation: payload.recommendation,
-        confidence: payload.confidence ?? 'HIGH'
-      })
-      const canonical = data.canonical_fingerprint ?? data.merge?.canonical_fingerprint
-      addToast(
-        'info',
-        canonical
-          ? `선택 FP 병합 및 Known 등록 완료: ${canonical}`
-          : '선택 FP 병합 및 Known 등록 완료'
-      )
-      return true
-    } catch (caught) {
-      error.value = (caught as Error).message
-      addToast('error', `선택 FP 병합 실패: ${error.value}`)
-      return false
-    }
+    return withBackendAction('Fingerprint 병합', async () => {
+      try {
+        const { data } = await agentApi.manualMergeFingerprints({
+          service_name: payload.service_name,
+          fingerprints: payload.fingerprints,
+          cause: payload.cause,
+          recommendation: payload.recommendation,
+          confidence: payload.confidence ?? 'HIGH'
+        })
+        applyPatternClusterPartialRefresh(data.partial_refresh)
+        const canonical =
+          data.canonical_fingerprint ?? data.merge?.canonical_fingerprint
+        addToast(
+          'info',
+          canonical
+            ? `선택 FP 병합 및 Known 등록 완료: ${canonical}`
+            : '선택 FP 병합 및 Known 등록 완료'
+        )
+        return true
+      } catch (caught) {
+        error.value = (caught as Error).message
+        addToast('error', `선택 FP 병합 실패: ${error.value}`)
+        return false
+      }
+    })
   }
 
   function startPollingHealth() {
@@ -746,82 +837,91 @@ export const useLogDetectStore = defineStore('logDetect', () => {
         : 'skipped'
     }))
 
-    try {
-      // Request the backend to execute the downstream recommendation slice for the selected fingerprint.
-      const { data } = await agentApi.recommendationForFingerprint({
-        service_name: serviceName,
-        fingerprint,
-        analysis_date: analysisDate || undefined
-      })
-      if (state.value) {
-        state.value = {
-          ...state.value,
-          assessment: data.result.assessment,
-          decisions: data.result.decisions,
-          final: {
-            ...state.value.final,
-            ...data.result.final
+    return withBackendAction('Recommendation 생성', async () => {
+      try {
+        // Request the backend to execute the downstream recommendation slice for the selected fingerprint.
+        const { data } = await agentApi.recommendationForFingerprint({
+          service_name: serviceName,
+          fingerprint,
+          analysis_date: analysisDate || undefined
+        })
+        if (state.value) {
+          state.value = {
+            ...state.value,
+            assessment: data.result.assessment,
+            decisions: data.result.decisions,
+            final: {
+              ...state.value.final,
+              ...data.result.final
+            }
           }
+        } else {
+          state.value = data.result
         }
-      } else {
-        state.value = data.result
+        markTimelineFromState(data.result)
+        appendPatternOpsExecutionActivities(data.result)
+        executionStatus.value =
+          data.result.decisions.failures.length > 0 ? 'failed' : 'completed'
+        setCurrentStage('Completed')
+        lastExecutionAt.value = new Date().toISOString()
+        await fetchRecommendations(serviceName)
+        await fetchPatternOpsSkills()
+        addToast('info', `Updated recommendations for ${fingerprint}`)
+      } catch (caught) {
+        executionStatus.value = 'failed'
+        error.value = (caught as Error).message
+        currentExecutionLog.value = `Recommendation update 실패: ${error.value}`
+        appendSkillActivity({
+          skill: currentStage.value,
+          status: 'failed',
+          action: 'Recommendation update 실패',
+          detail: error.value ?? undefined,
+          source: 'backend-result'
+        })
+        addToast('error', `Recommendation update failed: ${error.value}`)
       }
-      markTimelineFromState(data.result)
-      appendPatternOpsExecutionActivities(data.result)
-      executionStatus.value =
-        data.result.decisions.failures.length > 0 ? 'failed' : 'completed'
-      setCurrentStage('Completed')
-      lastExecutionAt.value = new Date().toISOString()
-      await fetchRecommendations(serviceName)
-      await fetchPatternOpsSkills()
-      addToast('info', `Updated recommendations for ${fingerprint}`)
-    } catch (caught) {
-      executionStatus.value = 'failed'
-      error.value = (caught as Error).message
-      currentExecutionLog.value = `Recommendation update 실패: ${error.value}`
-      appendSkillActivity({
-        skill: currentStage.value,
-        status: 'failed',
-        action: 'Recommendation update 실패',
-        detail: error.value ?? undefined,
-        source: 'backend-result'
-      })
-      addToast('error', `Recommendation update failed: ${error.value}`)
-    }
+    })
   }
 
   async function saveKnownPattern(
     fingerprint: string,
     cause: string,
-    recommendation: string
+    recommendation: string,
+    serviceName = ''
   ) {
-    try {
-      const { data } = await agentApi.saveKnownPattern({
-        fingerprint,
-        category: 'Manual',
-        sub_category: 'Known Pattern',
-        cause,
-        recommendation,
-        confidence: 'HIGH'
-      })
-      addToast('info', `Known Pattern 저장 완료: ${data.fingerprint}`)
-      return true
-    } catch (caught) {
-      error.value = (caught as Error).message
-      addToast('error', `Known Pattern 저장 실패: ${error.value}`)
-      return false
-    }
+    return withBackendAction('Known Pattern 저장', async () => {
+      try {
+        const { data } = await agentApi.saveKnownPattern({
+          fingerprint,
+          service_name: serviceName,
+          category: 'Manual',
+          sub_category: 'Known Pattern',
+          cause,
+          recommendation,
+          confidence: 'HIGH'
+        })
+        applyPatternClusterPartialRefresh(data.partial_refresh)
+        addToast('info', `Known Pattern 저장 완료: ${data.fingerprint}`)
+        return true
+      } catch (caught) {
+        error.value = (caught as Error).message
+        addToast('error', `Known Pattern 저장 실패: ${error.value}`)
+        return false
+      }
+    })
   }
 
   async function suggestPatternRule(cluster: string, message: string) {
-    try {
-      const { data } = await agentApi.suggestPatternRule({ cluster, message })
-      return data
-    } catch (caught) {
-      error.value = (caught as Error).message
-      addToast('error', `Pattern Rule 제안 실패: ${error.value}`)
-      return null
-    }
+    return withBackendAction('Pattern Rule 제안', async () => {
+      try {
+        const { data } = await agentApi.suggestPatternRule({ cluster, message })
+        return data
+      } catch (caught) {
+        error.value = (caught as Error).message
+        addToast('error', `Pattern Rule 제안 실패: ${error.value}`)
+        return null
+      }
+    })
   }
 
   async function savePatternRule(
@@ -829,52 +929,57 @@ export const useLogDetectStore = defineStore('logDetect', () => {
     matchRegex: string,
     template: string
   ) {
-    try {
-      const { data } = await agentApi.savePatternRule({
-        name,
-        match_regex: matchRegex,
-        template,
-        enabled: true,
-        priority: 100
-      })
-      addToast('info', `Pattern Rule 저장 완료: #${data.id}`)
-      return true
-    } catch (caught) {
-      error.value = (caught as Error).message
-      addToast('error', `Pattern Rule 저장 실패: ${error.value}`)
-      return false
-    }
+    return withBackendAction('Pattern Rule 저장', async () => {
+      try {
+        const { data } = await agentApi.savePatternRule({
+          name,
+          match_regex: matchRegex,
+          template,
+          enabled: true,
+          priority: 100
+        })
+        addToast('info', `Pattern Rule 저장 완료: #${data.id}`)
+        return true
+      } catch (caught) {
+        error.value = (caught as Error).message
+        addToast('error', `Pattern Rule 저장 실패: ${error.value}`)
+        return false
+      }
+    })
   }
 
   async function saveCurrentRecommendation(serviceName: string) {
     const recommendation = state.value?.final.generated_answer
-    if (!state.value || !recommendation) {
+    const currentState = state.value
+    if (!currentState || !recommendation) {
       addToast('error', '저장할 Recommendation이 없습니다.')
       return false
     }
 
-    try {
-      const { data } = await agentApi.saveRecommendation({
-        request_id: state.value.request_id,
-        service_name: serviceName,
-        goal: state.value.goal,
-        executive_summary: state.value.final.executive_summary ?? '',
-        recommendation,
-        recommended_actions: state.value.final.recommended_actions ?? [],
-        verification_steps: state.value.final.verification_steps ?? [],
-        evidence_bundle: state.value.final.evidence_bundle ?? {},
-        risk_score: state.value.assessment.risk_score,
-        confidence: state.value.assessment.confidence
-      })
-      state.value.final.saved_recommendation_id = data.id
-      addToast('info', `Recommendation 저장 완료: ${data.id}`)
-      await fetchRecommendations(serviceName)
-      return true
-    } catch (caught) {
-      error.value = (caught as Error).message
-      addToast('error', `Recommendation 저장 실패: ${error.value}`)
-      return false
-    }
+    return withBackendAction('Recommendation 저장', async () => {
+      try {
+        const { data } = await agentApi.saveRecommendation({
+          request_id: currentState.request_id,
+          service_name: serviceName,
+          goal: currentState.goal,
+          executive_summary: currentState.final.executive_summary ?? '',
+          recommendation,
+          recommended_actions: currentState.final.recommended_actions ?? [],
+          verification_steps: currentState.final.verification_steps ?? [],
+          evidence_bundle: currentState.final.evidence_bundle ?? {},
+          risk_score: currentState.assessment.risk_score,
+          confidence: currentState.assessment.confidence
+        })
+        currentState.final.saved_recommendation_id = data.id
+        addToast('info', `Recommendation 저장 완료: ${data.id}`)
+        await fetchRecommendations(serviceName)
+        return true
+      } catch (caught) {
+        error.value = (caught as Error).message
+        addToast('error', `Recommendation 저장 실패: ${error.value}`)
+        return false
+      }
+    })
   }
 
   async function approveCurrentRecommendation(draft: KnowledgeCardApprovalDraft) {
@@ -888,23 +993,25 @@ export const useLogDetectStore = defineStore('logDetect', () => {
       return false
     }
 
-    try {
-      const { data } = await agentApi.approveRecommendation({
-        fingerprint,
-        cause: draft.cause.trim() || '-',
-        recommendation: draft.recommendation.trim(),
-        resolution_method: draft.resolutionMethod.trim(),
-        action: 'approved',
-        confidence: draft.confidence.trim() || currentRecommendationConfidence.value
-      })
-      addToast('info', `Recommendation 저장 승인 완료: ${data.card_id}`)
-      await fetchKnowledgeCards(fingerprint)
-      return true
-    } catch (caught) {
-      error.value = (caught as Error).message
-      addToast('error', `Recommendation 저장 실패: ${error.value}`)
-      return false
-    }
+    return withBackendAction('Recommendation 승인', async () => {
+      try {
+        const { data } = await agentApi.approveRecommendation({
+          fingerprint,
+          cause: draft.cause.trim() || '-',
+          recommendation: draft.recommendation.trim(),
+          resolution_method: draft.resolutionMethod.trim(),
+          action: 'approved',
+          confidence: draft.confidence.trim() || currentRecommendationConfidence.value
+        })
+        addToast('info', `Recommendation 저장 승인 완료: ${data.card_id}`)
+        await fetchKnowledgeCards(fingerprint)
+        return true
+      } catch (caught) {
+        error.value = (caught as Error).message
+        addToast('error', `Recommendation 저장 실패: ${error.value}`)
+        return false
+      }
+    })
   }
 
   async function registerCurrentException(reason: string) {
@@ -914,16 +1021,18 @@ export const useLogDetectStore = defineStore('logDetect', () => {
       return false
     }
 
-    try {
-      await agentApi.registerException({ fingerprint, reason })
-      addToast('info', `예외처리 승인 완료: ${fingerprint}`)
-      await fetchExceptionRegistry(fingerprint)
-      return true
-    } catch (caught) {
-      error.value = (caught as Error).message
-      addToast('error', `예외처리 실패: ${error.value}`)
-      return false
-    }
+    return withBackendAction('예외처리 등록', async () => {
+      try {
+        await agentApi.registerException({ fingerprint, reason })
+        addToast('info', `예외처리 승인 완료: ${fingerprint}`)
+        await fetchExceptionRegistry(fingerprint)
+        return true
+      } catch (caught) {
+        error.value = (caught as Error).message
+        addToast('error', `예외처리 실패: ${error.value}`)
+        return false
+      }
+    })
   }
 
   return {
@@ -941,6 +1050,8 @@ export const useLogDetectStore = defineStore('logDetect', () => {
     loadingExceptions,
     loadingDuplicatePatternCandidates,
     loadingPatternOpsSkills,
+    backendActionPending,
+    backendActionLabel,
     error,
     state,
     recommendationHistory,

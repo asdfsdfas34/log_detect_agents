@@ -571,6 +571,52 @@ def test_enrich_pattern_clusters_adds_backend_semantic_similarity(monkeypatch) -
     assert clusters[0]["similar_clusters"][0]["metadata"]["fingerprint"] == "FP-OLD"
 
 
+def test_enrich_pattern_clusters_excludes_self_match_by_metadata(monkeypatch) -> None:
+    def fake_similar_batches(**kwargs: Any) -> list[list[dict[str, Any]]]:
+        return [
+            [
+                {
+                    "id": "pattern-template-v2:checkout-api:FP-NEW",
+                    "document": "service=checkout-api\nfingerprint=FP-NEW",
+                    "metadata": {
+                        "service_name": "checkout-api",
+                        "fingerprint": "FP-NEW",
+                    },
+                    "similarity": 1.0,
+                },
+                {
+                    "id": "pattern-template-v2:checkout-api:FP-OLD",
+                    "document": "service=checkout-api\nfingerprint=FP-OLD",
+                    "metadata": {
+                        "service_name": "checkout-api",
+                        "fingerprint": "FP-OLD",
+                    },
+                    "similarity": 0.86,
+                },
+            ]
+        ]
+
+    monkeypatch.setattr(main, "find_similar_pattern_clusters_batch", fake_similar_batches)
+    clusters = main._enrich_pattern_clusters(
+        service_name="checkout-api",
+        fingerprints=[
+            {
+                "fingerprint": "FP-NEW",
+                "occurrence_count": 3,
+                "message": "Payment failed for order 123",
+                "log_level": "ERROR",
+                "stacktrace": "PaymentException",
+            }
+        ],
+        include_similar_clusters=True,
+    )
+
+    assert clusters[0]["semantic_similarity"] == 86
+    assert [match["metadata"]["fingerprint"] for match in clusters[0]["similar_clusters"]] == [
+        "FP-OLD"
+    ]
+
+
 def test_related_knowledge_cards_include_exact_and_similar_cards(monkeypatch) -> None:
     def fake_exact_cards(*, fingerprint: str | None = None, limit: int = 20):
         assert fingerprint == "FP-NEW"
