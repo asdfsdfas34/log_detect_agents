@@ -665,9 +665,8 @@ def _related_knowledge_cards_for_recommendation(
     selected: dict | None,
     limit: int = 5,
 ) -> list[dict]:
-    exact_cards = fetch_knowledge_cards(fingerprint=fingerprint, limit=limit)
     if not selected:
-        return exact_cards
+        return []
 
     query = _pattern_cluster_context(
         service_name=service_name,
@@ -687,19 +686,11 @@ def _related_knowledge_cards_for_recommendation(
         for card_id in (
             _knowledge_card_id_from_match(match)
             for match in (groups[0] if groups else [])
+            if float(match.get("similarity") or 0) >= SIMILAR_PATTERN_LIST_THRESHOLD
         )
         if card_id
     ]
-    similar_cards = fetch_knowledge_cards_by_ids(similar_card_ids)
-    merged: list[dict] = []
-    seen: set[str] = set()
-    for card in exact_cards + similar_cards:
-        card_id = str(card.get("card_id") or "")
-        if not card_id or card_id in seen:
-            continue
-        seen.add(card_id)
-        merged.append(card)
-    return merged[:limit]
+    return fetch_knowledge_cards_by_ids(similar_card_ids)[:limit]
 
 
 @app.get("/health")
@@ -834,6 +825,7 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
             anomalies=scenario.get("anomalies", []),
             include_similar_clusters=req.include_similar_clusters,
         )
+        result["evidence"]["pattern_clusters"] = scenario.get("pattern_clusters", [])
         result["evidence"]["anomalies"] = scenario["anomalies"]
         result["evidence"]["stack_traces"] = [
             item["stacktrace"]

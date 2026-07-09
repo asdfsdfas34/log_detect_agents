@@ -53,7 +53,6 @@
           <tr>
             <th class="px-3 py-2">ID</th>
             <th class="px-3 py-2">Service</th>
-            <th class="px-3 py-2">Risk</th>
             <th class="px-3 py-2">Recommendation</th>
             <th class="px-3 py-2">Created</th>
             <th class="px-3 py-2 text-right">Action</th>
@@ -72,12 +71,6 @@
             </td>
             <td class="whitespace-nowrap px-3 py-2 font-medium text-slate-700">
               {{ item.service_name }}
-            </td>
-            <td class="whitespace-nowrap px-3 py-2 text-slate-600">
-              <span class="font-semibold">{{ item.risk_score ?? '-' }}</span>
-              <span class="ml-1 text-xs text-slate-400">{{
-                item.confidence ?? ''
-              }}</span>
             </td>
             <td class="px-3 py-2 text-slate-700">
               <p class="font-medium text-slate-800">
@@ -226,7 +219,7 @@
       class="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4"
       @click.self="closeDetail"
     >
-      <div class="w-full max-w-2xl rounded-lg bg-white shadow-xl">
+      <div class="max-h-[90vh] w-full max-w-2xl overflow-hidden rounded-lg bg-white shadow-xl">
         <div class="flex items-start justify-between gap-4 border-b border-slate-200 p-4">
           <div>
             <p class="text-xs font-semibold uppercase tracking-wide text-slate-500">
@@ -243,7 +236,7 @@
             Close
           </button>
         </div>
-        <div class="grid gap-3 p-4 text-sm text-slate-700 sm:grid-cols-2">
+        <div class="grid max-h-[calc(90vh-88px)] gap-3 overflow-y-auto p-4 text-sm text-slate-700 sm:grid-cols-2">
           <div>
             <p class="text-xs font-semibold uppercase text-slate-400">Level</p>
             <p class="mt-1 font-semibold">{{ detail.log_level || '-' }}</p>

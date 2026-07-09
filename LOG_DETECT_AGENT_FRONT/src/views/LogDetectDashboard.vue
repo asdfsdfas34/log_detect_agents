@@ -105,6 +105,7 @@
       <PatternClusterTable
         ref="patternClusterTable"
         :clusters="store.state.evidence.clusters"
+        :pattern-clusters="store.state.evidence.pattern_clusters ?? []"
         :service-name="serviceName"
         :recommendation-busy-fingerprint="store.recommendationGeneratingFingerprint"
         @save-known-pattern="handleSaveKnownPattern"

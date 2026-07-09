@@ -819,6 +819,7 @@ class RecommendationAgent:
 
     @staticmethod
     def _merge_knowledge_card_ids(value: Any, fallback_ids: list[str]) -> list[str]:
+        allowed = {str(item).strip() for item in fallback_ids if str(item).strip()}
         ids: list[str] = []
         if isinstance(value, list):
             candidates = value
@@ -828,6 +829,6 @@ class RecommendationAgent:
             candidates = []
         for item in candidates + fallback_ids:
             card_id = str(item or "").strip()
-            if card_id and card_id not in ids:
+            if card_id and card_id in allowed and card_id not in ids:
                 ids.append(card_id)
         return ids

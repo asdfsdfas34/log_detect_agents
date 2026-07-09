@@ -373,6 +373,90 @@ def test_hdbscan_duplicate_groups_use_optional_cluster_labels(monkeypatch) -> No
     }
 
 
+def test_build_pattern_clusters_persists_members_and_semantic_links(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db_path = tmp_path / "logs.db"
+    monkeypatch.setenv("SQLITE_PATH", str(db_path))
+    groups = [
+        {
+            "fingerprint": "FP-A",
+            "service_name": "checkout-api",
+            "log_level": "ERROR",
+            "message": "payment failed for order 1001",
+            "normalized_message": "payment failed for order *",
+            "stacktrace": "",
+            "occurrence_count": 10,
+            "pattern_status": "known_exact",
+            "last_seen": "2026-07-09T00:00:00",
+        },
+        {
+            "fingerprint": "FP-B",
+            "service_name": "checkout-api",
+            "log_level": "ERROR",
+            "message": "payment failed for order 2002",
+            "normalized_message": "payment failed for order *",
+            "stacktrace": "",
+            "occurrence_count": 4,
+            "pattern_status": "observed_existing",
+            "last_seen": "2026-07-09T00:00:00",
+        },
+        {
+            "fingerprint": "FP-C",
+            "service_name": "checkout-api",
+            "log_level": "ERROR",
+            "message": "card authorization timeout from gateway",
+            "normalized_message": "card authorization timeout from gateway",
+            "stacktrace": "",
+            "occurrence_count": 2,
+            "pattern_status": "observed_existing",
+            "last_seen": "2026-07-09T00:00:00",
+        },
+    ]
+
+    monkeypatch.setattr(
+        scenario_store,
+        "embed_pattern_texts_normalized",
+        lambda texts: [[1.0, 0.0], [0.99, 0.1], [0.86, 0.51]],
+    )
+
+    def fake_pattern_similarity(source: dict[str, Any], match: dict[str, Any]) -> float:
+        pair = {
+            str(source.get("fingerprint")),
+            str((match.get("metadata") or {}).get("fingerprint")),
+        }
+        return 0.91 if pair == {"FP-A", "FP-B"} else 0.30
+
+    monkeypatch.setattr(scenario_store, "_pattern_similarity", fake_pattern_similarity)
+    monkeypatch.setattr(
+        scenario_store,
+        "_hdbscan_cluster_labels",
+        lambda *args, **kwargs: [0, 0, -1],
+    )
+
+    with sqlite3.connect(db_path) as conn:
+        ensure_schema(conn)
+        clusters = scenario_store.build_pattern_clusters(conn, groups)
+        conn.commit()
+        cluster_count = conn.execute("SELECT COUNT(*) FROM pattern_clusters").fetchone()[0]
+        member_count = conn.execute(
+            "SELECT COUNT(*) FROM pattern_cluster_members"
+        ).fetchone()[0]
+        link_count = conn.execute("SELECT COUNT(*) FROM pattern_cluster_links").fetchone()[0]
+
+    assert len(clusters) == 2
+    assert cluster_count == 2
+    assert member_count == 3
+    assert link_count >= 1
+    cluster_with_ab = next(
+        cluster
+        for cluster in clusters
+        if {member["fingerprint"] for member in cluster["members"]} == {"FP-A", "FP-B"}
+    )
+    assert cluster_with_ab["canonical_fingerprint"] == "FP-A"
+    assert cluster_with_ab["algorithm"] == "connected_component+hdbscan"
+
+
 def test_semantic_log_clusters_fallback_to_drain_templates(monkeypatch) -> None:
     monkeypatch.setattr(scenario_store, "embed_pattern_texts_normalized", lambda texts: None)
     monkeypatch.setattr(

@@ -121,6 +121,12 @@ SEMANTIC_CLUSTER_MIN_CLUSTER_SIZE = 3
 SEMANTIC_CLUSTER_MIN_SAMPLES = 2
 SEMANTIC_CLUSTER_UMAP_NEIGHBORS = 8
 SEMANTIC_CLUSTER_UMAP_COMPONENTS = 3
+PATTERN_CLUSTER_MEMBER_THRESHOLD = 0.88
+PATTERN_CLUSTER_HYBRID_PATTERN_THRESHOLD = 0.82
+PATTERN_CLUSTER_SEMANTIC_LINK_THRESHOLD = 0.85
+PATTERN_CLUSTER_HYBRID_PATTERN_WEIGHT = 0.70
+PATTERN_CLUSTER_HYBRID_SEMANTIC_WEIGHT = 0.30
+PATTERN_CLUSTER_MAX_LINKS_PER_CLUSTER = 5
 TIME_WINDOW_RECENT_RECALC_LIMIT = 200
 TIME_WINDOW_RETURN_LIMIT = 24
 TRAJECTORY_FIXED_WINDOW_LENGTH = 6
@@ -598,6 +604,49 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             created_at TEXT DEFAULT CURRENT_TIMESTAMP,
             updated_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
+        CREATE TABLE IF NOT EXISTS pattern_clusters (
+            cluster_id TEXT PRIMARY KEY,
+            service_name TEXT NOT NULL,
+            log_level TEXT NOT NULL,
+            canonical_fingerprint TEXT NOT NULL,
+            representative_template TEXT NOT NULL,
+            representative_message TEXT NOT NULL DEFAULT '',
+            algorithm TEXT NOT NULL,
+            member_count INTEGER NOT NULL DEFAULT 0,
+            total_occurrence_count INTEGER NOT NULL DEFAULT 0,
+            avg_pattern_similarity REAL NOT NULL DEFAULT 0,
+            min_pattern_similarity REAL NOT NULL DEFAULT 0,
+            avg_semantic_similarity REAL NOT NULL DEFAULT 0,
+            max_semantic_similarity REAL NOT NULL DEFAULT 0,
+            known_status TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'active',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS pattern_cluster_members (
+            cluster_id TEXT NOT NULL,
+            fingerprint TEXT NOT NULL,
+            role TEXT NOT NULL DEFAULT 'member',
+            pattern_similarity REAL NOT NULL DEFAULT 0,
+            semantic_similarity REAL NOT NULL DEFAULT 0,
+            hybrid_score REAL NOT NULL DEFAULT 0,
+            match_type TEXT NOT NULL DEFAULT 'pattern_match',
+            occurrence_count INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY(cluster_id, fingerprint)
+        );
+        CREATE TABLE IF NOT EXISTS pattern_cluster_links (
+            source_cluster_id TEXT NOT NULL,
+            target_cluster_id TEXT NOT NULL,
+            pattern_similarity REAL NOT NULL DEFAULT 0,
+            semantic_similarity REAL NOT NULL DEFAULT 0,
+            hybrid_score REAL NOT NULL DEFAULT 0,
+            link_type TEXT NOT NULL DEFAULT 'semantic_match',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY(source_cluster_id, target_cluster_id)
+        );
         CREATE TABLE IF NOT EXISTS event_time_windows (
             window_id TEXT PRIMARY KEY,
             service_name TEXT NOT NULL,
@@ -677,6 +726,12 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             ON event_time_windows(service_name, bucket_size, bucket_start DESC);
         CREATE INDEX IF NOT EXISTS idx_state_vectors_service_bucket
             ON system_state_vectors(service_name, bucket_size, bucket_start DESC);
+        CREATE INDEX IF NOT EXISTS idx_pattern_clusters_service_level
+            ON pattern_clusters(service_name, log_level, member_count DESC);
+        CREATE INDEX IF NOT EXISTS idx_pattern_cluster_members_fingerprint
+            ON pattern_cluster_members(fingerprint);
+        CREATE INDEX IF NOT EXISTS idx_pattern_cluster_links_target
+            ON pattern_cluster_links(target_cluster_id, semantic_similarity DESC);
         CREATE INDEX IF NOT EXISTS idx_trajectories_service_bucket
             ON trajectories(service_name, bucket_size, end_bucket DESC);
         CREATE INDEX IF NOT EXISTS idx_trajectory_clusters_service_bucket
@@ -1799,6 +1854,695 @@ def build_semantic_log_clusters(
         )
         for index, items in enumerate(cluster_groups, start=1)
     ]
+
+
+def _pattern_cluster_text(item: dict[str, Any]) -> str:
+    return "\n".join(
+        [
+            f"service={item.get('service_name', '')}",
+            f"level={item.get('log_level', '')}",
+            f"fingerprint={item.get('fingerprint', '')}",
+            f"drain_template={item.get('drain_template') or drain_log_template(str(item.get('message') or ''))}",
+            f"normalized_message={item.get('normalized_message') or normalize_log_text(str(item.get('message') or ''))}",
+            f"stacktrace={item.get('stacktrace', '')}",
+        ]
+    )
+
+
+def _cosine_score(left: list[float] | None, right: list[float] | None) -> float:
+    if not left or not right:
+        return 0.0
+    return round(
+        max(
+            0.0,
+            min(
+                1.0,
+                sum(
+                    float(left_value) * float(right_value)
+                    for left_value, right_value in zip(left, right, strict=False)
+                ),
+            ),
+        ),
+        4,
+    )
+
+
+def _pattern_cluster_match_from_group(
+    target: dict[str, Any], *, semantic_similarity: float
+) -> dict[str, Any]:
+    metadata = {
+        "fingerprint": str(target.get("fingerprint") or ""),
+        "service_name": str(target.get("service_name") or ""),
+        "log_level": str(target.get("log_level") or ""),
+        "normalized_message": str(
+            target.get("normalized_message")
+            or normalize_log_text(str(target.get("message") or ""))
+        ),
+        "message": str(target.get("message") or ""),
+        "stacktrace": str(target.get("stacktrace") or ""),
+    }
+    return {
+        "id": f"{metadata['service_name']}:{metadata['fingerprint']}",
+        "document": _pattern_cluster_text(target),
+        "metadata": metadata,
+        "similarity": semantic_similarity,
+    }
+
+
+def _hybrid_cluster_score(pattern_similarity: float, semantic_similarity: float) -> float:
+    return round(
+        (pattern_similarity * PATTERN_CLUSTER_HYBRID_PATTERN_WEIGHT)
+        + (semantic_similarity * PATTERN_CLUSTER_HYBRID_SEMANTIC_WEIGHT),
+        4,
+    )
+
+
+def _pattern_cluster_match_type(
+    *, pattern_similarity: float, semantic_similarity: float, exact: bool = False
+) -> str:
+    if exact:
+        return "exact"
+    if pattern_similarity >= PATTERN_CLUSTER_MEMBER_THRESHOLD:
+        return "pattern_match"
+    if (
+        pattern_similarity >= PATTERN_CLUSTER_HYBRID_PATTERN_THRESHOLD
+        and semantic_similarity >= PATTERN_CLUSTER_SEMANTIC_LINK_THRESHOLD
+    ):
+        return "hybrid_match"
+    if semantic_similarity >= PATTERN_CLUSTER_SEMANTIC_LINK_THRESHOLD:
+        return "semantic_match"
+    return "weak"
+
+
+def _pattern_cluster_member_pair(
+    *, pattern_similarity: float, semantic_similarity: float
+) -> bool:
+    return _pattern_cluster_match_type(
+        pattern_similarity=pattern_similarity,
+        semantic_similarity=semantic_similarity,
+    ) in {"pattern_match", "hybrid_match"}
+
+
+def _pattern_cluster_pair_scores(
+    groups: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[tuple[str, str], dict[str, float]]]:
+    enriched = _apply_drain_templates(groups)
+    texts = [_pattern_cluster_text(item) for item in enriched]
+    embeddings = embed_pattern_texts_normalized(texts)
+    vectors = (
+        embeddings
+        if embeddings is not None and len(embeddings) == len(enriched)
+        else [None for _ in enriched]
+    )
+    signatures = [
+        duplicate_candidate_signature(str(item.get("message") or ""))
+        for item in enriched
+    ]
+    scores: dict[tuple[str, str], dict[str, float]] = {}
+    for left_index, left in enumerate(enriched):
+        left_fp = str(left.get("fingerprint") or "")
+        left_template = str(left.get("drain_template") or "")
+        for right_index in range(left_index + 1, len(enriched)):
+            right = enriched[right_index]
+            right_fp = str(right.get("fingerprint") or "")
+            if not left_fp or not right_fp:
+                continue
+            if str(left.get("service_name") or "") != str(right.get("service_name") or ""):
+                continue
+            if str(left.get("log_level") or "").upper() != str(
+                right.get("log_level") or ""
+            ).upper():
+                continue
+            semantic_similarity = _cosine_score(vectors[left_index], vectors[right_index])
+            right_template = str(right.get("drain_template") or "")
+            same_template = bool(left_template and left_template == right_template)
+            same_signature = bool(
+                signatures[left_index]
+                and signatures[left_index] == signatures[right_index]
+            )
+            if (
+                not same_template
+                and not same_signature
+                and semantic_similarity < PATTERN_CLUSTER_SEMANTIC_LINK_THRESHOLD
+            ):
+                continue
+            left_match = _pattern_cluster_match_from_group(
+                right, semantic_similarity=semantic_similarity
+            )
+            right_match = _pattern_cluster_match_from_group(
+                left, semantic_similarity=semantic_similarity
+            )
+            pattern_similarity = max(
+                _pattern_similarity(left, left_match),
+                _pattern_similarity(right, right_match),
+            )
+            hybrid_score = _hybrid_cluster_score(
+                pattern_similarity, semantic_similarity
+            )
+            scores[(left_fp, right_fp)] = {
+                "pattern_similarity": pattern_similarity,
+                "semantic_similarity": semantic_similarity,
+                "hybrid_score": hybrid_score,
+            }
+    return enriched, scores
+
+
+def _pattern_cluster_score_for_pair(
+    pair_scores: dict[tuple[str, str], dict[str, float]], left: str, right: str
+) -> dict[str, float]:
+    if left == right:
+        return {
+            "pattern_similarity": 1.0,
+            "semantic_similarity": 1.0,
+            "hybrid_score": 1.0,
+        }
+    return pair_scores.get((left, right), pair_scores.get((right, left), {}))
+
+
+def _connected_pattern_components(
+    groups: list[dict[str, Any]], pair_scores: dict[tuple[str, str], dict[str, float]]
+) -> list[set[str]]:
+    lookup = {str(group.get("fingerprint") or ""): group for group in groups}
+    edges: dict[str, set[str]] = {fingerprint: set() for fingerprint in lookup}
+    for (left, right), score in pair_scores.items():
+        if _pattern_cluster_member_pair(
+            pattern_similarity=float(score.get("pattern_similarity") or 0),
+            semantic_similarity=float(score.get("semantic_similarity") or 0),
+        ):
+            edges[left].add(right)
+            edges[right].add(left)
+    seen: set[str] = set()
+    components: list[set[str]] = []
+    for fingerprint in edges:
+        if fingerprint in seen:
+            continue
+        stack = [fingerprint]
+        component: set[str] = set()
+        seen.add(fingerprint)
+        while stack:
+            current = stack.pop()
+            component.add(current)
+            for next_fingerprint in edges[current]:
+                if next_fingerprint not in seen:
+                    seen.add(next_fingerprint)
+                    stack.append(next_fingerprint)
+        components.append(component)
+    return components
+
+
+def _hdbscan_pattern_components(
+    groups: list[dict[str, Any]], pair_scores: dict[tuple[str, str], dict[str, float]]
+) -> list[set[str]]:
+    buckets: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for group in groups:
+        service_name = str(group.get("service_name") or "")
+        log_level = str(group.get("log_level") or "").upper()
+        fingerprint = str(group.get("fingerprint") or "")
+        if service_name and log_level and fingerprint:
+            buckets.setdefault((service_name, log_level), []).append(group)
+
+    components: list[set[str]] = []
+    for bucket_items in buckets.values():
+        if len(bucket_items) < HDBSCAN_MIN_CLUSTER_SIZE:
+            continue
+        fingerprints = [str(item.get("fingerprint") or "") for item in bucket_items]
+        matrix: list[list[float]] = []
+        for left in fingerprints:
+            row: list[float] = []
+            for right in fingerprints:
+                if left == right:
+                    row.append(0.0)
+                    continue
+                score = _pattern_cluster_score_for_pair(pair_scores, left, right)
+                row.append(
+                    min(
+                        1.0,
+                        max(0.0, 1.0 - float(score.get("pattern_similarity") or 0.0)),
+                    )
+                )
+            matrix.append(row)
+        labels = _hdbscan_cluster_labels(matrix)
+        if not labels or len(labels) != len(bucket_items):
+            continue
+        by_label: dict[int, set[str]] = {}
+        for label, fingerprint in zip(labels, fingerprints, strict=False):
+            if label < 0:
+                continue
+            by_label.setdefault(label, set()).add(fingerprint)
+        for component in by_label.values():
+            if len(component) >= 2:
+                components.append(component)
+    return components
+
+
+def _merge_pattern_components(components: list[set[str]], all_fingerprints: set[str]) -> list[set[str]]:
+    merged: list[set[str]] = []
+    for component in components:
+        if not component:
+            continue
+        overlaps = [index for index, item in enumerate(merged) if item & component]
+        if not overlaps:
+            merged.append(set(component))
+            continue
+        target_index = overlaps[0]
+        merged[target_index].update(component)
+        for index in reversed(overlaps[1:]):
+            merged[target_index].update(merged[index])
+            del merged[index]
+    assigned = set().union(*merged) if merged else set()
+    for fingerprint in sorted(all_fingerprints - assigned):
+        merged.append({fingerprint})
+    return sorted(merged, key=lambda item: (len(item), sorted(item)[0]), reverse=True)
+
+
+def _canonical_pattern_item(items: list[dict[str, Any]]) -> dict[str, Any]:
+    def priority(item: dict[str, Any]) -> tuple[int, int, str]:
+        status = str(item.get("pattern_status") or "")
+        known_score = 2 if status == "known_exact" else 1 if status == "known_similar" else 0
+        return (
+            known_score,
+            int(item.get("occurrence_count") or 0),
+            str(item.get("last_seen") or ""),
+        )
+
+    return max(items, key=priority)
+
+
+def _pattern_cluster_id(service_name: str, log_level: str, canonical_fingerprint: str) -> str:
+    raw = f"{service_name}|{log_level.upper()}|{canonical_fingerprint}"
+    return "PC-" + hashlib.sha1(raw.encode("utf-8")).hexdigest()[:10].upper()
+
+
+def _pattern_cluster_algorithm(
+    component: set[str], hdbscan_components: list[set[str]]
+) -> str:
+    if any(component <= hdbscan_component for hdbscan_component in hdbscan_components):
+        return "connected_component+hdbscan"
+    return "connected_component"
+
+
+def _delete_pattern_clusters_for_services(
+    conn: sqlite3.Connection, service_names: set[str]
+) -> None:
+    if not service_names:
+        return
+    placeholders = ",".join("?" for _ in service_names)
+    cluster_ids = [
+        str(row[0])
+        for row in conn.execute(
+            f"SELECT cluster_id FROM pattern_clusters WHERE service_name IN ({placeholders})",
+            sorted(service_names),
+        ).fetchall()
+    ]
+    if cluster_ids:
+        cluster_placeholders = ",".join("?" for _ in cluster_ids)
+        conn.execute(
+            f"DELETE FROM pattern_cluster_members WHERE cluster_id IN ({cluster_placeholders})",
+            cluster_ids,
+        )
+        conn.execute(
+            f"""
+            DELETE FROM pattern_cluster_links
+            WHERE source_cluster_id IN ({cluster_placeholders})
+               OR target_cluster_id IN ({cluster_placeholders})
+            """,
+            [*cluster_ids, *cluster_ids],
+        )
+    conn.execute(
+        f"DELETE FROM pattern_clusters WHERE service_name IN ({placeholders})",
+        sorted(service_names),
+    )
+
+
+def _upsert_pattern_cluster_records(
+    conn: sqlite3.Connection,
+    *,
+    groups: list[dict[str, Any]],
+    pair_scores: dict[tuple[str, str], dict[str, float]],
+    components: list[set[str]],
+    hdbscan_components: list[set[str]],
+) -> list[dict[str, Any]]:
+    lookup = {str(group.get("fingerprint") or ""): group for group in groups}
+    service_names = {str(group.get("service_name") or "") for group in groups if group.get("service_name")}
+    _delete_pattern_clusters_for_services(conn, service_names)
+
+    cluster_records: list[dict[str, Any]] = []
+    cluster_by_fingerprint: dict[str, str] = {}
+    for component in components:
+        items = [lookup[fingerprint] for fingerprint in sorted(component) if fingerprint in lookup]
+        if not items:
+            continue
+        canonical = _canonical_pattern_item(items)
+        canonical_fp = str(canonical.get("fingerprint") or "")
+        service_name = str(canonical.get("service_name") or "")
+        log_level = str(canonical.get("log_level") or "").upper()
+        cluster_id = _pattern_cluster_id(service_name, log_level, canonical_fp)
+        member_scores = [
+            _pattern_cluster_score_for_pair(
+                pair_scores, canonical_fp, str(item.get("fingerprint") or "")
+            )
+            for item in items
+        ]
+        pattern_values = [float(score.get("pattern_similarity") or 0) for score in member_scores]
+        semantic_values = [
+            float(score.get("semantic_similarity") or 0) for score in member_scores
+        ]
+        total_count = sum(int(item.get("occurrence_count") or 0) for item in items)
+        known_status = str(canonical.get("pattern_status") or "")
+        algorithm = _pattern_cluster_algorithm(component, hdbscan_components)
+        representative_template = str(
+            canonical.get("drain_template")
+            or drain_log_template(str(canonical.get("message") or ""))
+        )
+        conn.execute(
+            """
+            INSERT INTO pattern_clusters(
+                cluster_id, service_name, log_level, canonical_fingerprint,
+                representative_template, representative_message, algorithm,
+                member_count, total_occurrence_count, avg_pattern_similarity,
+                min_pattern_similarity, avg_semantic_similarity,
+                max_semantic_similarity, known_status, status, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', CURRENT_TIMESTAMP)
+            ON CONFLICT(cluster_id) DO UPDATE SET
+                service_name=excluded.service_name,
+                log_level=excluded.log_level,
+                canonical_fingerprint=excluded.canonical_fingerprint,
+                representative_template=excluded.representative_template,
+                representative_message=excluded.representative_message,
+                algorithm=excluded.algorithm,
+                member_count=excluded.member_count,
+                total_occurrence_count=excluded.total_occurrence_count,
+                avg_pattern_similarity=excluded.avg_pattern_similarity,
+                min_pattern_similarity=excluded.min_pattern_similarity,
+                avg_semantic_similarity=excluded.avg_semantic_similarity,
+                max_semantic_similarity=excluded.max_semantic_similarity,
+                known_status=excluded.known_status,
+                status=excluded.status,
+                updated_at=CURRENT_TIMESTAMP
+            """,
+            (
+                cluster_id,
+                service_name,
+                log_level,
+                canonical_fp,
+                representative_template,
+                str(canonical.get("message") or ""),
+                algorithm,
+                len(items),
+                total_count,
+                round(sum(pattern_values) / len(pattern_values), 4) if pattern_values else 0,
+                round(min(pattern_values), 4) if pattern_values else 0,
+                round(sum(semantic_values) / len(semantic_values), 4) if semantic_values else 0,
+                round(max(semantic_values), 4) if semantic_values else 0,
+                known_status,
+            ),
+        )
+        members: list[dict[str, Any]] = []
+        for item, score in zip(items, member_scores, strict=False):
+            fingerprint = str(item.get("fingerprint") or "")
+            exact = fingerprint == canonical_fp
+            pattern_similarity = float(score.get("pattern_similarity") or 0)
+            semantic_similarity = float(score.get("semantic_similarity") or 0)
+            match_type = _pattern_cluster_match_type(
+                pattern_similarity=pattern_similarity,
+                semantic_similarity=semantic_similarity,
+                exact=exact,
+            )
+            role = "canonical" if exact else "member"
+            hybrid_score = _hybrid_cluster_score(pattern_similarity, semantic_similarity)
+            conn.execute(
+                """
+                INSERT INTO pattern_cluster_members(
+                    cluster_id, fingerprint, role, pattern_similarity,
+                    semantic_similarity, hybrid_score, match_type,
+                    occurrence_count, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(cluster_id, fingerprint) DO UPDATE SET
+                    role=excluded.role,
+                    pattern_similarity=excluded.pattern_similarity,
+                    semantic_similarity=excluded.semantic_similarity,
+                    hybrid_score=excluded.hybrid_score,
+                    match_type=excluded.match_type,
+                    occurrence_count=excluded.occurrence_count,
+                    updated_at=CURRENT_TIMESTAMP
+                """,
+                (
+                    cluster_id,
+                    fingerprint,
+                    role,
+                    pattern_similarity,
+                    semantic_similarity,
+                    hybrid_score,
+                    match_type,
+                    int(item.get("occurrence_count") or 0),
+                ),
+            )
+            cluster_by_fingerprint[fingerprint] = cluster_id
+            members.append(
+                {
+                    "fingerprint": fingerprint,
+                    "role": role,
+                    "pattern_similarity": pattern_similarity,
+                    "semantic_similarity": semantic_similarity,
+                    "hybrid_score": hybrid_score,
+                    "match_type": match_type,
+                    "occurrence_count": int(item.get("occurrence_count") or 0),
+                }
+            )
+        cluster_records.append(
+            {
+                "cluster_id": cluster_id,
+                "service_name": service_name,
+                "log_level": log_level,
+                "canonical_fingerprint": canonical_fp,
+                "representative_template": representative_template,
+                "representative_message": str(canonical.get("message") or ""),
+                "algorithm": algorithm,
+                "member_count": len(items),
+                "total_occurrence_count": total_count,
+                "avg_pattern_similarity": round(sum(pattern_values) / len(pattern_values), 4)
+                if pattern_values
+                else 0,
+                "min_pattern_similarity": round(min(pattern_values), 4)
+                if pattern_values
+                else 0,
+                "avg_semantic_similarity": round(sum(semantic_values) / len(semantic_values), 4)
+                if semantic_values
+                else 0,
+                "max_semantic_similarity": round(max(semantic_values), 4)
+                if semantic_values
+                else 0,
+                "known_status": known_status,
+                "members": members,
+                "links": [],
+            }
+        )
+
+    best_links: dict[tuple[str, str], dict[str, Any]] = {}
+    for (left, right), score in pair_scores.items():
+        left_cluster = cluster_by_fingerprint.get(left)
+        right_cluster = cluster_by_fingerprint.get(right)
+        if not left_cluster or not right_cluster or left_cluster == right_cluster:
+            continue
+        semantic_similarity = float(score.get("semantic_similarity") or 0)
+        if semantic_similarity < PATTERN_CLUSTER_SEMANTIC_LINK_THRESHOLD:
+            continue
+        source, target = sorted([left_cluster, right_cluster])
+        key = (source, target)
+        candidate = {
+            "source_cluster_id": source,
+            "target_cluster_id": target,
+            "pattern_similarity": float(score.get("pattern_similarity") or 0),
+            "semantic_similarity": semantic_similarity,
+            "hybrid_score": float(score.get("hybrid_score") or 0),
+            "link_type": _pattern_cluster_match_type(
+                pattern_similarity=float(score.get("pattern_similarity") or 0),
+                semantic_similarity=semantic_similarity,
+            ),
+        }
+        current = best_links.get(key)
+        if current is None or candidate["semantic_similarity"] > current["semantic_similarity"]:
+            best_links[key] = candidate
+
+    link_counts: dict[str, int] = {}
+    for link in sorted(
+        best_links.values(),
+        key=lambda item: (
+            float(item["semantic_similarity"]),
+            float(item["pattern_similarity"]),
+        ),
+        reverse=True,
+    ):
+        source = str(link["source_cluster_id"])
+        target = str(link["target_cluster_id"])
+        if (
+            link_counts.get(source, 0) >= PATTERN_CLUSTER_MAX_LINKS_PER_CLUSTER
+            or link_counts.get(target, 0) >= PATTERN_CLUSTER_MAX_LINKS_PER_CLUSTER
+        ):
+            continue
+        conn.execute(
+            """
+            INSERT INTO pattern_cluster_links(
+                source_cluster_id, target_cluster_id, pattern_similarity,
+                semantic_similarity, hybrid_score, link_type, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(source_cluster_id, target_cluster_id) DO UPDATE SET
+                pattern_similarity=excluded.pattern_similarity,
+                semantic_similarity=excluded.semantic_similarity,
+                hybrid_score=excluded.hybrid_score,
+                link_type=excluded.link_type,
+                updated_at=CURRENT_TIMESTAMP
+            """,
+            (
+                source,
+                target,
+                link["pattern_similarity"],
+                link["semantic_similarity"],
+                link["hybrid_score"],
+                link["link_type"],
+            ),
+        )
+        link_counts[source] = link_counts.get(source, 0) + 1
+        link_counts[target] = link_counts.get(target, 0) + 1
+        for cluster in cluster_records:
+            if cluster["cluster_id"] in {source, target}:
+                cluster["links"].append(link)
+    return sorted(
+        cluster_records,
+        key=lambda item: (
+            -int(item["total_occurrence_count"]),
+            str(item["cluster_id"]),
+        ),
+    )
+
+
+def build_pattern_clusters(
+    conn: sqlite3.Connection, groups: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Persist canonical pattern clusters using pattern and semantic similarity."""
+
+    if not groups:
+        return []
+    enriched_groups, pair_scores = _pattern_cluster_pair_scores(groups)
+    all_fingerprints = {
+        str(group.get("fingerprint") or "")
+        for group in enriched_groups
+        if group.get("fingerprint")
+    }
+    connected_components = _connected_pattern_components(enriched_groups, pair_scores)
+    hdbscan_components = _hdbscan_pattern_components(enriched_groups, pair_scores)
+    components = _merge_pattern_components(
+        [*connected_components, *hdbscan_components],
+        all_fingerprints,
+    )
+    return _upsert_pattern_cluster_records(
+        conn,
+        groups=enriched_groups,
+        pair_scores=pair_scores,
+        components=components,
+        hdbscan_components=hdbscan_components,
+    )
+
+
+def fetch_pattern_clusters(
+    *, service_name: str | None = None, limit: int = 100
+) -> list[dict[str, Any]]:
+    db_path = _resolve_db_path()
+    if not Path(db_path).exists():
+        return []
+    with sqlite3.connect(db_path) as conn:
+        ensure_schema(conn)
+        return _fetch_pattern_clusters(conn, service_name=service_name, limit=limit)
+
+
+def _fetch_pattern_clusters(
+    conn: sqlite3.Connection, *, service_name: str | None = None, limit: int = 100
+) -> list[dict[str, Any]]:
+    params: list[Any] = []
+    where = ""
+    if service_name:
+        where = "WHERE service_name=?"
+        params.append(service_name)
+    rows = conn.execute(
+        f"""
+        SELECT cluster_id, service_name, log_level, canonical_fingerprint,
+               representative_template, representative_message, algorithm,
+               member_count, total_occurrence_count, avg_pattern_similarity,
+               min_pattern_similarity, avg_semantic_similarity,
+               max_semantic_similarity, known_status, status
+        FROM pattern_clusters
+        {where}
+        ORDER BY total_occurrence_count DESC, member_count DESC, cluster_id ASC
+        LIMIT ?
+        """,
+        [*params, limit],
+    ).fetchall()
+    clusters: list[dict[str, Any]] = []
+    for row in rows:
+        cluster_id = str(row[0])
+        members = [
+            {
+                "fingerprint": str(member[0]),
+                "role": str(member[1]),
+                "pattern_similarity": float(member[2] or 0),
+                "semantic_similarity": float(member[3] or 0),
+                "hybrid_score": float(member[4] or 0),
+                "match_type": str(member[5]),
+                "occurrence_count": int(member[6] or 0),
+            }
+            for member in conn.execute(
+                """
+                SELECT fingerprint, role, pattern_similarity, semantic_similarity,
+                       hybrid_score, match_type, occurrence_count
+                FROM pattern_cluster_members
+                WHERE cluster_id=?
+                ORDER BY role='canonical' DESC, occurrence_count DESC, fingerprint ASC
+                """,
+                (cluster_id,),
+            ).fetchall()
+        ]
+        links = [
+            {
+                "source_cluster_id": str(link[0]),
+                "target_cluster_id": str(link[1]),
+                "pattern_similarity": float(link[2] or 0),
+                "semantic_similarity": float(link[3] or 0),
+                "hybrid_score": float(link[4] or 0),
+                "link_type": str(link[5]),
+            }
+            for link in conn.execute(
+                """
+                SELECT source_cluster_id, target_cluster_id, pattern_similarity,
+                       semantic_similarity, hybrid_score, link_type
+                FROM pattern_cluster_links
+                WHERE source_cluster_id=? OR target_cluster_id=?
+                ORDER BY semantic_similarity DESC, pattern_similarity DESC
+                """,
+                (cluster_id, cluster_id),
+            ).fetchall()
+        ]
+        clusters.append(
+            {
+                "cluster_id": cluster_id,
+                "service_name": str(row[1]),
+                "log_level": str(row[2]),
+                "canonical_fingerprint": str(row[3]),
+                "representative_template": str(row[4]),
+                "representative_message": str(row[5]),
+                "algorithm": str(row[6]),
+                "member_count": int(row[7] or 0),
+                "total_occurrence_count": int(row[8] or 0),
+                "avg_pattern_similarity": float(row[9] or 0),
+                "min_pattern_similarity": float(row[10] or 0),
+                "avg_semantic_similarity": float(row[11] or 0),
+                "max_semantic_similarity": float(row[12] or 0),
+                "known_status": str(row[13] or ""),
+                "status": str(row[14] or ""),
+                "members": members,
+                "links": links,
+            }
+        )
+    return clusters
 
 
 def _semantic_duplicate_groups(groups: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
@@ -4630,6 +5374,7 @@ def run_detection_pipeline(
             candidates=duplicate_candidates,
             groups_by_fingerprint={str(g["fingerprint"]): g for g in visible_groups},
         )
+        pattern_clusters = build_pattern_clusters(model_conn, visible_groups)
         merge_groups = _fetch_fingerprint_merge_groups(
             model_conn, status="pending", limit=50
         )
@@ -4726,6 +5471,7 @@ def run_detection_pipeline(
         "impacts": visible_impacts,
         "recommendations": visible_recs,
         "recommendation": top_rec,
+        "pattern_clusters": pattern_clusters,
         "semantic_clusters": semantic_clusters,
         "duplicate_pattern_candidates": duplicate_candidates,
         "fingerprint_merge_groups": merge_groups,
@@ -4740,6 +5486,7 @@ def run_detection_pipeline(
             "total_fingerprints": len(visible_groups),
             "known_patterns": known_count,
             "new_patterns": new_count,
+            "pattern_clusters": len(pattern_clusters),
             "semantic_clusters": len(semantic_clusters),
             "trajectories": len(latest_trajectories),
             "trajectory_clusters": len(latest_trajectory_clusters),

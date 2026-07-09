@@ -127,6 +127,7 @@ def create_initial_state(
             "anomalies": [],
             "anomaly_daily_counts": [],
             "clusters": [],
+            "pattern_clusters": [],
             "semantic_clusters": [],
             "stack_traces": [],
             "incident_candidates": [],

@@ -38,6 +38,69 @@
       </div>
     </div>
 
+    <div
+      v-if="patternClusters.length"
+      class="mb-4 rounded border border-blue-100 bg-blue-50/60 p-3"
+    >
+      <div class="mb-2 flex flex-wrap items-center justify-between gap-2">
+        <h4 class="text-sm font-semibold text-blue-900">
+          Canonical Pattern Clusters
+        </h4>
+        <span class="text-xs font-semibold text-blue-700">
+          {{ formatCount(patternClusters.length) }} clusters
+        </span>
+      </div>
+      <div class="grid gap-2 md:grid-cols-2">
+        <article
+          v-for="cluster in visiblePatternClusters"
+          :key="cluster.cluster_id"
+          class="rounded border border-blue-100 bg-white p-3"
+        >
+          <div class="mb-2 flex flex-wrap items-start justify-between gap-2">
+            <div>
+              <p class="font-mono text-xs font-semibold text-slate-700">
+                {{ cluster.cluster_id }}
+              </p>
+              <p class="mt-1 line-clamp-2 text-xs text-slate-600">
+                {{ cluster.representative_template || cluster.representative_message }}
+              </p>
+            </div>
+            <span
+              class="rounded bg-slate-100 px-2 py-1 text-xs font-semibold text-slate-700"
+            >
+              {{ cluster.member_count }} members
+            </span>
+          </div>
+          <dl class="grid grid-cols-2 gap-2 text-xs text-slate-600">
+            <div>
+              <dt class="font-semibold text-slate-500">Canonical</dt>
+              <dd class="break-all font-mono">{{ cluster.canonical_fingerprint }}</dd>
+            </div>
+            <div>
+              <dt class="font-semibold text-slate-500">Algorithm</dt>
+              <dd>{{ cluster.algorithm }}</dd>
+            </div>
+            <div>
+              <dt class="font-semibold text-slate-500">Pattern Avg</dt>
+              <dd>{{ percent(cluster.avg_pattern_similarity) }}%</dd>
+            </div>
+            <div>
+              <dt class="font-semibold text-slate-500">Semantic Max</dt>
+              <dd>{{ percent(cluster.max_semantic_similarity) }}%</dd>
+            </div>
+            <div>
+              <dt class="font-semibold text-slate-500">Links</dt>
+              <dd>{{ cluster.links.length }}</dd>
+            </div>
+            <div>
+              <dt class="font-semibold text-slate-500">Logs</dt>
+              <dd>{{ cluster.total_occurrence_count }}</dd>
+            </div>
+          </dl>
+        </article>
+      </div>
+    </div>
+
     <div class="mb-4 flex flex-wrap gap-2 border-b border-slate-200">
       <button
         v-for="tab in tabs"
@@ -331,20 +394,14 @@
         </div>
 
         <div class="max-h-[calc(85vh-64px)] space-y-4 overflow-y-auto p-4">
-          <section>
+          <section v-if="selectedCluster.anomaly_detected">
             <h5 class="mb-2 text-sm font-semibold text-slate-700">
               Detection Reason
             </h5>
-            <div
-              v-if="selectedCluster.anomaly_detected"
-              class="rounded border border-red-100 bg-red-50 p-3 text-sm text-red-800"
-            >
+            <div class="rounded border border-red-100 bg-red-50 p-3 text-sm text-red-800">
               <div class="font-semibold">{{ anomalyTypeLabel(selectedCluster) }}</div>
               <div class="mt-1">{{ anomalyReason(selectedCluster) || '-' }}</div>
             </div>
-            <p v-else class="rounded border border-slate-200 p-3 text-sm text-slate-500">
-              No anomaly detection reason recorded for this pattern.
-            </p>
           </section>
 
           <section>
@@ -483,7 +540,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { agentApi } from '@/api/agentApi'
-import type { Cluster } from '@/types/agentTypes'
+import type { Cluster, PatternCluster } from '@/types/agentTypes'
 
 const PAGE_SIZE = 10
 type PatternTab = 'similar' | 'new' | 'known' | 'observed' | 'anomaly'
@@ -491,6 +548,7 @@ type AnomalyTab = 'all' | 'decrease' | 'increase' | 'absence' | 'recurrence'
 
 const props = defineProps<{
   clusters: Cluster[]
+  patternClusters?: PatternCluster[]
   serviceName: string
   recommendationBusyFingerprint?: string | null
 }>()
@@ -514,6 +572,10 @@ const searchQuery = ref('')
 const sortedClusters = computed(() =>
   [...props.clusters].sort((a, b) => b.count - a.count)
 )
+
+const patternClusters = computed(() => props.patternClusters ?? [])
+
+const visiblePatternClusters = computed(() => patternClusters.value.slice(0, 4))
 
 const knownClusters = computed(() =>
   sortedClusters.value.filter((cluster) => cluster.pattern_status === 'known_exact')
@@ -697,6 +759,12 @@ function similarity(item: Cluster): number {
 
 function formatCount(value: number): string {
   return new Intl.NumberFormat().format(value)
+}
+
+function percent(value: number): number {
+  const score = Number(value)
+  if (!Number.isFinite(score)) return 0
+  return Math.round(score <= 1 ? score * 100 : score)
 }
 
 function clusterMatchesSearch(cluster: Cluster, query: string): boolean {

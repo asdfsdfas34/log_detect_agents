@@ -500,6 +500,45 @@ export interface Cluster {
   anomaly_metric?: Record<string, unknown>
 }
 
+export interface PatternClusterMember {
+  fingerprint: string
+  role: string
+  pattern_similarity: number
+  semantic_similarity: number
+  hybrid_score: number
+  match_type: string
+  occurrence_count: number
+}
+
+export interface PatternClusterLink {
+  source_cluster_id: string
+  target_cluster_id: string
+  pattern_similarity: number
+  semantic_similarity: number
+  hybrid_score: number
+  link_type: string
+}
+
+export interface PatternCluster {
+  cluster_id: string
+  service_name: string
+  log_level: string
+  canonical_fingerprint: string
+  representative_template: string
+  representative_message: string
+  algorithm: string
+  member_count: number
+  total_occurrence_count: number
+  avg_pattern_similarity: number
+  min_pattern_similarity: number
+  avg_semantic_similarity: number
+  max_semantic_similarity: number
+  known_status: string
+  status: string
+  members: PatternClusterMember[]
+  links: PatternClusterLink[]
+}
+
 export interface SimilarPatternClustersResponse {
   fingerprint: string
   service_name: string
@@ -515,6 +554,7 @@ export interface ScenarioSummary {
   anomalies_detected: number
   exception_registered_count: number
   exception_excluded_logs?: number
+  pattern_clusters?: number
   risk_score: number
   risk_level: string
   detection_status: string
@@ -546,6 +586,7 @@ export interface SharedState {
     normalized_logs: NormalizedLog[]
     anomalies: Anomaly[]
     clusters: Cluster[]
+    pattern_clusters?: PatternCluster[]
     stack_traces: string[]
     incident_candidates?: Array<Record<string, unknown>>
     new_pattern_candidates?: Array<Record<string, unknown>>

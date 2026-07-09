@@ -617,10 +617,9 @@ def test_enrich_pattern_clusters_excludes_self_match_by_metadata(monkeypatch) ->
     ]
 
 
-def test_related_knowledge_cards_include_exact_and_similar_cards(monkeypatch) -> None:
+def test_related_knowledge_cards_include_only_similarity_matched_cards(monkeypatch) -> None:
     def fake_exact_cards(*, fingerprint: str | None = None, limit: int = 20):
-        assert fingerprint == "FP-NEW"
-        return [{"card_id": "KC-EXACT", "fingerprint": "FP-NEW"}]
+        raise AssertionError("recommendation lookup should not include all exact cards")
 
     def fake_similar_batches(**kwargs: Any) -> list[list[dict[str, Any]]]:
         return [
@@ -634,6 +633,11 @@ def test_related_knowledge_cards_include_exact_and_similar_cards(monkeypatch) ->
                     "id": "case-card-v2:knowledge-card:KC-EXACT",
                     "metadata": {"card_id": "KC-EXACT", "fingerprint": "FP-NEW"},
                     "similarity": 0.99,
+                },
+                {
+                    "id": "case-card-v2:knowledge-card:KC-WEAK",
+                    "metadata": {"card_id": "KC-WEAK", "fingerprint": "FP-FAR"},
+                    "similarity": 0.62,
                 },
             ]
         ]
