@@ -113,6 +113,13 @@ PATTERN_WEIGHTS = {
 HYBRID_KNOWN_SIMILARITY_THRESHOLD = PATTERN_KNOWN_SIMILARITY_THRESHOLD
 HYBRID_DUPLICATE_SIMILARITY_THRESHOLD = PATTERN_DUPLICATE_SIMILARITY_THRESHOLD
 HYBRID_WEIGHTS = PATTERN_WEIGHTS
+HYBRID_VECTOR_SCHEMA_VERSION = "hybrid-event-v1"
+HYBRID_HASH_DIMENSIONS = 32
+HYBRID_TEXT_WEIGHT = 0.75
+HYBRID_CATEGORICAL_WEIGHT = 0.15
+HYBRID_NUMERIC_WEIGHT = 0.10
+HYBRID_NO_TEXT_CATEGORICAL_WEIGHT = 0.65
+HYBRID_NO_TEXT_NUMERIC_WEIGHT = 0.35
 HDBSCAN_MIN_CLUSTER_SIZE = 3
 HDBSCAN_MIN_SAMPLES = 2
 HDBSCAN_MAX_DISTANCE = 1.0 - PATTERN_DUPLICATE_SIMILARITY_THRESHOLD
@@ -135,6 +142,7 @@ TRAJECTORY_CLUSTER_RETURN_LIMIT = 8
 TRAJECTORY_NEAREST_RETURN_LIMIT = 3
 TRAJECTORY_CLUSTER_MIN_SIZE = 3
 TRAJECTORY_CLUSTER_MIN_SAMPLES = 2
+TIME_SERIES_BUCKET_SIZES = ("day", "hour", "30min")
 
 
 @lru_cache(maxsize=1)
@@ -619,6 +627,8 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             avg_semantic_similarity REAL NOT NULL DEFAULT 0,
             max_semantic_similarity REAL NOT NULL DEFAULT 0,
             known_status TEXT NOT NULL DEFAULT '',
+            hybrid_vector_json TEXT NOT NULL DEFAULT '[]',
+            hybrid_vector_schema_version TEXT NOT NULL DEFAULT '',
             status TEXT NOT NULL DEFAULT 'active',
             created_at TEXT DEFAULT CURRENT_TIMESTAMP,
             updated_at TEXT DEFAULT CURRENT_TIMESTAMP
@@ -786,6 +796,16 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             cur.execute(
                 f"ALTER TABLE exception_registry ADD COLUMN {column} {definition}"
             )
+    for column, definition in {
+        "hybrid_vector_json": "TEXT NOT NULL DEFAULT '[]'",
+        "hybrid_vector_schema_version": "TEXT NOT NULL DEFAULT ''",
+    }.items():
+        pattern_cluster_columns = [
+            row[1]
+            for row in cur.execute("PRAGMA table_info(pattern_clusters)").fetchall()
+        ]
+        if column not in pattern_cluster_columns:
+            cur.execute(f"ALTER TABLE pattern_clusters ADD COLUMN {column} {definition}")
     conn.commit()
     from app.patternops.registry import ensure_patternops_schema
 
@@ -1801,22 +1821,18 @@ def build_semantic_log_clusters(
         str(item.get("pattern") or ""): item for item in anomalies or [] if item.get("pattern")
     }
 
+    enriched_groups = _attach_detection_features(
+        enriched_groups,
+        impacts=impacts,
+        anomalies=anomalies,
+    )
+
     cluster_groups: list[list[dict[str, Any]]] = []
     algorithm = "drain3_template_fallback"
-    texts = [
-        "\n".join(
-            [
-                f"service={item.get('service_name', '')}",
-                f"level={item.get('log_level', '')}",
-                f"drain_template={item.get('drain_template', '')}",
-                f"stacktrace={item.get('stacktrace', '')}",
-            ]
-        )
-        for item in enriched_groups
-    ]
-    embeddings = embed_pattern_texts_normalized(texts)
-    if embeddings and len(embeddings) == len(enriched_groups):
-        labels, algorithm = _semantic_cluster_labels_from_embeddings(embeddings)
+    hybrid_vectors = _hybrid_vectors_for_groups(enriched_groups)
+    if hybrid_vectors and len(hybrid_vectors) == len(enriched_groups):
+        labels, algorithm = _semantic_cluster_labels_from_embeddings(hybrid_vectors)
+        algorithm = algorithm.replace("openai_l2", HYBRID_VECTOR_SCHEMA_VERSION)
         if labels:
             by_label: dict[int, list[dict[str, Any]]] = {}
             noise_items: list[dict[str, Any]] = []
@@ -1887,6 +1903,151 @@ def _cosine_score(left: list[float] | None, right: list[float] | None) -> float:
     )
 
 
+def _l2_normalized(values: list[float]) -> list[float]:
+    norm = math.sqrt(sum(float(value) * float(value) for value in values))
+    if norm <= 0:
+        return [0.0 for _ in values]
+    return [round(float(value) / norm, 8) for value in values]
+
+
+def _pattern_template_embedding_text(item: dict[str, Any]) -> str:
+    template = str(
+        item.get("drain_template")
+        or item.get("message_template")
+        or item.get("normalized_message")
+        or ""
+    ).strip()
+    if template:
+        return template
+    return drain_log_template(str(item.get("message") or ""))
+
+
+def _hash_category_features(item: dict[str, Any]) -> list[float]:
+    vector = [0.0 for _ in range(HYBRID_HASH_DIMENSIONS)]
+    categories = [
+        ("service", str(item.get("service_name") or "")),
+        ("level", str(item.get("log_level") or "").upper()),
+        ("fingerprint", str(item.get("fingerprint") or "")),
+    ]
+    for namespace, value in categories:
+        if not value:
+            continue
+        digest = hashlib.sha256(f"{namespace}:{value}".encode()).digest()
+        index = int.from_bytes(digest[:2], "big") % HYBRID_HASH_DIMENSIONS
+        sign = 1.0 if digest[2] % 2 == 0 else -1.0
+        vector[index] += sign
+    return _l2_normalized(vector)
+
+
+def _level_score(level: str) -> float:
+    return {
+        "TRACE": 0.05,
+        "DEBUG": 0.10,
+        "INFO": 0.20,
+        "WARN": 0.55,
+        "WARNING": 0.55,
+        "ERROR": 0.85,
+        "CRITICAL": 1.0,
+        "FATAL": 1.0,
+    }.get(level.upper(), 0.0)
+
+
+def _hybrid_numeric_features(item: dict[str, Any]) -> list[float]:
+    occurrence_count = max(0.0, float(item.get("occurrence_count") or 0))
+    risk_score = max(0.0, min(100.0, float(item.get("risk_score") or 0)))
+    anomaly_count = max(
+        0.0,
+        float(
+            item.get("anomaly_count")
+            or item.get("anomaly_detected")
+            or item.get("anomalies")
+            or 0
+        ),
+    )
+    status = str(item.get("pattern_status") or "")
+    return [
+        min(1.0, math.log1p(occurrence_count) / math.log1p(1000.0)),
+        risk_score / 100.0,
+        min(1.0, math.log1p(anomaly_count) / math.log1p(10.0)),
+        _level_score(str(item.get("log_level") or "")),
+        1.0 if status in {"known_exact", "known_similar"} else 0.0,
+        1.0 if status == "new_pattern" else 0.0,
+    ]
+
+
+def _hybrid_vector(
+    item: dict[str, Any], text_embedding: list[float] | None
+) -> list[float]:
+    categorical = _hash_category_features(item)
+    numeric = _hybrid_numeric_features(item)
+    if text_embedding:
+        vector = [
+            *(float(value) * HYBRID_TEXT_WEIGHT for value in text_embedding),
+            *(value * HYBRID_CATEGORICAL_WEIGHT for value in categorical),
+            *(value * HYBRID_NUMERIC_WEIGHT for value in numeric),
+        ]
+    else:
+        vector = [
+            *(value * HYBRID_NO_TEXT_CATEGORICAL_WEIGHT for value in categorical),
+            *(value * HYBRID_NO_TEXT_NUMERIC_WEIGHT for value in numeric),
+        ]
+    return _l2_normalized(vector)
+
+
+def _hybrid_vectors_for_groups(groups: list[dict[str, Any]]) -> list[list[float]]:
+    texts = [_pattern_template_embedding_text(item) for item in groups]
+    embeddings = embed_pattern_texts_normalized(texts)
+    text_embeddings: list[list[float] | None]
+    if embeddings is not None and len(embeddings) == len(groups):
+        text_embeddings = embeddings
+    else:
+        text_embeddings = [None for _ in groups]
+    return [
+        _hybrid_vector(item, text_embeddings[index])
+        for index, item in enumerate(groups)
+    ]
+
+
+def _mean_vector(vectors: list[list[float]]) -> list[float]:
+    non_empty = [vector for vector in vectors if vector]
+    if not non_empty:
+        return []
+    width = max(len(vector) for vector in non_empty)
+    totals = [0.0 for _ in range(width)]
+    for vector in non_empty:
+        for index, value in enumerate(vector):
+            totals[index] += float(value)
+    return _l2_normalized([value / len(non_empty) for value in totals])
+
+
+def _attach_detection_features(
+    groups: list[dict[str, Any]],
+    *,
+    impacts: list[dict[str, Any]] | None = None,
+    anomalies: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    impacts_by_fp = {str(item.get("fingerprint") or ""): item for item in impacts or []}
+    anomaly_counts: dict[str, int] = {}
+    for item in anomalies or []:
+        fingerprint = str(item.get("pattern") or item.get("fingerprint") or "")
+        if fingerprint:
+            anomaly_counts[fingerprint] = anomaly_counts.get(fingerprint, 0) + 1
+    enriched: list[dict[str, Any]] = []
+    for group in groups:
+        fingerprint = str(group.get("fingerprint") or "")
+        impact = impacts_by_fp.get(fingerprint, {})
+        enriched.append(
+            {
+                **group,
+                "risk_score": int(impact.get("risk_score") or group.get("risk_score") or 0),
+                "anomaly_count": anomaly_counts.get(
+                    fingerprint, int(group.get("anomaly_count") or 0)
+                ),
+            }
+        )
+    return enriched
+
+
 def _pattern_cluster_match_from_group(
     target: dict[str, Any], *, semantic_similarity: float
 ) -> dict[str, Any]:
@@ -1945,15 +2106,18 @@ def _pattern_cluster_member_pair(
 
 def _pattern_cluster_pair_scores(
     groups: list[dict[str, Any]],
-) -> tuple[list[dict[str, Any]], dict[tuple[str, str], dict[str, float]]]:
+) -> tuple[
+    list[dict[str, Any]],
+    dict[tuple[str, str], dict[str, float]],
+    dict[str, list[float]],
+]:
     enriched = _apply_drain_templates(groups)
-    texts = [_pattern_cluster_text(item) for item in enriched]
-    embeddings = embed_pattern_texts_normalized(texts)
-    vectors = (
-        embeddings
-        if embeddings is not None and len(embeddings) == len(enriched)
-        else [None for _ in enriched]
-    )
+    vectors = _hybrid_vectors_for_groups(enriched)
+    vectors_by_fp = {
+        str(item.get("fingerprint") or ""): vectors[index]
+        for index, item in enumerate(enriched)
+        if str(item.get("fingerprint") or "")
+    }
     signatures = [
         duplicate_candidate_signature(str(item.get("message") or ""))
         for item in enriched
@@ -2004,7 +2168,7 @@ def _pattern_cluster_pair_scores(
                 "semantic_similarity": semantic_similarity,
                 "hybrid_score": hybrid_score,
             }
-    return enriched, scores
+    return enriched, scores, vectors_by_fp
 
 
 def _pattern_cluster_score_for_pair(
@@ -2179,6 +2343,7 @@ def _upsert_pattern_cluster_records(
     *,
     groups: list[dict[str, Any]],
     pair_scores: dict[tuple[str, str], dict[str, float]],
+    hybrid_vectors_by_fp: dict[str, list[float]],
     components: list[set[str]],
     hdbscan_components: list[set[str]],
 ) -> list[dict[str, Any]]:
@@ -2210,6 +2375,12 @@ def _upsert_pattern_cluster_records(
         total_count = sum(int(item.get("occurrence_count") or 0) for item in items)
         known_status = str(canonical.get("pattern_status") or "")
         algorithm = _pattern_cluster_algorithm(component, hdbscan_components)
+        hybrid_vector = _mean_vector(
+            [
+                hybrid_vectors_by_fp.get(str(item.get("fingerprint") or ""), [])
+                for item in items
+            ]
+        )
         representative_template = str(
             canonical.get("drain_template")
             or drain_log_template(str(canonical.get("message") or ""))
@@ -2221,8 +2392,9 @@ def _upsert_pattern_cluster_records(
                 representative_template, representative_message, algorithm,
                 member_count, total_occurrence_count, avg_pattern_similarity,
                 min_pattern_similarity, avg_semantic_similarity,
-                max_semantic_similarity, known_status, status, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', CURRENT_TIMESTAMP)
+                max_semantic_similarity, known_status, hybrid_vector_json,
+                hybrid_vector_schema_version, status, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', CURRENT_TIMESTAMP)
             ON CONFLICT(cluster_id) DO UPDATE SET
                 service_name=excluded.service_name,
                 log_level=excluded.log_level,
@@ -2237,6 +2409,8 @@ def _upsert_pattern_cluster_records(
                 avg_semantic_similarity=excluded.avg_semantic_similarity,
                 max_semantic_similarity=excluded.max_semantic_similarity,
                 known_status=excluded.known_status,
+                hybrid_vector_json=excluded.hybrid_vector_json,
+                hybrid_vector_schema_version=excluded.hybrid_vector_schema_version,
                 status=excluded.status,
                 updated_at=CURRENT_TIMESTAMP
             """,
@@ -2255,6 +2429,8 @@ def _upsert_pattern_cluster_records(
                 round(sum(semantic_values) / len(semantic_values), 4) if semantic_values else 0,
                 round(max(semantic_values), 4) if semantic_values else 0,
                 known_status,
+                _json_list(hybrid_vector),
+                HYBRID_VECTOR_SCHEMA_VERSION,
             ),
         )
         members: list[dict[str, Any]] = []
@@ -2333,6 +2509,8 @@ def _upsert_pattern_cluster_records(
                 if semantic_values
                 else 0,
                 "known_status": known_status,
+                "hybrid_vector": hybrid_vector,
+                "hybrid_vector_schema_version": HYBRID_VECTOR_SCHEMA_VERSION,
                 "members": members,
                 "links": [],
             }
@@ -2423,7 +2601,7 @@ def build_pattern_clusters(
 
     if not groups:
         return []
-    enriched_groups, pair_scores = _pattern_cluster_pair_scores(groups)
+    enriched_groups, pair_scores, hybrid_vectors_by_fp = _pattern_cluster_pair_scores(groups)
     all_fingerprints = {
         str(group.get("fingerprint") or "")
         for group in enriched_groups
@@ -2439,6 +2617,7 @@ def build_pattern_clusters(
         conn,
         groups=enriched_groups,
         pair_scores=pair_scores,
+        hybrid_vectors_by_fp=hybrid_vectors_by_fp,
         components=components,
         hdbscan_components=hdbscan_components,
     )
@@ -2469,7 +2648,8 @@ def _fetch_pattern_clusters(
                representative_template, representative_message, algorithm,
                member_count, total_occurrence_count, avg_pattern_similarity,
                min_pattern_similarity, avg_semantic_similarity,
-               max_semantic_similarity, known_status, status
+               max_semantic_similarity, known_status, hybrid_vector_json,
+               hybrid_vector_schema_version, status
         FROM pattern_clusters
         {where}
         ORDER BY total_occurrence_count DESC, member_count DESC, cluster_id ASC
@@ -2537,7 +2717,13 @@ def _fetch_pattern_clusters(
                 "avg_semantic_similarity": float(row[11] or 0),
                 "max_semantic_similarity": float(row[12] or 0),
                 "known_status": str(row[13] or ""),
-                "status": str(row[14] or ""),
+                "hybrid_vector": [
+                    float(item)
+                    for item in _load_json_list(str(row[14] or "[]"))
+                    if isinstance(item, (int, float))
+                ],
+                "hybrid_vector_schema_version": str(row[15] or ""),
+                "status": str(row[16] or ""),
                 "members": members,
                 "links": links,
             }
@@ -3304,9 +3490,17 @@ def _build_pattern_documents(items: list[dict[str, Any]]) -> list[dict[str, Any]
                 "service_name": str(item.get("service_name") or ""),
                 "fingerprint": str(item.get("fingerprint") or ""),
                 "log_level": str(item.get("log_level") or ""),
+                "drain_template": str(
+                    item.get("drain_template")
+                    or drain_log_template(str(item.get("message") or ""))
+                ),
+                "message_template": str(item.get("message_template") or ""),
                 "normalized_message": str(item.get("normalized_message") or ""),
                 "occurrence_count": int(item.get("occurrence_count") or 0),
+                "risk_score": int(item.get("risk_score") or 0),
+                "anomaly_count": int(item.get("anomaly_count") or 0),
                 "pattern_status": str(item.get("pattern_status") or ""),
+                "hybrid_vector_schema_version": HYBRID_VECTOR_SCHEMA_VERSION,
             },
         }
         for item in items
@@ -3440,6 +3634,11 @@ def _bucket_start(value: str, bucket_size: str) -> str:
         parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     except ValueError:
         parsed = datetime.utcnow()
+    if bucket_size == "30min":
+        minute = 30 if parsed.minute >= 30 else 0
+        return parsed.replace(minute=minute, second=0, microsecond=0).isoformat(
+            timespec="seconds"
+        )
     if bucket_size == "hour":
         return parsed.replace(minute=0, second=0, microsecond=0).isoformat(
             timespec="seconds"
@@ -5163,7 +5362,7 @@ def run_detection_pipeline(
                 (svc, int(rowid), fp),
             )
             if cur.rowcount:
-                for bucket_size in ("day", "hour"):
+                for bucket_size in TIME_SERIES_BUCKET_SIZES:
                     bucket = _increment_pattern_metric(
                         conn,
                         service_name=svc,
@@ -5366,6 +5565,11 @@ def run_detection_pipeline(
             exception_excluded_logs += int(group.get("occurrence_count") or 0)
             continue
         visible_groups.append(group)
+    visible_groups = _attach_detection_features(
+        visible_groups,
+        impacts=impacts,
+        anomalies=anomalies,
+    )
     duplicate_candidates = detect_duplicate_pattern_candidates(visible_groups)
     with sqlite3.connect(db_path) as model_conn:
         ensure_schema(model_conn)

@@ -12,6 +12,7 @@ from app.patternops.skill_graph import (
 )
 from app.patternops.validators import validate_skill_result
 from app.state import SharedState
+from app.streaming import emit_event
 
 
 class PatternSkillRunner:
@@ -40,11 +41,25 @@ class PatternSkillRunner:
         for item in selected_skills:
             skill_id = str(item.get("skill_id", ""))
             operation = operations.get(skill_id)
+            self._emit_skill_event(
+                state=state,
+                item=item,
+                agent_name=agent_name,
+                scope=scope,
+                status="planned" if operation is not None else "selected",
+            )
             if operation is None:
                 status = "selected"
                 result_state = state
             else:
                 try:
+                    self._emit_skill_event(
+                        state=state,
+                        item=item,
+                        agent_name=agent_name,
+                        scope=scope,
+                        status="running",
+                    )
                     result_state = operation(state)
                     status = "success"
                     validator_results = validate_skill_result(
@@ -88,15 +103,16 @@ class PatternSkillRunner:
                     )
             state = result_state
             scoped_plan = {"selected_skills": [item], "scope": scope}
-            executions.extend(
-                record_skill_executions(
-                    request_id=str(state.get("request_id", "")),
-                    plan=scoped_plan,
-                    agent_name=agent_name,
-                    scope=scope,
-                    status=status,
-                )
+            recorded = record_skill_executions(
+                request_id=str(state.get("request_id", "")),
+                plan=scoped_plan,
+                agent_name=agent_name,
+                scope=scope,
+                status=status,
             )
+            executions.extend(recorded)
+            for execution in recorded:
+                self._emit_skill_event_from_execution(execution, item=item)
         state["evidence"]["pattern_ops_skill_graphs"] = [
             self._skill_summary(skill)
             for skill in fetch_pattern_skills()
@@ -121,6 +137,48 @@ class PatternSkillRunner:
             f"selected={', '.join(selected_ids) or 'none'}"
         )
         return state
+
+    @staticmethod
+    def _emit_skill_event(
+        *,
+        state: SharedState,
+        item: dict[str, Any],
+        agent_name: str,
+        scope: str,
+        status: str,
+    ) -> None:
+        request_id = str(state.get("request_id", ""))
+        skill_id = str(item.get("skill_id", ""))
+        emit_event(
+            "skill",
+            {
+                "execution_id": (
+                    f"{request_id}:{agent_name}:{scope}:{skill_id}:{status}"
+                ),
+                "request_id": request_id,
+                "agent_name": agent_name,
+                "scope": scope,
+                "skill_id": skill_id,
+                "skill_name": str(item.get("name") or skill_id),
+                "status": status,
+                "score": float(item.get("score", 0)),
+                "reason": ", ".join(
+                    str(reason) for reason in item.get("reasons", [])
+                ),
+            },
+        )
+
+    @staticmethod
+    def _emit_skill_event_from_execution(
+        execution: dict[str, Any], *, item: dict[str, Any]
+    ) -> None:
+        emit_event(
+            "skill",
+            {
+                **execution,
+                "skill_name": str(item.get("name") or execution.get("skill_id") or ""),
+            },
+        )
 
     @staticmethod
     def _skill_summary(skill: Any) -> dict[str, Any]:

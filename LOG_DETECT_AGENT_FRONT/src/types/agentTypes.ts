@@ -17,6 +17,7 @@ export interface AnalyzeRequest {
   analysis_date?: string
   include_similar_clusters?: boolean
   include_time_windows?: boolean
+  stream_id?: string
 }
 
 export interface FingerprintRecommendationRequest {
@@ -200,6 +201,7 @@ export interface RecommendationDeleteResponse {
 export interface SkillActivityStreamItem {
   id: string
   at: string
+  execution_id?: string
   skill: string
   agent?: string
   status: string

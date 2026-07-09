@@ -9,6 +9,7 @@ from app.agents.log_collector import LogCollectorAgent
 from app.agents.orchestrator import OrchestratorAgent
 from app.langsmith_tracing import elapsed_ms, record_agent_event, start_timer
 from app.state import SharedState
+from app.streaming import emit_event
 
 NodeCallable = Callable[[SharedState], SharedState]
 
@@ -28,6 +29,7 @@ def _run_with_retry(state: SharedState, node_name: str, fn: NodeCallable) -> Sha
         started_at = start_timer()
         request_id = str(state.get("request_id", ""))
         record_agent_event(request_id=request_id, agent=node_name, status="started")
+        emit_event("stage", node_name)
         try:
             output = fn(state)
             if node_name != "OrchestratorAgent":

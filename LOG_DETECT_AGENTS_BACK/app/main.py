@@ -6,6 +6,7 @@ from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.agents.knowledge_base_rag import KnowledgeBaseRAGAgent
@@ -52,6 +53,7 @@ from app.patternops.skill_graph import (
     fetch_pattern_skills,
 )
 from app.state import Scope, SharedState, create_initial_state
+from app.streaming import analysis_stream, sse_lines
 
 
 class _SuppressMessagePrefixFilter(logging.Filter):
@@ -138,6 +140,9 @@ class AnalyzeRequest(BaseModel):
     include_time_windows: bool = Field(
         default=True,
         description="Update and include event time windows and system state vectors",
+    )
+    stream_id: str | None = Field(
+        default=None, description="Optional client stream id for live progress events"
     )
 
 
@@ -681,12 +686,19 @@ def _related_knowledge_cards_for_recommendation(
         )
     except Exception:  # noqa: BLE001
         groups = []
+    ranked_matches = sorted(
+        [
+            match
+            for match in (groups[0] if groups else [])
+            if float(match.get("similarity") or 0) >= SIMILAR_PATTERN_LIST_THRESHOLD
+        ],
+        key=lambda match: float(match.get("similarity") or 0),
+        reverse=True,
+    )
     similar_card_ids = [
         card_id
         for card_id in (
-            _knowledge_card_id_from_match(match)
-            for match in (groups[0] if groups else [])
-            if float(match.get("similarity") or 0) >= SIMILAR_PATTERN_LIST_THRESHOLD
+            _knowledge_card_id_from_match(match) for match in ranked_matches
         )
         if card_id
     ]
@@ -727,8 +739,27 @@ def list_langsmith_runs(limit: int = 20) -> LangSmithRunsResponse:
     return LangSmithRunsResponse(**payload)
 
 
+@app.get("/analyze/stream")
+def analyze_stream(stream_id: str) -> StreamingResponse:
+    """Stream live analysis events for a matching analyze request."""
+
+    return StreamingResponse(
+        sse_lines(stream_id),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @app.post("/analyze", response_model=AnalyzeResponse)
 def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
+    with analysis_stream(req.stream_id):
+        return _analyze(req)
+
+
+def _analyze(req: AnalyzeRequest) -> AnalyzeResponse:
     graph = build_graph()
     analysis_date = req.analysis_date or date.today()
     time_range = {"from": "", "to": ""}

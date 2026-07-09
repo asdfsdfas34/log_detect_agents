@@ -194,18 +194,7 @@ def test_pattern_cluster_v2_uses_dedicated_openai_embedding_key(monkeypatch) -> 
     assert upsert["metadatas"][0]["embedding_dimensions"] == 1024
     assert embedding_client.embeddings.calls[0]["dimensions"] == 1024
     assert embedding_client.embeddings.calls[0]["input"] == [
-        "[Pattern Template]\n"
-        "Service: checkout-api\n"
-        "Fingerprint: FP-NEW\n"
-        "Log Level: ERROR\n"
-        "Pattern Status: -\n"
-        "\n"
-        "[Normalized Message]\n"
-        "Payment failed for order *\n"
-        "\n"
-        "[Context]\n"
-        "service=checkout-api\n"
-        "fingerprint=FP-NEW"
+        "Payment failed for order *"
     ]
 
 
@@ -643,10 +632,10 @@ def test_related_knowledge_cards_include_only_similarity_matched_cards(monkeypat
         ]
 
     def fake_cards_by_ids(card_ids: list[str]):
-        assert card_ids == ["KC-SIMILAR", "KC-EXACT"]
+        assert card_ids == ["KC-EXACT", "KC-SIMILAR"]
         return [
-            {"card_id": "KC-SIMILAR", "fingerprint": "FP-OLD"},
             {"card_id": "KC-EXACT", "fingerprint": "FP-NEW"},
+            {"card_id": "KC-SIMILAR", "fingerprint": "FP-OLD"},
         ]
 
     monkeypatch.setattr(main, "fetch_knowledge_cards", fake_exact_cards)

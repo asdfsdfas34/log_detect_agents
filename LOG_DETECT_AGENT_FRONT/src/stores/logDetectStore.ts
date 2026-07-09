@@ -70,7 +70,8 @@ interface KnowledgeCardApprovalDraft {
 
 function buildDefaultRequest(
   serviceName: string,
-  analysisDate?: string
+  analysisDate?: string,
+  streamId?: string
 ): AnalyzeRequest {
   return {
     service_name: serviceName,
@@ -78,8 +79,13 @@ function buildDefaultRequest(
     save_to_chromadb: true,
     analysis_date: analysisDate || undefined,
     include_similar_clusters: false,
-    include_time_windows: true
+    include_time_windows: true,
+    stream_id: streamId
   }
+}
+
+function createStreamId(): string {
+  return `${Date.now()}-${Math.floor(Math.random() * 100000)}`
 }
 
 export const useLogDetectStore = defineStore('logDetect', () => {
@@ -121,6 +127,7 @@ export const useLogDetectStore = defineStore('logDetect', () => {
   let localStageIndex = 0
   let localProgressStepNames = analysisStepNames
   let stream: EventSource | null = null
+  let streamedSkillExecutionIds = new Set<string>()
 
   const scenarioSummary = computed(
     () => state.value?.final.evidence_bundle?.summary ?? state.value?.evidence.summary
@@ -346,6 +353,9 @@ export const useLogDetectStore = defineStore('logDetect', () => {
   function appendSkillActivity(
     activity: Omit<SkillActivityStreamItem, 'id' | 'at'>
   ) {
+    if (activity.execution_id) {
+      streamedSkillExecutionIds.add(activity.execution_id)
+    }
     const id = `${Date.now()}-${Math.floor(Math.random() * 100000)}`
     const item = {
       ...activity,
@@ -371,6 +381,7 @@ export const useLogDetectStore = defineStore('logDetect', () => {
 
   function resetSkillActivityStream(serviceName: string, action: string) {
     skillActivityStream.value = []
+    streamedSkillExecutionIds = new Set<string>()
     appendSkillActivity({
       skill: '분석 요청 접수',
       agent: 'Dashboard',
@@ -396,7 +407,9 @@ export const useLogDetectStore = defineStore('logDetect', () => {
       result.final.evidence_bundle?.pattern_ops_skill_executions ??
       []
     executions.slice(-12).forEach((execution) => {
+      if (streamedSkillExecutionIds.has(execution.execution_id)) return
       appendSkillActivity({
+        execution_id: execution.execution_id,
         skill: skillNameById(result, execution.skill_id),
         agent: execution.agent_name,
         status: execution.status,
@@ -404,6 +417,20 @@ export const useLogDetectStore = defineStore('logDetect', () => {
         detail: execution.reason || execution.skill_id,
         source: 'backend-result'
       })
+    })
+  }
+
+  function appendStreamedSkillExecution(
+    execution: PatternOpsSkillExecution & { skill_name?: string }
+  ) {
+    appendSkillActivity({
+      execution_id: execution.execution_id,
+      skill: execution.skill_name || execution.skill_id,
+      agent: execution.agent_name,
+      status: execution.status,
+      action: `${execution.scope} skill ${execution.status}`,
+      detail: execution.reason || execution.skill_id,
+      source: 'sse'
     })
   }
 
@@ -732,7 +759,8 @@ export const useLogDetectStore = defineStore('logDetect', () => {
   }
 
   async function runAnalysis(serviceName: string, analysisDate?: string) {
-    const request = buildDefaultRequest(serviceName, analysisDate)
+    const streamId = createStreamId()
+    const request = buildDefaultRequest(serviceName, analysisDate, streamId)
     loading.value = true
     executionStatus.value = 'running'
     error.value = null
@@ -754,9 +782,12 @@ export const useLogDetectStore = defineStore('logDetect', () => {
     setCurrentStage(stepNames[0])
     startLocalStageProgress()
 
-    stream = connectExecutionStream({
+    stream = connectExecutionStream(streamId, {
       onStage: (stage) => {
         setCurrentStage(stage, 'sse')
+      },
+      onSkill: (execution) => {
+        appendStreamedSkillExecution(execution)
       },
       onPartial: () => {
         appendSkillActivity({
@@ -766,7 +797,7 @@ export const useLogDetectStore = defineStore('logDetect', () => {
           detail: '백엔드가 중간 분석 상태를 전송했습니다.',
           source: 'sse'
         })
-        addToast('info', 'Received partial agent output')
+        addToast('info', '부분 에이전트 결과를 수신했습니다.')
       },
       onComplete: (result) => {
         state.value = result
@@ -791,7 +822,7 @@ export const useLogDetectStore = defineStore('logDetect', () => {
       startPollingHealth()
       addToast(
         'info',
-        'SSE unavailable: switched to 5s health polling fallback'
+        'SSE를 사용할 수 없어 5초 간격 상태 확인으로 전환했습니다.'
       )
     }
 
@@ -820,7 +851,7 @@ export const useLogDetectStore = defineStore('logDetect', () => {
         detail: error.value ?? undefined,
         source: 'backend-result'
       })
-      addToast('error', `Analysis failed: ${error.value}`)
+      addToast('error', `분석 실패: ${error.value}`)
     } finally {
       loading.value = false
       closeStreamAndPolling()
@@ -884,19 +915,19 @@ export const useLogDetectStore = defineStore('logDetect', () => {
         lastExecutionAt.value = new Date().toISOString()
         await fetchRecommendations(serviceName)
         await fetchPatternOpsSkills()
-        addToast('info', `Updated recommendations for ${fingerprint}`)
+        addToast('info', `추천 결과 업데이트 완료: ${fingerprint}`)
       } catch (caught) {
         executionStatus.value = 'failed'
         error.value = errorMessage(caught)
-        currentExecutionLog.value = `Recommendation update 실패: ${error.value}`
+        currentExecutionLog.value = `추천 업데이트 실패: ${error.value}`
         appendSkillActivity({
           skill: currentStage.value,
           status: 'failed',
-          action: 'Recommendation update 실패',
+          action: '추천 업데이트 실패',
           detail: error.value ?? undefined,
           source: 'backend-result'
         })
-        addToast('error', `Recommendation update failed: ${error.value}`)
+        addToast('error', `추천 업데이트 실패: ${error.value}`)
         return false
       } finally {
         recommendationGeneratingFingerprint.value = null

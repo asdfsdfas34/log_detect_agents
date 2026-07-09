@@ -541,7 +541,7 @@ def test_semantic_log_clusters_use_openai_umap_hdbscan_labels(monkeypatch) -> No
 
     clusters = scenario_store.build_semantic_log_clusters(groups)
 
-    assert clusters[0]["algorithm"] == "openai_l2_umap_hdbscan"
+    assert clusters[0]["algorithm"] == "hybrid-event-v1_umap_hdbscan"
     assert clusters[0]["fingerprint_count"] == 2
     assert clusters[0]["fingerprints"] == ["FP-A", "FP-B"]
     assert clusters[0]["representative_fingerprint"] == "FP-A"
@@ -1633,7 +1633,18 @@ def test_detection_pipeline_processes_only_new_raw_logs_and_tracks_metrics(
             """).fetchall()
 
     assert processed_count == 1
-    assert metric_rows == [("day", 1, 1), ("hour", 1, 1)]
+    assert metric_rows == [("30min", 1, 1), ("day", 1, 1), ("hour", 1, 1)]
+
+
+def test_bucket_start_supports_thirty_minute_windows() -> None:
+    assert (
+        scenario_store._bucket_start("2026-06-16T10:29:59", "30min")
+        == "2026-06-16T10:00:00"
+    )
+    assert (
+        scenario_store._bucket_start("2026-06-16T10:30:00", "30min")
+        == "2026-06-16T10:30:00"
+    )
 
 
 def test_detection_pipeline_can_skip_time_window_modeling(

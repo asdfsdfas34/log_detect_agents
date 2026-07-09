@@ -534,21 +534,13 @@ def _analysis_document_v2_item(document: dict[str, Any]) -> dict[str, Any]:
 
 def _pattern_template_text(text: str, metadata: dict[str, Any] | None) -> str:
     data = metadata or {}
-    return "\n".join(
-        [
-            "[Pattern Template]",
-            f"Service: {data.get('service_name', '-')}",
-            f"Fingerprint: {data.get('fingerprint', '-')}",
-            f"Log Level: {data.get('log_level', '-')}",
-            f"Pattern Status: {data.get('pattern_status', '-')}",
-            "",
-            "[Normalized Message]",
-            str(data.get("normalized_message") or "-"),
-            "",
-            "[Context]",
-            text,
-        ]
-    )
+    template = str(
+        data.get("drain_template")
+        or data.get("message_template")
+        or data.get("normalized_message")
+        or ""
+    ).strip()
+    return template or text
 
 
 def save_pattern_cluster(

@@ -1,22 +1,42 @@
-import type { AnalyzeResponse, SharedState } from '@/types/agentTypes'
+import type {
+  AnalyzeResponse,
+  PatternOpsSkillExecution,
+  SharedState
+} from '@/types/agentTypes'
 
 interface StreamHandlers {
   onStage: (stage: string) => void
+  onSkill: (execution: PatternOpsSkillExecution & { skill_name?: string }) => void
   onPartial: (statePatch: Partial<SharedState>) => void
   onComplete: (result: SharedState) => void
   onError: (message: string) => void
 }
 
-export function connectExecutionStream(handlers: StreamHandlers): EventSource | null {
-  const endpoint = import.meta.env.VITE_ANALYZE_SSE_URL
-  if (!endpoint) {
-    return null
-  }
+export function connectExecutionStream(
+  streamId: string,
+  handlers: StreamHandlers
+): EventSource | null {
+  const baseUrl = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000'
+  const endpoint = import.meta.env.VITE_ANALYZE_SSE_URL ?? `${baseUrl}/analyze/stream`
+  const url = new URL(endpoint, baseUrl)
+  url.searchParams.set('stream_id', streamId)
 
-  const source = new EventSource(endpoint)
+  const source = new EventSource(url.toString())
 
   source.addEventListener('stage', (event: MessageEvent<string>) => {
     handlers.onStage(event.data)
+  })
+
+  source.addEventListener('skill', (event: MessageEvent<string>) => {
+    try {
+      handlers.onSkill(
+        JSON.parse(event.data) as PatternOpsSkillExecution & {
+          skill_name?: string
+        }
+      )
+    } catch (error) {
+      handlers.onError((error as Error).message)
+    }
   })
 
   source.addEventListener('partial', (event: MessageEvent<string>) => {
@@ -35,6 +55,10 @@ export function connectExecutionStream(handlers: StreamHandlers): EventSource | 
     } catch (error) {
       handlers.onError((error as Error).message)
     }
+  })
+
+  source.addEventListener('done', () => {
+    source.close()
   })
 
   source.onerror = () => {
