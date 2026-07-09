@@ -455,6 +455,37 @@ def test_analysis_documents_route_to_v2_collections(monkeypatch) -> None:
     )
 
 
+def test_case_card_v2_embedding_text_uses_search_fields() -> None:
+    item = chroma_store._analysis_document_v2_item(
+        {
+            "doc_id": "knowledge-card:KC-123",
+            "text": "\n".join(
+                [
+                    "[Case Card]",
+                    "Service: checkout-api",
+                    "Fingerprint: FP-00EF10",
+                    "Category: application_error",
+                    "- Message: 결재선 사용자 정보가 존재하지 않습니다.",
+                    "- Normalized Message: 결재선 사용자 정보가 존재하지 않습니다.",
+                    "- Stack Trace: ApprovalLineException",
+                    "[Root Cause]",
+                    "사용자 정보 조회 결과가 비어 있습니다.",
+                    "[Recommendation]",
+                    "사용자 마스터 데이터와 결재선 매핑을 확인하세요.",
+                ]
+            ),
+            "metadata": {"service_name": "approval-api", "fingerprint": "FP-00EF10"},
+        }
+    )
+
+    assert item["collection_name"] == "case_cards_v2"
+    assert "service=approval-api" in item["text"]
+    assert "fingerprint=FP-00EF10" in item["text"]
+    assert "normalized_message=결재선 사용자 정보가 존재하지 않습니다." in item["text"]
+    assert "root_cause=사용자 정보 조회 결과가 비어 있습니다." in item["text"]
+    assert "[Case Card]" not in item["text"]
+
+
 def test_analysis_documents_v2_batch_by_collection_and_skip_existing(
     monkeypatch,
 ) -> None:
@@ -606,9 +637,13 @@ def test_enrich_pattern_clusters_excludes_self_match_by_metadata(monkeypatch) ->
     ]
 
 
-def test_related_knowledge_cards_include_only_similarity_matched_cards(monkeypatch) -> None:
+def test_related_knowledge_cards_include_exact_fingerprint_cards_first(
+    monkeypatch,
+) -> None:
     def fake_exact_cards(*, fingerprint: str | None = None, limit: int = 20):
-        raise AssertionError("recommendation lookup should not include all exact cards")
+        assert fingerprint == "FP-NEW"
+        assert limit == 5
+        return [{"card_id": "KC-EXACT", "fingerprint": "FP-NEW"}]
 
     def fake_similar_batches(**kwargs: Any) -> list[list[dict[str, Any]]]:
         return [
@@ -632,11 +667,8 @@ def test_related_knowledge_cards_include_only_similarity_matched_cards(monkeypat
         ]
 
     def fake_cards_by_ids(card_ids: list[str]):
-        assert card_ids == ["KC-EXACT", "KC-SIMILAR"]
-        return [
-            {"card_id": "KC-EXACT", "fingerprint": "FP-NEW"},
-            {"card_id": "KC-SIMILAR", "fingerprint": "FP-OLD"},
-        ]
+        assert card_ids == ["KC-SIMILAR"]
+        return [{"card_id": "KC-SIMILAR", "fingerprint": "FP-OLD"}]
 
     monkeypatch.setattr(main, "fetch_knowledge_cards", fake_exact_cards)
     monkeypatch.setattr(main, "find_similar_analysis_documents_batch", fake_similar_batches)
@@ -654,6 +686,10 @@ def test_related_knowledge_cards_include_only_similarity_matched_cards(monkeypat
     )
 
     assert [card["card_id"] for card in cards] == ["KC-EXACT", "KC-SIMILAR"]
+    assert cards[0]["match_type"] == "exact_fingerprint"
+    assert cards[0]["similarity"] == 1.0
+    assert cards[1]["match_type"] == "semantic_similarity"
+    assert cards[1]["similarity"] == 0.88
 
 
 def test_save_new_pattern_clusters_only_persists_new_patterns(monkeypatch) -> None:

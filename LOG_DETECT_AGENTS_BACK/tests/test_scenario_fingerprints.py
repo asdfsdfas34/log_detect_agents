@@ -15,6 +15,7 @@ from app.db.scenario_store import (
     fetch_duplicate_pattern_candidates,
     fetch_exception_registry,
     fetch_knowledge_cards,
+    fetch_semantic_log_clusters,
     fingerprint_id,
     merge_duplicate_pattern_candidate,
     merge_selected_fingerprints_as_known_pattern,
@@ -497,6 +498,7 @@ def test_semantic_log_clusters_fallback_to_drain_templates(monkeypatch) -> None:
     )
 
     assert len(clusters) == 1
+    assert re.fullmatch(r"SC-[0-9A-F]{12}", clusters[0]["cluster_id"])
     assert clusters[0]["algorithm"] == "drain3_template_fallback"
     assert clusters[0]["count"] == 5
     assert clusters[0]["fingerprints"] == ["FP-A", "FP-B"]
@@ -545,6 +547,55 @@ def test_semantic_log_clusters_use_openai_umap_hdbscan_labels(monkeypatch) -> No
     assert clusters[0]["fingerprint_count"] == 2
     assert clusters[0]["fingerprints"] == ["FP-A", "FP-B"]
     assert clusters[0]["representative_fingerprint"] == "FP-A"
+
+
+def test_semantic_log_clusters_are_persisted_as_analysis_evidence(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db_path = tmp_path / "logs.db"
+    monkeypatch.setenv("SQLITE_PATH", str(db_path))
+    clusters = [
+        {
+            "cluster_id": "SC-ABCDEF123456",
+            "algorithm": "hybrid-event-v1_hdbscan",
+            "count": 5,
+            "fingerprint_count": 2,
+            "fingerprints": ["FP-A", "FP-B"],
+            "service_name": "checkout-api",
+            "log_level": "ERROR",
+            "drain_template": "Payment failed <*>",
+            "representative_fingerprint": "FP-A",
+            "representative_log": "Payment failed for orderId=100",
+            "representative_cause": "payment provider timeout",
+            "recommendation_hint": "review timeout handling",
+            "risk_score": 70,
+            "anomaly_count": 1,
+            "pattern_statuses": ["new_pattern"],
+        }
+    ]
+
+    with sqlite3.connect(db_path) as conn:
+        ensure_schema(conn)
+        scenario_store._upsert_semantic_log_clusters(
+            conn,
+            clusters=clusters,
+            analysis_date="2026-07-11",
+            service_name="checkout-api",
+        )
+        conn.commit()
+
+    stored = fetch_semantic_log_clusters(
+        service_name="checkout-api",
+        analysis_date="2026-07-11",
+        fingerprints={"FP-B"},
+    )
+
+    assert len(stored) == 1
+    assert stored[0]["cluster_id"] == "SC-ABCDEF123456"
+    assert stored[0]["analysis_date"] == "2026-07-11"
+    assert stored[0]["fingerprints"] == ["FP-A", "FP-B"]
+    assert stored[0]["representative_cause"] == "payment provider timeout"
+    assert stored[0]["evidence_schema_version"] == "semantic-log-cluster-v1"
 
 
 def test_semantic_log_clusters_reuse_existing_drain_templates(monkeypatch) -> None:

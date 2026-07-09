@@ -657,6 +657,27 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY(source_cluster_id, target_cluster_id)
         );
+        CREATE TABLE IF NOT EXISTS semantic_log_clusters (
+            cluster_id TEXT PRIMARY KEY,
+            analysis_date TEXT NOT NULL,
+            service_name TEXT NOT NULL,
+            log_level TEXT NOT NULL DEFAULT '',
+            algorithm TEXT NOT NULL,
+            representative_fingerprint TEXT NOT NULL DEFAULT '',
+            representative_log TEXT NOT NULL DEFAULT '',
+            representative_cause TEXT NOT NULL DEFAULT '',
+            recommendation_hint TEXT NOT NULL DEFAULT '',
+            drain_template TEXT NOT NULL DEFAULT '',
+            fingerprints_json TEXT NOT NULL DEFAULT '[]',
+            pattern_statuses_json TEXT NOT NULL DEFAULT '[]',
+            count INTEGER NOT NULL DEFAULT 0,
+            fingerprint_count INTEGER NOT NULL DEFAULT 0,
+            risk_score INTEGER NOT NULL DEFAULT 0,
+            anomaly_count INTEGER NOT NULL DEFAULT 0,
+            evidence_schema_version TEXT NOT NULL DEFAULT 'semantic-log-cluster-v1',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
         CREATE TABLE IF NOT EXISTS event_time_windows (
             window_id TEXT PRIMARY KEY,
             service_name TEXT NOT NULL,
@@ -742,6 +763,10 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             ON pattern_cluster_members(fingerprint);
         CREATE INDEX IF NOT EXISTS idx_pattern_cluster_links_target
             ON pattern_cluster_links(target_cluster_id, semantic_similarity DESC);
+        CREATE INDEX IF NOT EXISTS idx_semantic_log_clusters_service_date
+            ON semantic_log_clusters(service_name, analysis_date, risk_score DESC);
+        CREATE INDEX IF NOT EXISTS idx_semantic_log_clusters_representative
+            ON semantic_log_clusters(representative_fingerprint);
         CREATE INDEX IF NOT EXISTS idx_trajectories_service_bucket
             ON trajectories(service_name, bucket_size, end_bucket DESC);
         CREATE INDEX IF NOT EXISTS idx_trajectory_clusters_service_bucket
@@ -1734,6 +1759,17 @@ def _representative_cluster_item(items: list[dict[str, Any]]) -> dict[str, Any]:
     )
 
 
+def _semantic_log_cluster_id(
+    *,
+    service_name: str,
+    algorithm: str,
+    fingerprints: list[str],
+) -> str:
+    members = "|".join(sorted(fingerprint for fingerprint in fingerprints if fingerprint))
+    raw = f"{service_name}|{algorithm}|{members}"
+    return "SC-" + hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12].upper()
+
+
 def _build_semantic_cluster_record(
     *,
     index: int,
@@ -1751,13 +1787,19 @@ def _build_semantic_cluster_record(
         for item in items
     ]
     fingerprints = [str(item.get("fingerprint") or "") for item in items]
+    service_name = str(representative.get("service_name") or "")
     return {
-        "cluster_id": f"SC-{index:03d}",
+        "cluster_id": _semantic_log_cluster_id(
+            service_name=service_name,
+            algorithm=algorithm,
+            fingerprints=fingerprints,
+        ),
+        "rank": index,
         "algorithm": algorithm,
         "count": sum(int(item.get("occurrence_count") or 0) for item in items),
         "fingerprint_count": len(items),
         "fingerprints": fingerprints,
-        "service_name": str(representative.get("service_name") or ""),
+        "service_name": service_name,
         "log_level": str(representative.get("log_level") or ""),
         "drain_template": str(
             representative.get("drain_template")
@@ -1870,6 +1912,163 @@ def build_semantic_log_clusters(
         )
         for index, items in enumerate(cluster_groups, start=1)
     ]
+
+
+def _upsert_semantic_log_clusters(
+    conn: sqlite3.Connection,
+    *,
+    clusters: list[dict[str, Any]],
+    analysis_date: str,
+    service_name: str | None,
+) -> None:
+    if service_name:
+        conn.execute(
+            "DELETE FROM semantic_log_clusters WHERE service_name=? AND analysis_date=?",
+            (service_name, analysis_date),
+        )
+    else:
+        conn.execute(
+            "DELETE FROM semantic_log_clusters WHERE analysis_date=?",
+            (analysis_date,),
+        )
+    if not clusters:
+        return
+    conn.executemany(
+        """
+        INSERT INTO semantic_log_clusters(
+            cluster_id, analysis_date, service_name, log_level, algorithm,
+            representative_fingerprint, representative_log, representative_cause,
+            recommendation_hint, drain_template, fingerprints_json,
+            pattern_statuses_json, count, fingerprint_count, risk_score,
+            anomaly_count, evidence_schema_version, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'semantic-log-cluster-v1', CURRENT_TIMESTAMP)
+        ON CONFLICT(cluster_id) DO UPDATE SET
+            analysis_date=excluded.analysis_date,
+            service_name=excluded.service_name,
+            log_level=excluded.log_level,
+            algorithm=excluded.algorithm,
+            representative_fingerprint=excluded.representative_fingerprint,
+            representative_log=excluded.representative_log,
+            representative_cause=excluded.representative_cause,
+            recommendation_hint=excluded.recommendation_hint,
+            drain_template=excluded.drain_template,
+            fingerprints_json=excluded.fingerprints_json,
+            pattern_statuses_json=excluded.pattern_statuses_json,
+            count=excluded.count,
+            fingerprint_count=excluded.fingerprint_count,
+            risk_score=excluded.risk_score,
+            anomaly_count=excluded.anomaly_count,
+            evidence_schema_version=excluded.evidence_schema_version,
+            updated_at=CURRENT_TIMESTAMP
+        """,
+        [
+            (
+                str(cluster.get("cluster_id") or ""),
+                analysis_date,
+                str(cluster.get("service_name") or service_name or ""),
+                str(cluster.get("log_level") or ""),
+                str(cluster.get("algorithm") or ""),
+                str(cluster.get("representative_fingerprint") or ""),
+                str(cluster.get("representative_log") or ""),
+                str(cluster.get("representative_cause") or ""),
+                str(cluster.get("recommendation_hint") or ""),
+                str(cluster.get("drain_template") or ""),
+                _json_list(cluster.get("fingerprints") or []),
+                _json_list(cluster.get("pattern_statuses") or []),
+                int(cluster.get("count") or 0),
+                int(cluster.get("fingerprint_count") or 0),
+                int(cluster.get("risk_score") or 0),
+                int(cluster.get("anomaly_count") or 0),
+            )
+            for cluster in clusters
+            if str(cluster.get("cluster_id") or "")
+        ],
+    )
+
+
+def _fetch_semantic_log_clusters(
+    conn: sqlite3.Connection,
+    *,
+    service_name: str | None = None,
+    analysis_date: str | None = None,
+    fingerprints: set[str] | None = None,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    params: list[Any] = []
+    clauses: list[str] = []
+    if service_name:
+        clauses.append("service_name=?")
+        params.append(service_name)
+    if analysis_date:
+        clauses.append("analysis_date=?")
+        params.append(analysis_date)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    rows = conn.execute(
+        f"""
+        SELECT cluster_id, analysis_date, service_name, log_level, algorithm,
+               representative_fingerprint, representative_log, representative_cause,
+               recommendation_hint, drain_template, fingerprints_json,
+               pattern_statuses_json, count, fingerprint_count, risk_score,
+               anomaly_count, evidence_schema_version
+        FROM semantic_log_clusters
+        {where}
+        ORDER BY risk_score DESC, count DESC, fingerprint_count DESC, cluster_id ASC
+        LIMIT ?
+        """,
+        [*params, limit],
+    ).fetchall()
+    clusters: list[dict[str, Any]] = []
+    for row in rows:
+        cluster_fingerprints = [
+            str(item) for item in _load_json_list(str(row[10] or "[]"))
+        ]
+        if fingerprints and not (set(cluster_fingerprints) & fingerprints):
+            continue
+        clusters.append(
+            {
+                "cluster_id": str(row[0]),
+                "analysis_date": str(row[1] or ""),
+                "service_name": str(row[2] or ""),
+                "log_level": str(row[3] or ""),
+                "algorithm": str(row[4] or ""),
+                "representative_fingerprint": str(row[5] or ""),
+                "representative_log": str(row[6] or ""),
+                "representative_cause": str(row[7] or ""),
+                "recommendation_hint": str(row[8] or ""),
+                "drain_template": str(row[9] or ""),
+                "fingerprints": cluster_fingerprints,
+                "pattern_statuses": [
+                    str(item) for item in _load_json_list(str(row[11] or "[]"))
+                ],
+                "count": int(row[12] or 0),
+                "fingerprint_count": int(row[13] or 0),
+                "risk_score": int(row[14] or 0),
+                "anomaly_count": int(row[15] or 0),
+                "evidence_schema_version": str(row[16] or ""),
+            }
+        )
+    return clusters
+
+
+def fetch_semantic_log_clusters(
+    *,
+    service_name: str | None = None,
+    analysis_date: str | None = None,
+    fingerprints: set[str] | None = None,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    db_path = _resolve_db_path()
+    if not Path(db_path).exists():
+        return []
+    with sqlite3.connect(db_path) as conn:
+        ensure_schema(conn)
+        return _fetch_semantic_log_clusters(
+            conn,
+            service_name=service_name,
+            analysis_date=analysis_date,
+            fingerprints=fingerprints,
+            limit=limit,
+        )
 
 
 def _pattern_cluster_text(item: dict[str, Any]) -> str:
@@ -5632,12 +5831,28 @@ def run_detection_pipeline(
     anomalies = [
         item for item in anomalies if item["pattern"] not in ignored_fingerprints
     ]
+    daily_analysis_date = date_start or datetime.utcnow().date().isoformat()
     semantic_clusters = build_semantic_log_clusters(
         visible_groups,
         recommendations=visible_recs,
         impacts=visible_impacts,
         anomalies=anomalies,
     )
+    with sqlite3.connect(db_path) as semantic_conn:
+        ensure_schema(semantic_conn)
+        _upsert_semantic_log_clusters(
+            semantic_conn,
+            clusters=semantic_clusters,
+            analysis_date=daily_analysis_date,
+            service_name=service_name,
+        )
+        semantic_clusters = _fetch_semantic_log_clusters(
+            semantic_conn,
+            service_name=service_name,
+            analysis_date=daily_analysis_date,
+            limit=100,
+        )
+        semantic_conn.commit()
     known_count = sum(
         1
         for group in visible_groups
@@ -5656,7 +5871,6 @@ def run_detection_pipeline(
         if visible_recs
         else {"cause": "-", "recommendation": "-", "confidence": "LOW"}
     )
-    daily_analysis_date = date_start or datetime.utcnow().date().isoformat()
     if service_name:
         with sqlite3.connect(db_path) as daily_conn:
             ensure_schema(daily_conn)

@@ -466,6 +466,7 @@ def _enrich_pattern_clusters(
         enriched.append(
             {
                 "cluster": fingerprint,
+                "service_name": service_name,
                 "count": item["occurrence_count"],
                 "message": message,
                 "log_level": log_level,
@@ -672,6 +673,14 @@ def _related_knowledge_cards_for_recommendation(
 ) -> list[dict]:
     if not selected:
         return []
+    exact_cards = [
+        {
+            **card,
+            "match_type": "exact_fingerprint",
+            "similarity": 1.0,
+        }
+        for card in fetch_knowledge_cards(fingerprint=fingerprint, limit=limit)
+    ]
 
     query = _pattern_cluster_context(
         service_name=service_name,
@@ -702,7 +711,23 @@ def _related_knowledge_cards_for_recommendation(
         )
         if card_id
     ]
-    return fetch_knowledge_cards_by_ids(similar_card_ids)[:limit]
+    exact_card_ids = {str(card.get("card_id") or "") for card in exact_cards}
+    similar_similarity_by_id = {
+        _knowledge_card_id_from_match(match): float(match.get("similarity") or 0)
+        for match in ranked_matches
+        if _knowledge_card_id_from_match(match)
+    }
+    similar_cards = [
+        {
+            **card,
+            "match_type": "semantic_similarity",
+            "similarity": similar_similarity_by_id.get(str(card.get("card_id")), 0.0),
+        }
+        for card in fetch_knowledge_cards_by_ids(
+            [card_id for card_id in similar_card_ids if card_id not in exact_card_ids]
+        )
+    ]
+    return [*exact_cards, *similar_cards][:limit]
 
 
 @app.get("/health")

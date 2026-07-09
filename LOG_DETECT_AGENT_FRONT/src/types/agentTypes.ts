@@ -26,7 +26,6 @@ export interface FingerprintRecommendationRequest {
   analysis_date?: string
 }
 
-
 export interface RecommendationSaveRequest {
   request_id?: string
   service_name: string
@@ -485,6 +484,7 @@ export interface NearestTrajectoryPattern {
 
 export interface Cluster {
   cluster: string
+  service_name?: string
   count: number
   message?: string
   log_level?: string

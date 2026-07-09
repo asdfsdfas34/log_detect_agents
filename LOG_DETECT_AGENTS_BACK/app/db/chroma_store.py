@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import re
 from typing import Any
 
 from openai import AzureOpenAI, OpenAI
@@ -527,9 +528,52 @@ def _analysis_document_v2_item(document: dict[str, Any]) -> dict[str, Any]:
         "collection_name": collection_name,
         "dimensions": dimensions,
         "id": f"{schema_version}:{doc_id}",
-        "text": str(document["text"]),
+        "text": _case_card_search_text(str(document["text"]), metadata)
+        if document_type == "case_card"
+        else str(document["text"]),
         "metadata": metadata,
     }
+
+
+def _case_card_section(text: str, heading: str) -> str:
+    pattern = rf"\[{re.escape(heading)}\]\s*(.*?)(?=\n\[[^\]]+\]|\Z)"
+    match = re.search(pattern, text, flags=re.DOTALL)
+    return re.sub(r"\s+", " ", match.group(1)).strip() if match else ""
+
+
+def _case_card_line_value(text: str, label: str) -> str:
+    match = re.search(rf"^{re.escape(label)}:\s*(.+)$", text, flags=re.MULTILINE)
+    return match.group(1).strip() if match else ""
+
+
+def _case_card_bullet_value(text: str, label: str) -> str:
+    match = re.search(rf"^- {re.escape(label)}:\s*(.+)$", text, flags=re.MULTILINE)
+    return match.group(1).strip() if match else ""
+
+
+def _case_card_search_text(text: str, metadata: dict[str, Any] | None) -> str:
+    """Build compact retrieval text so same-pattern cards stay close in vector space."""
+
+    meta = metadata or {}
+    fields = [
+        (
+            "service",
+            str(meta.get("service_name") or _case_card_line_value(text, "Service")),
+        ),
+        (
+            "fingerprint",
+            str(meta.get("fingerprint") or _case_card_line_value(text, "Fingerprint")),
+        ),
+        ("log_level", str(meta.get("log_level") or "")),
+        ("category", _case_card_line_value(text, "Category")),
+        ("message", _case_card_bullet_value(text, "Message")),
+        ("normalized_message", _case_card_bullet_value(text, "Normalized Message")),
+        ("stacktrace", _case_card_bullet_value(text, "Stack Trace")),
+        ("root_cause", _case_card_section(text, "Root Cause")),
+        ("recommendation", _case_card_section(text, "Recommendation")),
+        ("resolution_method", _case_card_section(text, "Resolution Method")),
+    ]
+    return "\n".join(f"{key}={value}" for key, value in fields if value)
 
 
 def _pattern_template_text(text: str, metadata: dict[str, Any] | None) -> str:

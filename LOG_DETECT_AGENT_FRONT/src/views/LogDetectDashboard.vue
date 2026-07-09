@@ -107,7 +107,9 @@
         :clusters="store.state.evidence.clusters"
         :pattern-clusters="store.state.evidence.pattern_clusters ?? []"
         :service-name="serviceName"
-        :recommendation-busy-fingerprint="store.recommendationGeneratingFingerprint"
+        :recommendation-busy-fingerprint="
+          store.recommendationGeneratingFingerprint
+        "
         @save-known-pattern="handleSaveKnownPattern"
         @request-recommendation="handleRequestRecommendation"
         @suggest-pattern-rule="handleSuggestPatternRule"
@@ -236,17 +238,16 @@ import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
 import ErrorState from '@/components/common/ErrorState.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import { useLogDetectStore } from '@/stores/logDetectStore'
-import type {
-  Cluster,
-  DuplicatePatternCandidate
-} from '@/types/agentTypes'
+import type { Cluster, DuplicatePatternCandidate } from '@/types/agentTypes'
 
 const store = useLogDetectStore()
 const serviceName = ref('')
 const analysisDate = ref(new Date().toISOString().slice(0, 10))
 const showServiceLayer = ref(false)
 const duplicateCandidateBusyKey = ref<string | null>(null)
-const patternClusterTable = ref<InstanceType<typeof PatternClusterTable> | null>(null)
+const patternClusterTable = ref<InstanceType<
+  typeof PatternClusterTable
+> | null>(null)
 const knowledgeCardDraft = ref<{
   fingerprint: string
   cause: string
@@ -278,13 +279,16 @@ function handleRunAnalysis() {
 }
 
 function handleRequestRecommendation(cluster: Cluster) {
-  const trimmed = serviceName.value.trim()
-  if (!trimmed) return
-  const approved = window.confirm(
-    `${cluster.cluster} 패턴에 대한 Recommendation을 생성하시겠습니까?`
+  const trimmed = serviceName.value.trim() || cluster.service_name?.trim() || ''
+  if (!trimmed) {
+    window.alert('Recommendation을 생성할 서비스를 먼저 선택해주세요.')
+    return
+  }
+  void store.runClusterRecommendation(
+    trimmed,
+    cluster.cluster,
+    analysisDate.value
   )
-  if (!approved) return
-  void store.runClusterRecommendation(trimmed, cluster.cluster, analysisDate.value)
 }
 
 async function handleSaveKnownPattern(cluster: Cluster) {
