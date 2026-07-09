@@ -102,18 +102,11 @@
         @approve="handleApproveDuplicateCandidate"
         @reject="handleRejectDuplicateCandidate"
       />
-      <TrajectoryModelingPanel
-        :merge-groups="trajectoryMergeGroups"
-        :event-windows="trajectoryEventWindows"
-        :state-vectors="trajectoryStateVectors"
-        :trajectories="trajectories"
-        :trajectory-clusters="trajectoryClusters"
-        :nearest-patterns="nearestTrajectoryPatterns"
-      />
       <PatternClusterTable
         ref="patternClusterTable"
         :clusters="store.state.evidence.clusters"
         :service-name="serviceName"
+        :recommendation-busy-fingerprint="store.recommendationGeneratingFingerprint"
         @save-known-pattern="handleSaveKnownPattern"
         @request-recommendation="handleRequestRecommendation"
         @suggest-pattern-rule="handleSuggestPatternRule"
@@ -124,6 +117,8 @@
         :verification="store.state.final.verification_steps ?? []"
         :generated-answer="store.state.final.generated_answer"
         :can-moderate="canModerateRecommendation"
+        :loading="Boolean(store.recommendationGeneratingFingerprint)"
+        :loading-fingerprint="store.recommendationGeneratingFingerprint"
         @save-case="handleSaveCase"
         @save-recommendation="handleSaveRecommendation"
         @save-exception="handleSaveException"
@@ -229,7 +224,6 @@ import { computed, onMounted, ref } from 'vue'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import OverviewCard from '@/components/dashboard/OverviewCard.vue'
 import DuplicatePatternCandidatePanel from '@/components/dashboard/DuplicatePatternCandidatePanel.vue'
-import TrajectoryModelingPanel from '@/components/dashboard/TrajectoryModelingPanel.vue'
 import PatternClusterTable from '@/components/dashboard/PatternClusterTable.vue'
 import AnomalyTimelineChart from '@/components/dashboard/AnomalyTimelineChart.vue'
 import RecommendationPanel from '@/components/dashboard/RecommendationPanel.vue'
@@ -243,13 +237,7 @@ import EmptyState from '@/components/common/EmptyState.vue'
 import { useLogDetectStore } from '@/stores/logDetectStore'
 import type {
   Cluster,
-  DuplicatePatternCandidate,
-  EventTimeWindow,
-  FingerprintMergeGroup,
-  NearestTrajectoryPattern,
-  SystemStateVector,
-  Trajectory,
-  TrajectoryCluster
+  DuplicatePatternCandidate
 } from '@/types/agentTypes'
 
 const store = useLogDetectStore()
@@ -270,47 +258,6 @@ const canModerateRecommendation = computed(
     Boolean(store.state?.final.generated_answer) &&
     Boolean(store.currentRecommendationFingerprint)
 )
-
-const evidenceBundle = computed(
-  () => store.state?.final.evidence_bundle as Record<string, unknown> | null | undefined
-)
-
-const trajectoryMergeGroups = computed(() => {
-  const evidenceItems = store.state?.evidence.fingerprint_merge_groups
-  if (evidenceItems?.length) return evidenceItems
-  return (evidenceBundle.value?.fingerprint_merge_groups ??
-    []) as FingerprintMergeGroup[]
-})
-
-const trajectoryEventWindows = computed(() => {
-  const evidenceItems = store.state?.evidence.event_time_windows
-  if (evidenceItems?.length) return evidenceItems
-  return (evidenceBundle.value?.event_time_windows ?? []) as EventTimeWindow[]
-})
-
-const trajectoryStateVectors = computed(() => {
-  const evidenceItems = store.state?.evidence.system_state_vectors
-  if (evidenceItems?.length) return evidenceItems
-  return (evidenceBundle.value?.system_state_vectors ?? []) as SystemStateVector[]
-})
-
-const trajectories = computed(() => {
-  const evidenceItems = store.state?.evidence.trajectories
-  if (evidenceItems?.length) return evidenceItems
-  return (evidenceBundle.value?.trajectories ?? []) as Trajectory[]
-})
-
-const trajectoryClusters = computed(() => {
-  const evidenceItems = store.state?.evidence.trajectory_clusters
-  if (evidenceItems?.length) return evidenceItems
-  return (evidenceBundle.value?.trajectory_clusters ?? []) as TrajectoryCluster[]
-})
-
-const nearestTrajectoryPatterns = computed(() => {
-  const evidenceItems = store.state?.evidence.nearest_trajectory_patterns
-  if (evidenceItems?.length) return evidenceItems
-  return (evidenceBundle.value?.nearest_trajectory_patterns ?? []) as NearestTrajectoryPattern[]
-})
 
 async function openServiceLayer() {
   await store.fetchServices()

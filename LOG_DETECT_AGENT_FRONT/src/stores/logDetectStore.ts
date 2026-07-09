@@ -97,6 +97,7 @@ export const useLogDetectStore = defineStore('logDetect', () => {
   const loadingExceptions = ref(false)
   const loadingDuplicatePatternCandidates = ref(false)
   const loadingPatternOpsSkills = ref(false)
+  const recommendationGeneratingFingerprint = ref<string | null>(null)
   const backendActionCount = ref(0)
   const backendActionLabel = ref('')
   const error = ref<string | null>(null)
@@ -286,6 +287,14 @@ export const useLogDetectStore = defineStore('logDetect', () => {
     setTimeout(() => {
       toasts.value = toasts.value.filter((item) => item.id !== id)
     }, 3500)
+  }
+
+  function errorMessage(caught: unknown): string {
+    const error = caught as {
+      message?: string
+      response?: { data?: { detail?: string } }
+    }
+    return error.response?.data?.detail || error.message || 'Unknown error'
   }
 
   function applyPatternClusterPartialRefresh(
@@ -823,6 +832,14 @@ export const useLogDetectStore = defineStore('logDetect', () => {
     fingerprint: string,
     analysisDate?: string
   ) {
+    if (recommendationGeneratingFingerprint.value) {
+      addToast(
+        'info',
+        `Recommendation 생성이 이미 진행중입니다: ${recommendationGeneratingFingerprint.value}`
+      )
+      return false
+    }
+    recommendationGeneratingFingerprint.value = fingerprint
     executionStatus.value = 'running'
     error.value = null
     localProgressStepNames = ['임베딩/유사 FP 검색', '추천/결과 정리']
@@ -870,7 +887,7 @@ export const useLogDetectStore = defineStore('logDetect', () => {
         addToast('info', `Updated recommendations for ${fingerprint}`)
       } catch (caught) {
         executionStatus.value = 'failed'
-        error.value = (caught as Error).message
+        error.value = errorMessage(caught)
         currentExecutionLog.value = `Recommendation update 실패: ${error.value}`
         appendSkillActivity({
           skill: currentStage.value,
@@ -880,6 +897,9 @@ export const useLogDetectStore = defineStore('logDetect', () => {
           source: 'backend-result'
         })
         addToast('error', `Recommendation update failed: ${error.value}`)
+        return false
+      } finally {
+        recommendationGeneratingFingerprint.value = null
       }
     })
   }
@@ -1051,6 +1071,7 @@ export const useLogDetectStore = defineStore('logDetect', () => {
     loadingExceptions,
     loadingDuplicatePatternCandidates,
     loadingPatternOpsSkills,
+    recommendationGeneratingFingerprint,
     backendActionPending,
     backendActionLabel,
     error,

@@ -229,9 +229,19 @@
                 <button
                   class="rounded border border-blue-200 px-2 py-1 text-xs font-semibold text-blue-700 hover:bg-blue-50"
                   type="button"
+                  :disabled="props.recommendationBusyFingerprint === item.cluster"
+                  :class="
+                    props.recommendationBusyFingerprint === item.cluster
+                      ? 'cursor-not-allowed opacity-60'
+                      : ''
+                  "
                   @click="emit('request-recommendation', item)"
                 >
-                  Recommendation
+                  {{
+                    props.recommendationBusyFingerprint === item.cluster
+                      ? 'Generating...'
+                      : 'Recommendation'
+                  }}
                 </button>
                 <button
                   class="rounded border border-violet-200 px-2 py-1 text-xs font-semibold text-violet-700 hover:bg-violet-50"
@@ -479,7 +489,11 @@ const PAGE_SIZE = 10
 type PatternTab = 'similar' | 'new' | 'known' | 'observed' | 'anomaly'
 type AnomalyTab = 'all' | 'decrease' | 'increase' | 'absence' | 'recurrence'
 
-const props = defineProps<{ clusters: Cluster[]; serviceName: string }>()
+const props = defineProps<{
+  clusters: Cluster[]
+  serviceName: string
+  recommendationBusyFingerprint?: string | null
+}>()
 const emit = defineEmits<{
   'save-known-pattern': [cluster: Cluster]
   'request-recommendation': [cluster: Cluster]

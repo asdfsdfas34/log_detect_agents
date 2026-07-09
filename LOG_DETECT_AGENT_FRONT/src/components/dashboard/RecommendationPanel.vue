@@ -33,6 +33,18 @@
     </div>
     <div class="space-y-3">
       <div
+        v-if="loading"
+        class="flex items-center gap-2 rounded border border-blue-100 bg-blue-50 p-3 text-sm font-medium text-blue-700"
+        role="status"
+        aria-live="polite"
+      >
+        <span
+          class="h-4 w-4 rounded-full border-2 border-blue-100 border-t-blue-600 motion-safe:animate-spin"
+          aria-hidden="true"
+        />
+        <span>Recommendation 생성중: {{ loadingFingerprint ?? '-' }}</span>
+      </div>
+      <div
         v-if="generatedAnswer"
         class="rounded border border-blue-200 bg-blue-50 p-3 text-sm text-slate-800"
       >
@@ -93,6 +105,8 @@ const props = defineProps<{
   verification: string[]
   generatedAnswer?: string | null
   canModerate?: boolean
+  loading?: boolean
+  loadingFingerprint?: string | null
 }>()
 
 const emit = defineEmits<{

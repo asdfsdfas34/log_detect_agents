@@ -974,6 +974,14 @@ def recommend_for_fingerprint(req: FingerprintRecommendationRequest) -> AnalyzeR
         ),
         None,
     )
+    if selected is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"Fingerprint '{req.fingerprint}' was not found for "
+                f"service '{req.service_name}' on {analysis_date.isoformat()}."
+            ),
+        )
     selected_recommendation = next(
         (
             item
@@ -1092,7 +1100,7 @@ def recommend_for_fingerprint(req: FingerprintRecommendationRequest) -> AnalyzeR
     )
     state["assessment"]["risk_score"] = selected_impact["risk_score"]
     state["assessment"]["confidence"] = (
-        "high" if selected_recommendation["confidence"] == "HIGH" else "mid"
+        "high" if selected_recommendation.get("confidence") == "HIGH" else "mid"
     )
     state["assessment"]["rationale"] = [
         f"Selected Fingerprint: {req.fingerprint}",

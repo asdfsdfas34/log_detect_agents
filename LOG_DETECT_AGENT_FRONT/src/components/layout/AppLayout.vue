@@ -14,6 +14,13 @@
               Log Dashboard
             </RouterLink>
             <RouterLink
+              to="/trajectory"
+              class="font-medium text-slate-600 hover:text-blue-600"
+              active-class="text-blue-700"
+            >
+              Trajectory Dashboard
+            </RouterLink>
+            <RouterLink
               to="/skills"
               class="font-medium text-slate-600 hover:text-blue-600"
               active-class="text-blue-700"
