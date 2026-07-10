@@ -19,6 +19,8 @@ from app.db.chroma_store import (
 )
 from app.db.scenario_store import (
     approve_result,
+    delete_accepted_normal_pattern,
+    fetch_accepted_normal_patterns,
     fetch_duplicate_pattern_candidates,
     fetch_exception_registry,
     fetch_knowledge_cards,
@@ -27,7 +29,9 @@ from app.db.scenario_store import (
     merge_duplicate_pattern_candidate,
     merge_selected_fingerprints_as_known_pattern,
     normalize_log_text,
+    register_accepted_normal_pattern,
     register_exception,
+    revoke_accepted_normal_pattern,
     run_detection_pipeline,
     save_known_pattern,
     save_pattern_normalization_rule,
@@ -274,6 +278,24 @@ class KnowledgeCardListResponse(BaseModel):
 
 class ExceptionRegistryResponse(BaseModel):
     exceptions: list[dict]
+
+
+class AcceptedNormalPatternRequest(BaseModel):
+    """Request body for approving a fingerprint as an accepted normal baseline."""
+
+    fingerprint: str
+    service_name: str = ""
+    anomaly_type: str = ""
+    reason: str
+    approved_by: str = ""
+    scope: str = "fingerprint"
+    max_allowed_multiplier: float = 1.5
+    max_allowed_count: int | None = None
+    expires_at: str = ""
+
+
+class AcceptedNormalPatternResponse(BaseModel):
+    patterns: list[dict]
 
 
 class PatternOpsContractsResponse(BaseModel):
@@ -1294,6 +1316,58 @@ def create_exception(req: ExceptionRegisterRequest) -> dict[str, str]:
     """Register a fingerprint ignore rule for SC-006."""
     register_exception(req.fingerprint, req.reason)
     return {"status": "registered", "fingerprint": req.fingerprint}
+
+
+@app.get("/normal-patterns", response_model=AcceptedNormalPatternResponse)
+def list_normal_patterns(
+    fingerprint: str | None = None,
+    status: str | None = None,
+    limit: int = 50,
+) -> AcceptedNormalPatternResponse:
+    """Return accepted normal patterns (approved baselines kept under observation)."""
+    return AcceptedNormalPatternResponse(
+        patterns=fetch_accepted_normal_patterns(
+            fingerprint=fingerprint, status=status, limit=limit
+        )
+    )
+
+
+@app.post("/normal-patterns")
+def create_normal_pattern(req: AcceptedNormalPatternRequest) -> dict[str, object]:
+    """Approve a fingerprint as an accepted normal baseline (visible, not ignored)."""
+    try:
+        result = register_accepted_normal_pattern(
+            fingerprint=req.fingerprint,
+            reason=req.reason,
+            service_name=req.service_name,
+            anomaly_type=req.anomaly_type,
+            approved_by=req.approved_by,
+            scope=req.scope,
+            max_allowed_multiplier=req.max_allowed_multiplier,
+            max_allowed_count=req.max_allowed_count,
+            expires_at=req.expires_at,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return result
+
+
+@app.post("/normal-patterns/{pattern_id}/revoke")
+def revoke_normal_pattern(pattern_id: int) -> dict[str, object]:
+    """Revoke an accepted normal rule so its fingerprint is detected again."""
+    result = revoke_accepted_normal_pattern(pattern_id)
+    if result["status"] == "not_found":
+        raise HTTPException(status_code=404, detail="Accepted normal pattern not found")
+    return result
+
+
+@app.delete("/normal-patterns/{pattern_id}")
+def remove_normal_pattern(pattern_id: int) -> dict[str, object]:
+    """Permanently delete an accepted normal rule."""
+    result = delete_accepted_normal_pattern(pattern_id)
+    if result["status"] == "not_found":
+        raise HTTPException(status_code=404, detail="Accepted normal pattern not found")
+    return result
 
 
 @app.post("/known-patterns")
