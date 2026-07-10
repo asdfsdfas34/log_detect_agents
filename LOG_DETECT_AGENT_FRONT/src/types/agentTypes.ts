@@ -168,6 +168,9 @@ export interface DuplicatePatternCandidate {
   suggested_template: string
   confidence: number
   reason: string
+  llm_reason?: string
+  reason_source?: string
+  reason_model?: string
   status: string
   created_at?: string
   updated_at?: string
@@ -371,6 +374,50 @@ export interface ExceptionRegistryResponse {
   exceptions: ExceptionRegistryItem[]
 }
 
+export interface AcceptedNormalPatternRequest {
+  fingerprint: string
+  service_name?: string
+  anomaly_type?: string
+  reason: string
+  approved_by?: string
+  scope?: string
+  max_allowed_multiplier?: number
+  max_allowed_count?: number | null
+  expires_at?: string
+}
+
+export interface AcceptedNormalPatternItem {
+  id: number
+  fingerprint: string
+  service_name: string
+  log_level: string
+  normalized_message: string
+  anomaly_type: string
+  accepted_count: number
+  accepted_baseline: number
+  max_allowed_count: number | null
+  max_allowed_multiplier: number
+  scope: string
+  reason: string
+  approved_by: string
+  status: string
+  expires_at: string
+  created_at: string
+  updated_at: string
+  message: string
+  current_count: number | null
+}
+
+export interface AcceptedNormalPatternResponse {
+  patterns: AcceptedNormalPatternItem[]
+}
+
+export interface AcceptedNormalPatternActionResponse {
+  status: string
+  id: number
+  fingerprint?: string
+}
+
 export interface NormalizedLog {
   timestamp?: string
   system?: string
@@ -500,6 +547,10 @@ export interface Cluster {
   anomaly_severity?: string
   anomaly_reason?: string
   anomaly_metric?: Record<string, unknown>
+  accepted_normal?: boolean
+  accepted_normal_id?: number | string
+  accepted_normal_reason?: string
+  accepted_normal_status?: string
 }
 
 export interface PatternClusterMember {
@@ -556,6 +607,8 @@ export interface ScenarioSummary {
   anomalies_detected: number
   exception_registered_count: number
   exception_excluded_logs?: number
+  accepted_normal_count?: number
+  accepted_normal_breach_count?: number
   pattern_clusters?: number
   risk_score: number
   risk_level: string

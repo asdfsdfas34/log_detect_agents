@@ -7,6 +7,7 @@ import hashlib
 import importlib
 import json
 import math
+import os
 import re
 import sqlite3
 from datetime import datetime, timedelta
@@ -19,6 +20,7 @@ from urllib.parse import parse_qsl, urlsplit, urlunsplit
 from drain3 import TemplateMiner
 from drain3.template_miner_config import TemplateMinerConfig
 
+from app.config import settings
 from app.db.chroma_store import (
     delete_pattern_clusters,
     embed_pattern_texts_normalized,
@@ -30,6 +32,7 @@ from app.db.chroma_store import (
     save_pattern_clusters,
 )
 from app.db.sqlite_store import _resolve_db_path
+from app.llm.openai_client import generate_text
 
 NUMERIC_RE = re.compile(r"\b\d+\b")
 EXCEL_NEWLINE_RE = re.compile(r"_x000D_", re.IGNORECASE)
@@ -123,6 +126,7 @@ HYBRID_NO_TEXT_NUMERIC_WEIGHT = 0.35
 HDBSCAN_MIN_CLUSTER_SIZE = 3
 HDBSCAN_MIN_SAMPLES = 2
 HDBSCAN_MAX_DISTANCE = 1.0 - PATTERN_DUPLICATE_SIMILARITY_THRESHOLD
+LLM_PATTERN_REASON_MAX_CHARS = 220
 RECURRENCE_MIN_SILENCE_DAYS = 7
 SEMANTIC_CLUSTER_MIN_CLUSTER_SIZE = 3
 SEMANTIC_CLUSTER_MIN_SAMPLES = 2
@@ -518,6 +522,25 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             normalized_message TEXT DEFAULT '',
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
+        CREATE TABLE IF NOT EXISTS accepted_normal_patterns (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fingerprint TEXT NOT NULL,
+            service_name TEXT DEFAULT '',
+            log_level TEXT DEFAULT '',
+            normalized_message TEXT DEFAULT '',
+            anomaly_type TEXT DEFAULT '',
+            accepted_count INTEGER NOT NULL DEFAULT 0,
+            accepted_baseline REAL NOT NULL DEFAULT 0,
+            max_allowed_count INTEGER DEFAULT NULL,
+            max_allowed_multiplier REAL NOT NULL DEFAULT 1.5,
+            scope TEXT NOT NULL DEFAULT 'fingerprint',
+            reason TEXT NOT NULL,
+            approved_by TEXT DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'active',
+            expires_at TEXT DEFAULT '',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
         CREATE TABLE IF NOT EXISTS knowledge_cards (
             card_id TEXT PRIMARY KEY,
             fingerprint TEXT NOT NULL,
@@ -584,6 +607,9 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             suggested_template TEXT NOT NULL,
             confidence REAL NOT NULL,
             reason TEXT NOT NULL,
+            llm_reason TEXT NOT NULL DEFAULT '',
+            reason_source TEXT NOT NULL DEFAULT 'deterministic',
+            reason_model TEXT NOT NULL DEFAULT '',
             status TEXT NOT NULL DEFAULT 'pending',
             created_at TEXT DEFAULT CURRENT_TIMESTAMP,
             updated_at TEXT DEFAULT CURRENT_TIMESTAMP
@@ -769,8 +795,27 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             ON trajectories(service_name, bucket_size, end_bucket DESC);
         CREATE INDEX IF NOT EXISTS idx_trajectory_clusters_service_bucket
             ON trajectory_clusters(service_name, bucket_size, member_count DESC);
+        CREATE INDEX IF NOT EXISTS idx_accepted_normal_patterns_fp
+            ON accepted_normal_patterns(fingerprint, status);
+        CREATE INDEX IF NOT EXISTS idx_accepted_normal_patterns_signature
+            ON accepted_normal_patterns(service_name, log_level, normalized_message, status);
         """)
 
+    for column, definition in {
+        "llm_reason": "TEXT NOT NULL DEFAULT ''",
+        "reason_source": "TEXT NOT NULL DEFAULT 'deterministic'",
+        "reason_model": "TEXT NOT NULL DEFAULT ''",
+    }.items():
+        duplicate_candidate_columns = [
+            row[1]
+            for row in cur.execute(
+                "PRAGMA table_info(pattern_duplicate_candidates)"
+            ).fetchall()
+        ]
+        if column not in duplicate_candidate_columns:
+            cur.execute(
+                f"ALTER TABLE pattern_duplicate_candidates ADD COLUMN {column} {definition}"
+            )
     for column, definition in {
         "pattern_status": "TEXT NOT NULL DEFAULT 'new_pattern'",
         "match_source": "TEXT DEFAULT ''",
@@ -1404,6 +1449,181 @@ def _raw_log_rows_for_fingerprints(
     return list(deduped.values())
 
 
+def _llm_pattern_reason_enabled() -> bool:
+    feature_flag = os.getenv("PATTERN_REASON_LLM_ENABLED")
+    if feature_flag is not None:
+        enabled = feature_flag.lower() in {"1", "true", "yes", "on"}
+    else:
+        stub_mode_value = os.getenv("LLM_STUB_MODE")
+        enabled = stub_mode_value is None or stub_mode_value.lower() == "false"
+    if not enabled:
+        return False
+    return bool(
+        os.getenv("OPENAI_API_KEY")
+        or settings.openai_api_key
+        or os.getenv("OPENAI_BASE_URL")
+    )
+
+
+def _trim_reason_text(value: str) -> str:
+    text = WHITESPACE_RE.sub(" ", value or "").strip(" `\"'")
+    if text.startswith("{") and text.endswith("}"):
+        try:
+            loaded = json.loads(text)
+        except json.JSONDecodeError:
+            loaded = {}
+        if isinstance(loaded, dict):
+            text = str(loaded.get("reason") or loaded.get("summary") or "").strip()
+    text = text.replace("```", "").strip()
+    return text[:LLM_PATTERN_REASON_MAX_CHARS].rstrip()
+
+
+def _sample_reason_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    ranked = sorted(
+        items,
+        key=lambda item: (
+            -int(item.get("occurrence_count") or 0),
+            str(item.get("fingerprint") or ""),
+        ),
+    )
+    return [
+        {
+            "fingerprint": str(item.get("fingerprint") or ""),
+            "occurrence_count": int(item.get("occurrence_count") or 0),
+            "message": str(item.get("message") or "")[:400],
+            "normalized_message": normalize_log_text(str(item.get("message") or ""))[
+                :400
+            ],
+            "drain_template": str(item.get("drain_template") or "")[:400],
+        }
+        for item in ranked[:4]
+    ]
+
+
+def _generate_duplicate_pattern_reason(
+    *,
+    deterministic_reason: str,
+    service_name: str,
+    log_level: str,
+    signature: str,
+    suggested_template: str,
+    suggested_regex: str,
+    confidence: float,
+    fingerprints: list[str],
+    items: list[dict[str, Any]],
+) -> dict[str, str]:
+    if not _llm_pattern_reason_enabled():
+        return {
+            "reason": deterministic_reason,
+            "llm_reason": "",
+            "reason_source": "deterministic",
+            "reason_model": "",
+        }
+
+    payload = {
+        "service_name": service_name,
+        "log_level": log_level,
+        "signature": signature,
+        "suggested_template": suggested_template,
+        "suggested_regex": suggested_regex,
+        "confidence": round(confidence, 2),
+        "fingerprints": fingerprints[:10],
+        "sample_logs": _sample_reason_items(items),
+    }
+    try:
+        llm_reason = _trim_reason_text(
+            generate_text(
+                model=settings.openai_model,
+                temperature=0.1,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "당신은 운영 로그 패턴 리뷰어입니다. 주어진 후보가 왜 하나의 "
+                            "정규화 패턴으로 묶일 수 있는지 설명하세요. 입력에 없는 장애 원인, "
+                            "해결책, 인프라 변경은 추측하지 마세요. 한국어 1~2문장, "
+                            f"{LLM_PATTERN_REASON_MAX_CHARS}자 이내, Markdown 없이 답하세요."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": json.dumps(payload, ensure_ascii=False),
+                    },
+                ],
+            )
+        )
+    except Exception:  # noqa: BLE001
+        llm_reason = ""
+
+    if not llm_reason:
+        return {
+            "reason": deterministic_reason,
+            "llm_reason": "",
+            "reason_source": "deterministic",
+            "reason_model": "",
+        }
+    return {
+        "reason": llm_reason,
+        "llm_reason": llm_reason,
+        "reason_source": "llm",
+        "reason_model": settings.openai_model,
+    }
+
+
+def _refresh_pending_candidate_llm_reasons(
+    conn: sqlite3.Connection,
+    *,
+    candidates: list[dict[str, Any]],
+    details: dict[str, dict[str, Any]],
+) -> None:
+    if not _llm_pattern_reason_enabled():
+        return
+    refreshed = False
+    for candidate in candidates:
+        if (
+            str(candidate.get("status") or "") != "pending"
+            or str(candidate.get("reason_source") or "") == "llm"
+        ):
+            continue
+        fingerprints = [str(item) for item in candidate.get("fingerprints", [])]
+        items = [
+            details.get(fingerprint, {"fingerprint": fingerprint})
+            for fingerprint in fingerprints
+        ]
+        reason_payload = _generate_duplicate_pattern_reason(
+            deterministic_reason=str(candidate.get("reason") or ""),
+            service_name=str(candidate.get("service_name") or ""),
+            log_level=str(candidate.get("log_level") or ""),
+            signature=str(candidate.get("signature") or ""),
+            suggested_template=str(candidate.get("suggested_template") or ""),
+            suggested_regex=str(candidate.get("suggested_regex") or ""),
+            confidence=float(candidate.get("confidence") or 0),
+            fingerprints=fingerprints,
+            items=items,
+        )
+        if reason_payload["reason_source"] != "llm":
+            continue
+        candidate.update(reason_payload)
+        conn.execute(
+            """
+            UPDATE pattern_duplicate_candidates
+            SET reason=?, llm_reason=?, reason_source=?, reason_model=?,
+                updated_at=CURRENT_TIMESTAMP
+            WHERE candidate_key=? AND status='pending'
+            """,
+            (
+                reason_payload["reason"],
+                reason_payload["llm_reason"],
+                reason_payload["reason_source"],
+                reason_payload["reason_model"],
+                str(candidate.get("candidate_key") or ""),
+            ),
+        )
+        refreshed = True
+    if refreshed:
+        conn.commit()
+
+
 def detect_duplicate_pattern_candidates(
     groups: list[dict[str, Any]], *, min_group_size: int = 2
 ) -> list[dict[str, Any]]:
@@ -1470,7 +1690,7 @@ def detect_duplicate_pattern_candidates(
             if existing and str(existing[0]) in {"approved", "rejected"}:
                 continue
             confidence = min(0.99, 0.82 + (0.03 * min(len(fingerprints), 5)))
-            reason = (
+            deterministic_reason = (
                 "Fingerprints share the same aggressive normalization signature; "
                 "differences are limited to volatile fields and passed structure checks."
             )
@@ -1478,19 +1698,34 @@ def detect_duplicate_pattern_candidates(
             if not _candidate_regex_matches_all(suggested_regex, items):
                 continue
             suggested_template = _suggest_template_from_duplicate_signature(signature)
+            reason_payload = _generate_duplicate_pattern_reason(
+                deterministic_reason=deterministic_reason,
+                service_name=service_name,
+                log_level=log_level,
+                signature=signature,
+                suggested_template=suggested_template,
+                suggested_regex=suggested_regex,
+                confidence=confidence,
+                fingerprints=fingerprints,
+                items=items,
+            )
             conn.execute(
                 """
                 INSERT INTO pattern_duplicate_candidates(
                     candidate_key, service_name, log_level, signature,
                     fingerprints_json, suggested_regex, suggested_template,
-                    confidence, reason, status, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', CURRENT_TIMESTAMP)
+                    confidence, reason, llm_reason, reason_source, reason_model,
+                    status, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', CURRENT_TIMESTAMP)
                 ON CONFLICT(candidate_key) DO UPDATE SET
                     fingerprints_json=excluded.fingerprints_json,
                     suggested_regex=excluded.suggested_regex,
                     suggested_template=excluded.suggested_template,
                     confidence=excluded.confidence,
                     reason=excluded.reason,
+                    llm_reason=excluded.llm_reason,
+                    reason_source=excluded.reason_source,
+                    reason_model=excluded.reason_model,
                     status='pending',
                     updated_at=CURRENT_TIMESTAMP
                 """,
@@ -1503,7 +1738,10 @@ def detect_duplicate_pattern_candidates(
                     suggested_regex,
                     suggested_template,
                     confidence,
-                    reason,
+                    reason_payload["reason"],
+                    reason_payload["llm_reason"],
+                    reason_payload["reason_source"],
+                    reason_payload["reason_model"],
                 ),
             )
             candidates.append(
@@ -1516,7 +1754,10 @@ def detect_duplicate_pattern_candidates(
                     "suggested_regex": suggested_regex,
                     "suggested_template": suggested_template,
                     "confidence": confidence,
-                    "reason": reason,
+                    "reason": reason_payload["reason"],
+                    "llm_reason": reason_payload["llm_reason"],
+                    "reason_source": reason_payload["reason_source"],
+                    "reason_model": reason_payload["reason_model"],
                     "status": "pending",
                 }
             )
@@ -2173,8 +2414,10 @@ def _attach_detection_features(
     *,
     impacts: list[dict[str, Any]] | None = None,
     anomalies: list[dict[str, Any]] | None = None,
+    accepted_normal_states: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     impacts_by_fp = {str(item.get("fingerprint") or ""): item for item in impacts or []}
+    accepted_normal_states = accepted_normal_states or {}
     anomaly_counts: dict[str, int] = {}
     for item in anomalies or []:
         fingerprint = str(item.get("pattern") or item.get("fingerprint") or "")
@@ -2184,12 +2427,20 @@ def _attach_detection_features(
     for group in groups:
         fingerprint = str(group.get("fingerprint") or "")
         impact = impacts_by_fp.get(fingerprint, {})
+        accepted = accepted_normal_states.get(fingerprint) or {}
         enriched.append(
             {
                 **group,
                 "risk_score": int(impact.get("risk_score") or group.get("risk_score") or 0),
                 "anomaly_count": anomaly_counts.get(
                     fingerprint, int(group.get("anomaly_count") or 0)
+                ),
+                "accepted_normal": bool(accepted.get("accepted_normal", False)),
+                "accepted_normal_id": accepted.get("accepted_normal_id", ""),
+                "accepted_normal_reason": str(accepted.get("accepted_normal_reason", "")),
+                "accepted_normal_status": str(accepted.get("accepted_normal_status", "")),
+                "anomaly_type": str(
+                    accepted.get("anomaly_type", group.get("anomaly_type", ""))
                 ),
             }
         )
@@ -2959,7 +3210,8 @@ def fetch_duplicate_pattern_candidates(
             f"""
             SELECT candidate_key, service_name, log_level, signature,
                    fingerprints_json, suggested_regex, suggested_template,
-                   confidence, reason, status, created_at, updated_at
+                   confidence, reason, status, created_at, updated_at,
+                   llm_reason, reason_source, reason_model
             FROM pattern_duplicate_candidates
             {where_sql}
             ORDER BY confidence DESC, datetime(updated_at) DESC
@@ -2986,6 +3238,9 @@ def fetch_duplicate_pattern_candidates(
                     "status": str(row[9]),
                     "created_at": str(row[10]),
                     "updated_at": str(row[11]),
+                    "llm_reason": str(row[12] or ""),
+                    "reason_source": str(row[13] or "deterministic"),
+                    "reason_model": str(row[14] or ""),
                 }
             )
         details: dict[str, dict[str, Any]] = {}
@@ -3014,6 +3269,12 @@ def fetch_duplicate_pattern_candidates(
                 }
                 for row in detail_rows
             }
+        if status == "pending":
+            _refresh_pending_candidate_llm_reasons(
+                conn,
+                candidates=candidates,
+                details=details,
+            )
         for candidate in candidates:
             candidate["fingerprint_details"] = {
                 fingerprint: details.get(fingerprint, {"fingerprint": fingerprint})
@@ -5099,6 +5360,161 @@ def _metric_trend(metric: dict[str, Any]) -> str:
     return "stable"
 
 
+_LOG_LEVEL_RANK = {
+    "ERROR": 3,
+    "FATAL": 3,
+    "CRITICAL": 3,
+    "WARN": 2,
+    "WARNING": 2,
+    "INFO": 1,
+    "INFORMATION": 1,
+    "DEBUG": 0,
+    "TRACE": 0,
+}
+
+
+def _log_level_rank(level: str) -> int:
+    return _LOG_LEVEL_RANK.get(str(level or "").upper(), 1)
+
+
+def _accepted_normal_max_allowed(rule: dict[str, Any]) -> int | None:
+    """Return the effective allowed count, computing it from the multiplier if unset."""
+
+    max_allowed = rule.get("max_allowed_count")
+    if max_allowed is not None:
+        try:
+            return int(max_allowed)
+        except (TypeError, ValueError):
+            return None
+    accepted_count = int(rule.get("accepted_count") or 0)
+    if accepted_count <= 0:
+        return None
+    multiplier = float(rule.get("max_allowed_multiplier") or 1.5)
+    return int(math.ceil(accepted_count * multiplier))
+
+
+def _accepted_normal_rule_active(
+    rule: dict[str, Any], *, now: datetime | None = None
+) -> bool:
+    """A rule applies only while it is active and not past its expiry."""
+
+    if str(rule.get("status") or "") != "active":
+        return False
+    expires_at = str(rule.get("expires_at") or "").strip()
+    if not expires_at:
+        return True
+    try:
+        expiry = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    if expiry.tzinfo is not None:
+        expiry = expiry.replace(tzinfo=None)
+    reference = now or datetime.utcnow()
+    return reference < expiry
+
+
+def _accepted_normal_rule_for(
+    *,
+    group: dict[str, Any],
+    rules_by_fingerprint: dict[str, dict[str, Any]],
+    rules_by_signature: dict[tuple[str, str, str], dict[str, Any]],
+    now: datetime | None = None,
+) -> dict[str, Any] | None:
+    """Find the active accepted-normal rule that governs this fingerprint group."""
+
+    fingerprint = str(group.get("fingerprint") or "")
+    rule = rules_by_fingerprint.get(fingerprint)
+    if rule is None:
+        signature = (
+            str(group.get("service_name") or ""),
+            str(group.get("log_level") or "").upper(),
+            str(group.get("normalized_message") or ""),
+        )
+        rule = rules_by_signature.get(signature)
+    if rule is None:
+        return None
+    if not _accepted_normal_rule_active(rule, now=now):
+        return None
+    return rule
+
+
+def _apply_accepted_normal(
+    *,
+    group: dict[str, Any],
+    anomaly: bool,
+    anomaly_type: str,
+    severity: str,
+    rule: dict[str, Any],
+) -> tuple[bool, str, str]:
+    """Re-classify anomaly state for a fingerprint approved as an accepted normal.
+
+    While the current count stays within the approved baseline and the log level
+    has not worsened, the group is treated as ``ACCEPTED_NORMAL`` and excluded
+    from the anomaly count. If either bound is exceeded it is re-detected as an
+    ``ACCEPTED_NORMAL_BREACH`` anomaly.
+    """
+
+    current_count = int(group.get("occurrence_count") or 0)
+    accepted_level = str(rule.get("log_level") or "").upper()
+    current_level = str(group.get("log_level") or "").upper()
+    breach_severity = severity if severity not in {"", "NONE"} else "HIGH"
+    if accepted_level and _log_level_rank(current_level) > _log_level_rank(accepted_level):
+        return True, "ACCEPTED_NORMAL_BREACH", breach_severity
+    max_allowed = _accepted_normal_max_allowed(rule)
+    if max_allowed is not None and current_count > max_allowed:
+        return True, "ACCEPTED_NORMAL_BREACH", breach_severity
+    return False, "ACCEPTED_NORMAL", "NONE"
+
+
+def _load_active_accepted_normal_rules(
+    conn: sqlite3.Connection,
+) -> tuple[dict[str, dict[str, Any]], dict[tuple[str, str, str], dict[str, Any]]]:
+    """Load active accepted-normal rules indexed by fingerprint and by signature."""
+
+    rows = conn.execute(
+        """
+        SELECT id, fingerprint, service_name, log_level, normalized_message,
+               anomaly_type, accepted_count, accepted_baseline, max_allowed_count,
+               max_allowed_multiplier, scope, reason, approved_by, status, expires_at
+        FROM accepted_normal_patterns
+        WHERE status='active'
+        ORDER BY datetime(updated_at) DESC, id DESC
+        """
+    ).fetchall()
+    by_fingerprint: dict[str, dict[str, Any]] = {}
+    by_signature: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for row in rows:
+        rule = {
+            "id": int(row[0]),
+            "fingerprint": str(row[1] or ""),
+            "service_name": str(row[2] or ""),
+            "log_level": str(row[3] or "").upper(),
+            "normalized_message": str(row[4] or ""),
+            "anomaly_type": str(row[5] or ""),
+            "accepted_count": int(row[6] or 0),
+            "accepted_baseline": float(row[7] or 0),
+            "max_allowed_count": row[8],
+            "max_allowed_multiplier": float(row[9] or 1.5),
+            "scope": str(row[10] or "fingerprint"),
+            "reason": str(row[11] or ""),
+            "approved_by": str(row[12] or ""),
+            "status": str(row[13] or "active"),
+            "expires_at": str(row[14] or ""),
+        }
+        fingerprint = rule["fingerprint"]
+        # Keep the newest rule per key (rows are ordered newest first).
+        if fingerprint:
+            by_fingerprint.setdefault(fingerprint, rule)
+        signature = (
+            rule["service_name"],
+            rule["log_level"],
+            rule["normalized_message"],
+        )
+        if rule["normalized_message"] and rule["log_level"]:
+            by_signature.setdefault(signature, rule)
+    return by_fingerprint, by_signature
+
+
 def _anomaly_type_for(
     *,
     group: dict[str, Any],
@@ -5605,6 +6021,11 @@ def run_detection_pipeline(
                 normalized = normalize_log_text(message)
             if normalized and level:
                 ignored_signatures.add((normalized, level))
+        accepted_normal_by_fp, accepted_normal_by_signature = (
+            _load_active_accepted_normal_rules(conn)
+        )
+        accepted_normal_now = datetime.utcnow()
+        accepted_normal_states: dict[str, dict[str, Any]] = {}
         anomalies = []
         impacts = []
         recs = []
@@ -5632,10 +6053,36 @@ def run_detection_pipeline(
             anomaly, anomaly_type, severity = _anomaly_type_for(
                 group=g, known=known, spike_ratio=spike_ratio, metric=metric
             )
+            accepted_normal_rule = _accepted_normal_rule_for(
+                group=g,
+                rules_by_fingerprint=accepted_normal_by_fp,
+                rules_by_signature=accepted_normal_by_signature,
+                now=accepted_normal_now,
+            )
+            if accepted_normal_rule:
+                anomaly, anomaly_type, severity = _apply_accepted_normal(
+                    group=g,
+                    anomaly=anomaly,
+                    anomaly_type=anomaly_type,
+                    severity=severity,
+                    rule=accepted_normal_rule,
+                )
+                accepted_normal_states[fp] = {
+                    "accepted_normal": True,
+                    "accepted_normal_id": int(accepted_normal_rule.get("id") or 0),
+                    "accepted_normal_reason": str(
+                        accepted_normal_rule.get("reason") or ""
+                    ),
+                    "accepted_normal_status": str(
+                        accepted_normal_rule.get("status") or "active"
+                    ),
+                    "anomaly_type": anomaly_type,
+                }
             if is_ignored:
                 anomaly = False
                 anomaly_type = "IGNORED"
                 severity = "NONE"
+                accepted_normal_states.pop(fp, None)
             cur.execute(
                 "REPLACE INTO anomaly_results VALUES (?,?,?,?,?,CURRENT_TIMESTAMP)",
                 (
@@ -5717,6 +6164,7 @@ def run_detection_pipeline(
         visible_groups,
         impacts=impacts,
         anomalies=anomalies,
+        accepted_normal_states=accepted_normal_states,
     )
     duplicate_candidates = detect_duplicate_pattern_candidates(visible_groups)
     with sqlite3.connect(db_path) as model_conn:
@@ -5810,6 +6258,18 @@ def run_detection_pipeline(
     new_count = sum(
         1 for group in visible_groups if group["pattern_status"] == "new_pattern"
     )
+    accepted_normal_count = sum(
+        1
+        for group in visible_groups
+        if group.get("accepted_normal")
+        and group.get("anomaly_type") == "ACCEPTED_NORMAL"
+    )
+    accepted_normal_breach_count = sum(
+        1
+        for group in visible_groups
+        if group.get("accepted_normal")
+        and group.get("anomaly_type") == "ACCEPTED_NORMAL_BREACH"
+    )
     top_impact = max(
         visible_impacts,
         key=lambda x: x["risk_score"],
@@ -5860,6 +6320,8 @@ def run_detection_pipeline(
             "anomalies_detected": len(anomalies),
             "exception_registered_count": exception_count,
             "exception_excluded_logs": exception_excluded_logs,
+            "accepted_normal_count": accepted_normal_count,
+            "accepted_normal_breach_count": accepted_normal_breach_count,
             "risk_score": top_impact["risk_score"],
             "risk_level": top_impact["risk_level"],
             "detection_status": "Detected" if anomalies else "Normal",
@@ -6530,6 +6992,193 @@ def register_exception(fp: str, reason: str) -> None:
             (fp, reason, message, log_level, service_name, normalize_log_text(message)),
         )
         conn.commit()
+
+
+def register_accepted_normal_pattern(
+    *,
+    fingerprint: str,
+    reason: str,
+    service_name: str = "",
+    anomaly_type: str = "",
+    approved_by: str = "",
+    scope: str = "fingerprint",
+    max_allowed_multiplier: float = 1.5,
+    max_allowed_count: int | None = None,
+    expires_at: str = "",
+) -> dict[str, Any]:
+    """Approve a fingerprint as an accepted normal baseline (kept visible, not ignored).
+
+    Unlike :func:`register_exception`, the pattern is not hidden from analysis; it
+    is only excluded from the anomaly count while it stays within the approved
+    baseline. Exceeding the baseline re-detects it as ``ACCEPTED_NORMAL_BREACH``.
+    """
+
+    if not str(fingerprint).strip():
+        raise ValueError("fingerprint is required")
+    if not str(reason).strip():
+        raise ValueError("reason is required")
+    with sqlite3.connect(_resolve_db_path()) as conn:
+        ensure_schema(conn)
+        row = conn.execute(
+            """
+            SELECT occurrence_count, log_level, message, service_name
+            FROM fingerprints
+            WHERE fingerprint = ?
+            """,
+            (fingerprint,),
+        ).fetchone()
+        accepted_count = int(row[0] or 0) if row else 0
+        log_level = str(row[1]).upper() if row and row[1] else ""
+        message = str(row[2]) if row and row[2] else ""
+        snapshot_service = str(row[3]) if row and row[3] else ""
+        service_name = service_name or snapshot_service
+        normalized_message = normalize_log_text(message) if message else ""
+        multiplier = float(max_allowed_multiplier or 1.5)
+        if max_allowed_count is None and accepted_count > 0:
+            max_allowed_count = int(math.ceil(accepted_count * multiplier))
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO accepted_normal_patterns(
+                fingerprint, service_name, log_level, normalized_message,
+                anomaly_type, accepted_count, accepted_baseline, max_allowed_count,
+                max_allowed_multiplier, scope, reason, approved_by, status, expires_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)
+            """,
+            (
+                fingerprint,
+                service_name,
+                log_level,
+                normalized_message,
+                anomaly_type,
+                accepted_count,
+                float(accepted_count),
+                max_allowed_count,
+                multiplier,
+                scope or "fingerprint",
+                reason,
+                approved_by,
+                expires_at,
+            ),
+        )
+        conn.commit()
+        rule_id = int(cur.lastrowid)
+    _PIPELINE_CACHE.clear()
+    return {
+        "status": "registered",
+        "id": rule_id,
+        "fingerprint": fingerprint,
+    }
+
+
+def fetch_accepted_normal_patterns(
+    *,
+    fingerprint: str | None = None,
+    status: str | None = None,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    """Return accepted normal patterns, newest first, joined with current FP state."""
+
+    with sqlite3.connect(_resolve_db_path()) as conn:
+        ensure_schema(conn)
+        params: list[Any] = []
+        where_parts: list[str] = []
+        if fingerprint:
+            where_parts.append("anp.fingerprint = ?")
+            params.append(fingerprint)
+        if status:
+            where_parts.append("anp.status = ?")
+            params.append(status)
+        where_sql = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
+        params.append(limit)
+        rows = conn.execute(
+            f"""
+            SELECT
+                anp.id,
+                anp.fingerprint,
+                COALESCE(NULLIF(anp.service_name, ''), fp.service_name, ''),
+                COALESCE(NULLIF(anp.log_level, ''), fp.log_level, ''),
+                anp.normalized_message,
+                anp.anomaly_type,
+                anp.accepted_count,
+                anp.accepted_baseline,
+                anp.max_allowed_count,
+                anp.max_allowed_multiplier,
+                anp.scope,
+                anp.reason,
+                anp.approved_by,
+                anp.status,
+                anp.expires_at,
+                anp.created_at,
+                anp.updated_at,
+                COALESCE(NULLIF(anp.normalized_message, ''), fp.message, ''),
+                fp.occurrence_count
+            FROM accepted_normal_patterns anp
+            LEFT JOIN fingerprints fp ON fp.fingerprint = anp.fingerprint
+            {where_sql}
+            ORDER BY datetime(anp.updated_at) DESC, anp.id DESC
+            LIMIT ?
+            """,
+            params,
+        ).fetchall()
+    return [
+        {
+            "id": int(row[0]),
+            "fingerprint": str(row[1] or ""),
+            "service_name": str(row[2] or ""),
+            "log_level": str(row[3] or ""),
+            "normalized_message": str(row[4] or ""),
+            "anomaly_type": str(row[5] or ""),
+            "accepted_count": int(row[6] or 0),
+            "accepted_baseline": float(row[7] or 0),
+            "max_allowed_count": (None if row[8] is None else int(row[8])),
+            "max_allowed_multiplier": float(row[9] or 1.5),
+            "scope": str(row[10] or "fingerprint"),
+            "reason": str(row[11] or ""),
+            "approved_by": str(row[12] or ""),
+            "status": str(row[13] or ""),
+            "expires_at": str(row[14] or ""),
+            "created_at": str(row[15] or ""),
+            "updated_at": str(row[16] or ""),
+            "message": str(row[17] or ""),
+            "current_count": (None if row[18] is None else int(row[18])),
+        }
+        for row in rows
+    ]
+
+
+def revoke_accepted_normal_pattern(rule_id: int) -> dict[str, Any]:
+    """Revoke an accepted normal rule so it no longer suppresses anomaly detection."""
+
+    with sqlite3.connect(_resolve_db_path()) as conn:
+        ensure_schema(conn)
+        cur = conn.execute(
+            """
+            UPDATE accepted_normal_patterns
+            SET status='revoked', updated_at=CURRENT_TIMESTAMP
+            WHERE id = ? AND status != 'revoked'
+            """,
+            (rule_id,),
+        )
+        conn.commit()
+        revoked = cur.rowcount > 0
+    _PIPELINE_CACHE.clear()
+    return {"status": "revoked" if revoked else "not_found", "id": rule_id}
+
+
+def delete_accepted_normal_pattern(rule_id: int) -> dict[str, Any]:
+    """Permanently delete an accepted normal rule."""
+
+    with sqlite3.connect(_resolve_db_path()) as conn:
+        ensure_schema(conn)
+        cur = conn.execute(
+            "DELETE FROM accepted_normal_patterns WHERE id = ?",
+            (rule_id,),
+        )
+        conn.commit()
+        deleted = cur.rowcount > 0
+    _PIPELINE_CACHE.clear()
+    return {"status": "deleted" if deleted else "not_found", "id": rule_id}
 
 
 def approve_result(

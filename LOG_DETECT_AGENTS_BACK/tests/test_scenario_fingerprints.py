@@ -207,6 +207,170 @@ def test_detection_pipeline_suggests_duplicate_pattern_candidates(
     assert repaired_known_count == 1
 
 
+def test_duplicate_pattern_candidate_can_use_llm_reason(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db_path = tmp_path / "logs.db"
+    monkeypatch.setenv("SQLITE_PATH", str(db_path))
+    monkeypatch.setenv("PATTERN_REASON_LLM_ENABLED", "true")
+    monkeypatch.setenv("LLM_STUB_MODE", "false")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr(scenario_store, "_semantic_duplicate_groups", lambda groups: [])
+
+    def _fake_generate_text(**kwargs: Any) -> str:
+        assert kwargs["temperature"] == 0.1
+        return (
+            "세 로그는 SetImpersonation 호출 구조가 같고 userID/deptID 값만 달라 "
+            "동일 정규화 패턴 후보로 묶을 수 있습니다."
+        )
+
+    monkeypatch.setattr(scenario_store, "generate_text", _fake_generate_text)
+    messages = [
+        (
+            "SetImpersonation() userID:1111393, deptID:, "
+            "CurrentUserInfo.UserID:1108366, CurrentUserInfo.ImpersonationAdminID"
+        ),
+        (
+            "SetImpersonation() userID:1103450, deptID:, "
+            "CurrentUserInfo.UserID:, CurrentUserInfo.ImpersonationAdminID"
+        ),
+        (
+            "SetImpersonation() userID:1112074, deptID:00004787, "
+            "CurrentUserInfo.UserID:, CurrentUserInfo.ImpersonationAdminID"
+        ),
+    ]
+    groups = [
+        {
+            "fingerprint": f"FP-{index}",
+            "message": message,
+            "service_name": "test_appl",
+            "log_level": "INFORMATION",
+            "occurrence_count": 1,
+            "pattern_status": "new_pattern",
+        }
+        for index, message in enumerate(messages)
+    ]
+
+    candidates = detect_duplicate_pattern_candidates(groups)
+
+    assert len(candidates) == 1
+    assert candidates[0]["reason_source"] == "llm"
+    assert candidates[0]["reason_model"]
+    assert candidates[0]["llm_reason"] == candidates[0]["reason"]
+    assert "SetImpersonation" in candidates[0]["reason"]
+    stored = fetch_duplicate_pattern_candidates()[0]
+    assert stored["reason_source"] == "llm"
+    assert stored["llm_reason"] == candidates[0]["llm_reason"]
+
+    monkeypatch.delenv("SQLITE_PATH", raising=False)
+    monkeypatch.delenv("LLM_STUB_MODE", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+
+def test_pattern_reason_llm_enabled_when_stub_mode_is_not_explicit(
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("PATTERN_REASON_LLM_ENABLED", raising=False)
+    monkeypatch.delenv("LLM_STUB_MODE", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+    assert scenario_store._llm_pattern_reason_enabled()
+
+    monkeypatch.setenv("LLM_STUB_MODE", "true")
+    assert not scenario_store._llm_pattern_reason_enabled()
+
+
+def test_fetch_pending_duplicate_candidates_backfills_llm_reason(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db_path = tmp_path / "logs.db"
+    monkeypatch.setenv("SQLITE_PATH", str(db_path))
+    monkeypatch.setenv("PATTERN_REASON_LLM_ENABLED", "true")
+    monkeypatch.setenv("LLM_STUB_MODE", "false")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+    def _fake_generate_text(**kwargs: Any) -> str:
+        assert "sample_logs" in kwargs["messages"][1]["content"]
+        return "pending 후보 조회 시에도 LLM이 동일 패턴으로 묶인 사유를 보강합니다."
+
+    monkeypatch.setattr(scenario_store, "generate_text", _fake_generate_text)
+    fingerprints = ["FP-A", "FP-B"]
+    with sqlite3.connect(db_path) as conn:
+        ensure_schema(conn)
+        conn.executemany(
+            """
+            INSERT INTO fingerprints(
+                fingerprint, occurrence_count, log_level, message, stacktrace,
+                service_name, first_seen, last_seen
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    "FP-A",
+                    1,
+                    "ERROR",
+                    "Payment failed orderId=1001 userId=901",
+                    "",
+                    "payment-api",
+                    "2026-06-16T10:00:00",
+                    "2026-06-16T10:00:00",
+                ),
+                (
+                    "FP-B",
+                    1,
+                    "ERROR",
+                    "Payment failed orderId=1002 userId=902",
+                    "",
+                    "payment-api",
+                    "2026-06-16T10:01:00",
+                    "2026-06-16T10:01:00",
+                ),
+            ],
+        )
+        conn.execute(
+            """
+            INSERT INTO pattern_duplicate_candidates(
+                candidate_key, service_name, log_level, signature,
+                fingerprints_json, suggested_regex, suggested_template,
+                confidence, reason, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+            """,
+            (
+                "DUP-TEST",
+                "payment-api",
+                "ERROR",
+                "Payment failed orderId=* userId=*",
+                json.dumps(fingerprints),
+                r"^Payment\s+failed\s+orderId=\d+\s+userId=\d+$",
+                "Payment failed orderId=* userId=*",
+                0.88,
+                "deterministic reason",
+            ),
+        )
+        conn.commit()
+
+    candidates = fetch_duplicate_pattern_candidates()
+
+    assert candidates[0]["reason_source"] == "llm"
+    assert candidates[0]["reason"] == (
+        "pending 후보 조회 시에도 LLM이 동일 패턴으로 묶인 사유를 보강합니다."
+    )
+    assert candidates[0]["llm_reason"] == candidates[0]["reason"]
+    with sqlite3.connect(db_path) as conn:
+        stored = conn.execute(
+            """
+            SELECT reason_source, llm_reason
+            FROM pattern_duplicate_candidates
+            WHERE candidate_key='DUP-TEST'
+            """
+        ).fetchone()
+    assert stored == ("llm", candidates[0]["reason"])
+
+    monkeypatch.delenv("SQLITE_PATH", raising=False)
+    monkeypatch.delenv("LLM_STUB_MODE", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+
 def test_hybrid_similarity_promotes_structurally_identical_known_match(
     tmp_path: Path, monkeypatch
 ) -> None:

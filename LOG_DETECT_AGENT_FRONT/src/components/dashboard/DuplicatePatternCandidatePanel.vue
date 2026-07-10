@@ -61,8 +61,23 @@
               >
                 {{ candidate.log_level }}
               </span>
+              <span
+                class="rounded px-2 py-1 text-xs font-semibold"
+                :class="reasonSourceClass(candidate)"
+              >
+                {{ reasonSourceLabel(candidate) }}
+              </span>
             </div>
-            <p class="mt-2 text-sm text-slate-600">
+            <p class="mt-2 text-xs font-semibold uppercase text-slate-400">
+              Patternization reason
+              <span
+                v-if="candidate.reason_model"
+                class="font-normal normal-case text-slate-400"
+              >
+                / {{ candidate.reason_model }}
+              </span>
+            </p>
+            <p class="mt-1 text-sm text-slate-600">
               {{ candidate.reason }}
             </p>
           </div>
@@ -303,6 +318,16 @@ function levelClass(level?: string): string {
   if (level === 'ERROR') return 'bg-red-100 text-red-700'
   if (level === 'WARN') return 'bg-amber-100 text-amber-700'
   return 'bg-slate-100 text-slate-600'
+}
+
+function reasonSourceLabel(candidate: DuplicatePatternCandidate): string {
+  return candidate.reason_source === 'llm' ? 'LLM reason' : 'Rule reason'
+}
+
+function reasonSourceClass(candidate: DuplicatePatternCandidate): string {
+  return candidate.reason_source === 'llm'
+    ? 'bg-violet-100 text-violet-700'
+    : 'bg-slate-100 text-slate-600'
 }
 
 function detailFor(
