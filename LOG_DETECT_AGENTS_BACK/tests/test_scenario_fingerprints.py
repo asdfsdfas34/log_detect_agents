@@ -506,7 +506,7 @@ def test_semantic_log_clusters_fallback_to_drain_templates(monkeypatch) -> None:
     assert "<*>" in clusters[0]["drain_template"]
 
 
-def test_semantic_log_clusters_use_openai_umap_hdbscan_labels(monkeypatch) -> None:
+def test_semantic_log_clusters_use_openai_hdbscan_labels(monkeypatch) -> None:
     groups = [
         {
             "fingerprint": "FP-A",
@@ -538,12 +538,12 @@ def test_semantic_log_clusters_use_openai_umap_hdbscan_labels(monkeypatch) -> No
     monkeypatch.setattr(
         scenario_store,
         "_semantic_cluster_labels_from_embeddings",
-        lambda embeddings: ([0, 0, -1], "openai_l2_umap_hdbscan"),
+        lambda embeddings: ([0, 0, -1], "openai_l2_hdbscan"),
     )
 
     clusters = scenario_store.build_semantic_log_clusters(groups)
 
-    assert clusters[0]["algorithm"] == "hybrid-event-v1_umap_hdbscan"
+    assert clusters[0]["algorithm"] == "hybrid-event-v1_hdbscan"
     assert clusters[0]["fingerprint_count"] == 2
     assert clusters[0]["fingerprints"] == ["FP-A", "FP-B"]
     assert clusters[0]["representative_fingerprint"] == "FP-A"

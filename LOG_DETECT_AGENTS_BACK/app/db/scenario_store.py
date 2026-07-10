@@ -126,8 +126,6 @@ HDBSCAN_MAX_DISTANCE = 1.0 - PATTERN_DUPLICATE_SIMILARITY_THRESHOLD
 RECURRENCE_MIN_SILENCE_DAYS = 7
 SEMANTIC_CLUSTER_MIN_CLUSTER_SIZE = 3
 SEMANTIC_CLUSTER_MIN_SAMPLES = 2
-SEMANTIC_CLUSTER_UMAP_NEIGHBORS = 8
-SEMANTIC_CLUSTER_UMAP_COMPONENTS = 3
 PATTERN_CLUSTER_MEMBER_THRESHOLD = 0.88
 PATTERN_CLUSTER_HYBRID_PATTERN_THRESHOLD = 0.82
 PATTERN_CLUSTER_SEMANTIC_LINK_THRESHOLD = 0.85
@@ -1677,67 +1675,18 @@ def _hdbscan_duplicate_groups(
 
 
 def _cosine_distance_matrix(embeddings: list[list[float]]) -> list[list[float]]:
-    matrix: list[list[float]] = []
-    for left in embeddings:
-        row: list[float] = []
-        for right in embeddings:
-            similarity = sum(
-                float(left_value) * float(right_value)
-                for left_value, right_value in zip(left, right, strict=False)
-            )
-            row.append(1.0 - max(-1.0, min(1.0, similarity)))
-        matrix.append(row)
-    return matrix
-
-
-def _umap_reduce_embeddings(embeddings: list[list[float]]) -> list[list[float]] | None:
-    if len(embeddings) <= SEMANTIC_CLUSTER_MIN_CLUSTER_SIZE:
-        return None
     try:
         numpy = importlib.import_module("numpy")
-        umap_module = importlib.import_module("umap")
-        n_neighbors = min(SEMANTIC_CLUSTER_UMAP_NEIGHBORS, len(embeddings) - 1)
-        n_components = min(SEMANTIC_CLUSTER_UMAP_COMPONENTS, len(embeddings) - 2)
-        if n_neighbors < 2 or n_components < 2:
-            return None
-        reducer = umap_module.UMAP(
-            n_components=n_components,
-            n_neighbors=n_neighbors,
-            metric="cosine",
-            random_state=42,
-        )
-        reduced = reducer.fit_transform(numpy.array(embeddings))
-    except Exception:  # noqa: BLE001
-        return None
-    return [[float(value) for value in row] for row in reduced.tolist()]
-
-
-def _hdbscan_vector_cluster_labels(vectors: list[list[float]]) -> list[int]:
-    if len(vectors) < SEMANTIC_CLUSTER_MIN_CLUSTER_SIZE:
-        return []
-    try:
-        numpy = importlib.import_module("numpy")
-        hdbscan = importlib.import_module("hdbscan")
-        clusterer = hdbscan.HDBSCAN(
-            metric="euclidean",
-            min_cluster_size=SEMANTIC_CLUSTER_MIN_CLUSTER_SIZE,
-            min_samples=SEMANTIC_CLUSTER_MIN_SAMPLES,
-            cluster_selection_method="eom",
-        )
-        labels = clusterer.fit_predict(numpy.array(vectors))
+        pairwise = importlib.import_module("sklearn.metrics.pairwise")
+        distances = pairwise.cosine_distances(numpy.array(embeddings, dtype=float))
     except Exception:  # noqa: BLE001
         return []
-    return [int(label) for label in labels]
+    return [[float(value) for value in row] for row in distances.tolist()]
 
 
 def _semantic_cluster_labels_from_embeddings(
     embeddings: list[list[float]],
 ) -> tuple[list[int], str]:
-    reduced = _umap_reduce_embeddings(embeddings)
-    if reduced is not None:
-        labels = _hdbscan_vector_cluster_labels(reduced)
-        if labels and len(labels) == len(embeddings):
-            return labels, "openai_l2_umap_hdbscan"
     labels = _hdbscan_cluster_labels(
         _cosine_distance_matrix(embeddings),
         min_cluster_size=SEMANTIC_CLUSTER_MIN_CLUSTER_SIZE,
@@ -1850,7 +1799,7 @@ def build_semantic_log_clusters(
     impacts: list[dict[str, Any]] | None = None,
     anomalies: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Cluster Drain templates with OpenAI embeddings, UMAP, and HDBSCAN."""
+    """Cluster Drain templates with OpenAI embeddings and HDBSCAN."""
 
     if not groups:
         return []
