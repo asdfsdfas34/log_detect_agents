@@ -168,6 +168,9 @@ export interface DuplicatePatternCandidate {
   suggested_template: string
   confidence: number
   reason: string
+  llm_reason?: string
+  reason_source?: string
+  reason_model?: string
   status: string
   created_at?: string
   updated_at?: string

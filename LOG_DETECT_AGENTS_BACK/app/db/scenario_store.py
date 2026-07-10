@@ -7,6 +7,7 @@ import hashlib
 import importlib
 import json
 import math
+import os
 import re
 import sqlite3
 from datetime import datetime, timedelta
@@ -19,6 +20,7 @@ from urllib.parse import parse_qsl, urlsplit, urlunsplit
 from drain3 import TemplateMiner
 from drain3.template_miner_config import TemplateMinerConfig
 
+from app.config import settings
 from app.db.chroma_store import (
     delete_pattern_clusters,
     embed_pattern_texts_normalized,
@@ -30,6 +32,7 @@ from app.db.chroma_store import (
     save_pattern_clusters,
 )
 from app.db.sqlite_store import _resolve_db_path
+from app.llm.openai_client import generate_text
 
 NUMERIC_RE = re.compile(r"\b\d+\b")
 EXCEL_NEWLINE_RE = re.compile(r"_x000D_", re.IGNORECASE)
@@ -73,6 +76,25 @@ KOREAN_HONORIFIC_NUMBER_RE = re.compile(r"(?<=\S)\d+(?=님)")
 LEADING_LIST_MARKER_RE = re.compile(r"^\s*\d+\s*[.)]\s*")
 LEADING_COMPONENT_DOT_RE = re.compile(r"^\s*\.(?=[A-Za-z_])")
 WHITESPACE_RE = re.compile(r"\s+")
+DEPENDENCY_RE = re.compile(
+    r"\b(redis|postgres(?:ql)?|mysql|mariadb|oracle|mssql|sqlserver|kafka|"
+    r"rabbitmq|mongodb?|mongo|elasticsearch|opensearch|s3|memcached|"
+    r"payment gateway|gateway)\b",
+    re.IGNORECASE,
+)
+ERROR_CODE_RE = re.compile(
+    r"\b(?:error[_ -]?code|code|errno)\s*[:=]\s*([A-Z][A-Z0-9_-]{2,}|E\d{2,})\b",
+    re.IGNORECASE,
+)
+COMMON_ERROR_CODE_RE = re.compile(
+    r"\b(E[A-Z0-9_]{3,}|HTTP[_ -]?[1-5]\d{2}|SQLSTATE[_ -]?[A-Z0-9]{5})\b",
+    re.IGNORECASE,
+)
+DURATION_RE = re.compile(
+    r"\b(?:after|duration|timeout|elapsed|took|in)?\s*"
+    r"(\d+(?:\.\d+)?)\s*(ms|msec|millisecond(?:s)?|s|sec|second(?:s)?)\b",
+    re.IGNORECASE,
+)
 PROTECTED_TOKENS = [
     "__PROTECTED_ALPHA__",
     "__PROTECTED_BRAVO__",
@@ -123,6 +145,7 @@ HYBRID_NO_TEXT_NUMERIC_WEIGHT = 0.35
 HDBSCAN_MIN_CLUSTER_SIZE = 3
 HDBSCAN_MIN_SAMPLES = 2
 HDBSCAN_MAX_DISTANCE = 1.0 - PATTERN_DUPLICATE_SIMILARITY_THRESHOLD
+LLM_PATTERN_REASON_MAX_CHARS = 220
 RECURRENCE_MIN_SILENCE_DAYS = 7
 SEMANTIC_CLUSTER_MIN_CLUSTER_SIZE = 3
 SEMANTIC_CLUSTER_MIN_SAMPLES = 2
@@ -436,6 +459,186 @@ def fingerprint_id(service_name: str, level: str, message: str, stacktrace: str)
     return "FP-" + hashlib.sha1(raw.encode("utf-8")).hexdigest()[:6].upper()
 
 
+def _slugify_identifier(value: str, *, fallback: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_")
+    slug = re.sub(r"_+", "_", slug)
+    return slug or fallback
+
+
+def _normalize_severity(level: str) -> str:
+    severity = str(level or "INFO").strip().upper()
+    if severity in {"INFORMATION", "INFORMATIONAL"}:
+        return "INFO"
+    if severity in {"WARNING"}:
+        return "WARN"
+    if severity in {"ERR", "ERROR"}:
+        return "ERROR"
+    if severity in {"CRITICAL", "FATAL"}:
+        return "FATAL"
+    if severity in {"DEBUG", "TRACE", "INFO", "WARN"}:
+        return severity
+    return "INFO"
+
+
+def _extract_dependency(message: str, stack_trace: str) -> str:
+    match = DEPENDENCY_RE.search(f"{message} {stack_trace}")
+    if not match:
+        return ""
+    dependency = match.group(1).lower().replace(" ", "_")
+    aliases = {
+        "postgresql": "postgres",
+        "mongo": "mongodb",
+        "payment_gateway": "payment_gateway",
+        "gateway": "gateway",
+    }
+    return aliases.get(dependency, dependency)
+
+
+def _extract_error_code(message: str, stack_trace: str) -> str:
+    text = f"{message} {stack_trace}"
+    for pattern in (ERROR_CODE_RE, COMMON_ERROR_CODE_RE):
+        match = pattern.search(text)
+        if match:
+            return match.group(1).replace(" ", "_").replace("-", "_").upper()
+    return ""
+
+
+def _extract_parameter_values(message: str) -> dict[str, Any]:
+    values: dict[str, Any] = {}
+    duration_match = DURATION_RE.search(message)
+    if duration_match:
+        amount = float(duration_match.group(1))
+        unit = duration_match.group(2).lower()
+        multiplier = 1000 if unit.startswith("s") else 1
+        duration_ms = int(amount * multiplier)
+        values["duration_ms"] = duration_ms
+    return values
+
+
+def _event_template_text(message: str, dependency: str) -> str:
+    template = drain_log_template(message)
+    template = re.sub(
+        r"\b\d+(?:\.\d+)?\s*(?:ms|msec|millisecond(?:s)?|s|sec|second(?:s)?)\b",
+        "<DURATION>",
+        template,
+        flags=re.IGNORECASE,
+    )
+    template = re.sub(
+        r"<\*>\s*(?:ms|msec|millisecond(?:s)?|s|sec|second(?:s)?)\b",
+        "<DURATION>",
+        template,
+        flags=re.IGNORECASE,
+    )
+    if dependency:
+        template = re.sub(
+            rf"\b{re.escape(dependency.replace('_', ' '))}\b",
+            "<*>",
+            template,
+            flags=re.IGNORECASE,
+        )
+        template = re.sub(
+            rf"\b{re.escape(dependency)}\b",
+            "<*>",
+            template,
+            flags=re.IGNORECASE,
+        )
+    template = re.sub(
+        r"\s*\berror[_ -]?code\s*[:=]\s*<\*>",
+        "",
+        template,
+        flags=re.IGNORECASE,
+    )
+    return WHITESPACE_RE.sub(" ", template).strip()
+
+
+def _classify_template_id(
+    *, message: str, template_text: str, dependency: str, error_code: str
+) -> tuple[str, str, str, str]:
+    text = f"{message} {template_text}".lower()
+    has_timeout = any(token in text for token in ("timeout", "timed out", "time out"))
+    if dependency and has_timeout:
+        return (
+            "dependency_timeout",
+            f"{dependency}_timeout",
+            "dependency",
+            dependency,
+        )
+    if dependency and any(token in text for token in ("connection", "connect", "conn")):
+        return (
+            "dependency_connection_error",
+            f"{dependency}_connection_error",
+            "dependency",
+            dependency,
+        )
+    if dependency:
+        template_id = f"dependency_{_slugify_identifier(error_code, fallback='event')}"
+        return template_id, f"{dependency}_{template_id}", "dependency", dependency
+    if has_timeout:
+        return "timeout", "timeout", "service", ""
+    return (
+        _slugify_identifier(template_text, fallback="log_event")[:80],
+        _slugify_identifier(template_text, fallback="log_event")[:80],
+        "service",
+        "",
+    )
+
+
+def build_service_log_v2_event(
+    *,
+    source_log_id: int | None,
+    service_name: str,
+    level: str,
+    message: str,
+    stack_trace: str = "",
+    created_at: str = "",
+) -> dict[str, Any]:
+    """Convert a raw service_logs row into the event ontology used by service_logs_v2."""
+
+    service = str(service_name or "unknown-service")
+    severity = _normalize_severity(level)
+    raw_message = str(message or "")
+    raw_stack = str(stack_trace or "")
+    dependency = _extract_dependency(raw_message, raw_stack)
+    template_text = _event_template_text(raw_message, dependency)
+    error_code = _extract_error_code(raw_message, raw_stack)
+    parameter_values = _extract_parameter_values(raw_message)
+    template_id, canonical_event_id, entity_type, entity_id = _classify_template_id(
+        message=raw_message,
+        template_text=template_text,
+        dependency=dependency,
+        error_code=error_code,
+    )
+    source_key = "" if source_log_id is None else str(source_log_id)
+    event_hash = hashlib.sha1(
+        "|".join(
+            [
+                source_key,
+                service,
+                severity,
+                raw_message,
+                raw_stack,
+                str(created_at or ""),
+            ]
+        ).encode("utf-8")
+    ).hexdigest()[:16]
+    return {
+        "source_log_id": source_log_id,
+        "event_id": f"evt_{event_hash}",
+        "template_id": template_id,
+        "canonical_event_id": canonical_event_id,
+        "template_text": template_text,
+        "service": service,
+        "dependency": dependency,
+        "severity": severity,
+        "entity_type": entity_type,
+        "entity_id": entity_id,
+        "error_code": error_code,
+        "parameter_values": parameter_values,
+        "raw_message": raw_message,
+        "created_at": str(created_at or datetime.utcnow().isoformat(timespec="seconds")),
+    }
+
+
 def ensure_schema(conn: sqlite3.Connection) -> None:
     """Create all scenario tables required by SC-001 through SC-007."""
     cur = conn.cursor()
@@ -455,6 +658,29 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             stack_trace TEXT DEFAULT '',
             created_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS service_logs_v2 (
+            event_id TEXT PRIMARY KEY,
+            template_id TEXT NOT NULL,
+            canonical_event_id TEXT NOT NULL,
+            template_text TEXT NOT NULL,
+            service TEXT NOT NULL,
+            dependency TEXT DEFAULT '',
+            severity TEXT NOT NULL,
+            entity_type TEXT NOT NULL,
+            entity_id TEXT DEFAULT '',
+            error_code TEXT DEFAULT '',
+            parameter_values TEXT NOT NULL DEFAULT '{}',
+            source_log_id INTEGER,
+            raw_message TEXT DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_service_logs_v2_source_log_id
+            ON service_logs_v2(source_log_id);
+        CREATE INDEX IF NOT EXISTS idx_service_logs_v2_service_created_at
+            ON service_logs_v2(service, created_at);
+        CREATE INDEX IF NOT EXISTS idx_service_logs_v2_canonical_event
+            ON service_logs_v2(canonical_event_id);
         CREATE TABLE IF NOT EXISTS fingerprints (
             fingerprint TEXT PRIMARY KEY,
             occurrence_count INTEGER NOT NULL,
@@ -584,6 +810,9 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             suggested_template TEXT NOT NULL,
             confidence REAL NOT NULL,
             reason TEXT NOT NULL,
+            llm_reason TEXT NOT NULL DEFAULT '',
+            reason_source TEXT NOT NULL DEFAULT 'deterministic',
+            reason_model TEXT NOT NULL DEFAULT '',
             status TEXT NOT NULL DEFAULT 'pending',
             created_at TEXT DEFAULT CURRENT_TIMESTAMP,
             updated_at TEXT DEFAULT CURRENT_TIMESTAMP
@@ -772,6 +1001,21 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         """)
 
     for column, definition in {
+        "llm_reason": "TEXT NOT NULL DEFAULT ''",
+        "reason_source": "TEXT NOT NULL DEFAULT 'deterministic'",
+        "reason_model": "TEXT NOT NULL DEFAULT ''",
+    }.items():
+        duplicate_candidate_columns = [
+            row[1]
+            for row in cur.execute(
+                "PRAGMA table_info(pattern_duplicate_candidates)"
+            ).fetchall()
+        ]
+        if column not in duplicate_candidate_columns:
+            cur.execute(
+                f"ALTER TABLE pattern_duplicate_candidates ADD COLUMN {column} {definition}"
+            )
+    for column, definition in {
         "pattern_status": "TEXT NOT NULL DEFAULT 'new_pattern'",
         "match_source": "TEXT DEFAULT ''",
         "similar_fingerprint": "TEXT DEFAULT ''",
@@ -833,6 +1077,94 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     from app.patternops.registry import ensure_patternops_schema
 
     ensure_patternops_schema(conn)
+
+
+def populate_service_logs_v2(
+    conn: sqlite3.Connection, *, replace: bool = False
+) -> int:
+    """Populate service_logs_v2 from service_logs and return inserted/updated row count."""
+
+    ensure_schema(conn)
+    cur = conn.cursor()
+    if replace:
+        cur.execute("DELETE FROM service_logs_v2")
+    rows = cur.execute("""
+        SELECT rowid, service_name, level, message, COALESCE(stack_trace, ''), created_at
+        FROM service_logs
+        ORDER BY rowid ASC
+        """).fetchall()
+    events = [
+        build_service_log_v2_event(
+            source_log_id=int(row[0]),
+            service_name=str(row[1]),
+            level=str(row[2]),
+            message=str(row[3] or ""),
+            stack_trace=str(row[4] or ""),
+            created_at=str(row[5] or ""),
+        )
+        for row in rows
+    ]
+    if not events:
+        conn.commit()
+        return 0
+    cur.executemany(
+        """
+        INSERT INTO service_logs_v2(
+            event_id,
+            template_id,
+            canonical_event_id,
+            template_text,
+            service,
+            dependency,
+            severity,
+            entity_type,
+            entity_id,
+            error_code,
+            parameter_values,
+            source_log_id,
+            raw_message,
+            created_at,
+            updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(event_id) DO UPDATE SET
+            template_id=excluded.template_id,
+            canonical_event_id=excluded.canonical_event_id,
+            template_text=excluded.template_text,
+            service=excluded.service,
+            dependency=excluded.dependency,
+            severity=excluded.severity,
+            entity_type=excluded.entity_type,
+            entity_id=excluded.entity_id,
+            error_code=excluded.error_code,
+            parameter_values=excluded.parameter_values,
+            source_log_id=excluded.source_log_id,
+            raw_message=excluded.raw_message,
+            created_at=excluded.created_at,
+            updated_at=CURRENT_TIMESTAMP
+        """,
+        [
+            (
+                event["event_id"],
+                event["template_id"],
+                event["canonical_event_id"],
+                event["template_text"],
+                event["service"],
+                event["dependency"],
+                event["severity"],
+                event["entity_type"],
+                event["entity_id"],
+                event["error_code"],
+                json.dumps(event["parameter_values"], ensure_ascii=False, sort_keys=True),
+                event["source_log_id"],
+                event["raw_message"],
+                event["created_at"],
+            )
+            for event in events
+        ],
+    )
+    conn.commit()
+    return len(events)
 
 
 def classify(message: str, stacktrace: str) -> tuple[str, str]:
@@ -1404,6 +1736,181 @@ def _raw_log_rows_for_fingerprints(
     return list(deduped.values())
 
 
+def _llm_pattern_reason_enabled() -> bool:
+    feature_flag = os.getenv("PATTERN_REASON_LLM_ENABLED")
+    if feature_flag is not None:
+        enabled = feature_flag.lower() in {"1", "true", "yes", "on"}
+    else:
+        stub_mode_value = os.getenv("LLM_STUB_MODE")
+        enabled = stub_mode_value is None or stub_mode_value.lower() == "false"
+    if not enabled:
+        return False
+    return bool(
+        os.getenv("OPENAI_API_KEY")
+        or settings.openai_api_key
+        or os.getenv("OPENAI_BASE_URL")
+    )
+
+
+def _trim_reason_text(value: str) -> str:
+    text = WHITESPACE_RE.sub(" ", value or "").strip(" `\"'")
+    if text.startswith("{") and text.endswith("}"):
+        try:
+            loaded = json.loads(text)
+        except json.JSONDecodeError:
+            loaded = {}
+        if isinstance(loaded, dict):
+            text = str(loaded.get("reason") or loaded.get("summary") or "").strip()
+    text = text.replace("```", "").strip()
+    return text[:LLM_PATTERN_REASON_MAX_CHARS].rstrip()
+
+
+def _sample_reason_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    ranked = sorted(
+        items,
+        key=lambda item: (
+            -int(item.get("occurrence_count") or 0),
+            str(item.get("fingerprint") or ""),
+        ),
+    )
+    return [
+        {
+            "fingerprint": str(item.get("fingerprint") or ""),
+            "occurrence_count": int(item.get("occurrence_count") or 0),
+            "message": str(item.get("message") or "")[:400],
+            "normalized_message": normalize_log_text(str(item.get("message") or ""))[
+                :400
+            ],
+            "drain_template": str(item.get("drain_template") or "")[:400],
+        }
+        for item in ranked[:4]
+    ]
+
+
+def _generate_duplicate_pattern_reason(
+    *,
+    deterministic_reason: str,
+    service_name: str,
+    log_level: str,
+    signature: str,
+    suggested_template: str,
+    suggested_regex: str,
+    confidence: float,
+    fingerprints: list[str],
+    items: list[dict[str, Any]],
+) -> dict[str, str]:
+    if not _llm_pattern_reason_enabled():
+        return {
+            "reason": deterministic_reason,
+            "llm_reason": "",
+            "reason_source": "deterministic",
+            "reason_model": "",
+        }
+
+    payload = {
+        "service_name": service_name,
+        "log_level": log_level,
+        "signature": signature,
+        "suggested_template": suggested_template,
+        "suggested_regex": suggested_regex,
+        "confidence": round(confidence, 2),
+        "fingerprints": fingerprints[:10],
+        "sample_logs": _sample_reason_items(items),
+    }
+    try:
+        llm_reason = _trim_reason_text(
+            generate_text(
+                model=settings.openai_model,
+                temperature=0.1,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "당신은 운영 로그 패턴 리뷰어입니다. 주어진 후보가 왜 하나의 "
+                            "정규화 패턴으로 묶일 수 있는지 설명하세요. 입력에 없는 장애 원인, "
+                            "해결책, 인프라 변경은 추측하지 마세요. 한국어 1~2문장, "
+                            f"{LLM_PATTERN_REASON_MAX_CHARS}자 이내, Markdown 없이 답하세요."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": json.dumps(payload, ensure_ascii=False),
+                    },
+                ],
+            )
+        )
+    except Exception:  # noqa: BLE001
+        llm_reason = ""
+
+    if not llm_reason:
+        return {
+            "reason": deterministic_reason,
+            "llm_reason": "",
+            "reason_source": "deterministic",
+            "reason_model": "",
+        }
+    return {
+        "reason": llm_reason,
+        "llm_reason": llm_reason,
+        "reason_source": "llm",
+        "reason_model": settings.openai_model,
+    }
+
+
+def _refresh_pending_candidate_llm_reasons(
+    conn: sqlite3.Connection,
+    *,
+    candidates: list[dict[str, Any]],
+    details: dict[str, dict[str, Any]],
+) -> None:
+    if not _llm_pattern_reason_enabled():
+        return
+    refreshed = False
+    for candidate in candidates:
+        if (
+            str(candidate.get("status") or "") != "pending"
+            or str(candidate.get("reason_source") or "") == "llm"
+        ):
+            continue
+        fingerprints = [str(item) for item in candidate.get("fingerprints", [])]
+        items = [
+            details.get(fingerprint, {"fingerprint": fingerprint})
+            for fingerprint in fingerprints
+        ]
+        reason_payload = _generate_duplicate_pattern_reason(
+            deterministic_reason=str(candidate.get("reason") or ""),
+            service_name=str(candidate.get("service_name") or ""),
+            log_level=str(candidate.get("log_level") or ""),
+            signature=str(candidate.get("signature") or ""),
+            suggested_template=str(candidate.get("suggested_template") or ""),
+            suggested_regex=str(candidate.get("suggested_regex") or ""),
+            confidence=float(candidate.get("confidence") or 0),
+            fingerprints=fingerprints,
+            items=items,
+        )
+        if reason_payload["reason_source"] != "llm":
+            continue
+        candidate.update(reason_payload)
+        conn.execute(
+            """
+            UPDATE pattern_duplicate_candidates
+            SET reason=?, llm_reason=?, reason_source=?, reason_model=?,
+                updated_at=CURRENT_TIMESTAMP
+            WHERE candidate_key=? AND status='pending'
+            """,
+            (
+                reason_payload["reason"],
+                reason_payload["llm_reason"],
+                reason_payload["reason_source"],
+                reason_payload["reason_model"],
+                str(candidate.get("candidate_key") or ""),
+            ),
+        )
+        refreshed = True
+    if refreshed:
+        conn.commit()
+
+
 def detect_duplicate_pattern_candidates(
     groups: list[dict[str, Any]], *, min_group_size: int = 2
 ) -> list[dict[str, Any]]:
@@ -1470,7 +1977,7 @@ def detect_duplicate_pattern_candidates(
             if existing and str(existing[0]) in {"approved", "rejected"}:
                 continue
             confidence = min(0.99, 0.82 + (0.03 * min(len(fingerprints), 5)))
-            reason = (
+            deterministic_reason = (
                 "Fingerprints share the same aggressive normalization signature; "
                 "differences are limited to volatile fields and passed structure checks."
             )
@@ -1478,19 +1985,34 @@ def detect_duplicate_pattern_candidates(
             if not _candidate_regex_matches_all(suggested_regex, items):
                 continue
             suggested_template = _suggest_template_from_duplicate_signature(signature)
+            reason_payload = _generate_duplicate_pattern_reason(
+                deterministic_reason=deterministic_reason,
+                service_name=service_name,
+                log_level=log_level,
+                signature=signature,
+                suggested_template=suggested_template,
+                suggested_regex=suggested_regex,
+                confidence=confidence,
+                fingerprints=fingerprints,
+                items=items,
+            )
             conn.execute(
                 """
                 INSERT INTO pattern_duplicate_candidates(
                     candidate_key, service_name, log_level, signature,
                     fingerprints_json, suggested_regex, suggested_template,
-                    confidence, reason, status, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', CURRENT_TIMESTAMP)
+                    confidence, reason, llm_reason, reason_source, reason_model,
+                    status, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', CURRENT_TIMESTAMP)
                 ON CONFLICT(candidate_key) DO UPDATE SET
                     fingerprints_json=excluded.fingerprints_json,
                     suggested_regex=excluded.suggested_regex,
                     suggested_template=excluded.suggested_template,
                     confidence=excluded.confidence,
                     reason=excluded.reason,
+                    llm_reason=excluded.llm_reason,
+                    reason_source=excluded.reason_source,
+                    reason_model=excluded.reason_model,
                     status='pending',
                     updated_at=CURRENT_TIMESTAMP
                 """,
@@ -1503,7 +2025,10 @@ def detect_duplicate_pattern_candidates(
                     suggested_regex,
                     suggested_template,
                     confidence,
-                    reason,
+                    reason_payload["reason"],
+                    reason_payload["llm_reason"],
+                    reason_payload["reason_source"],
+                    reason_payload["reason_model"],
                 ),
             )
             candidates.append(
@@ -1516,7 +2041,10 @@ def detect_duplicate_pattern_candidates(
                     "suggested_regex": suggested_regex,
                     "suggested_template": suggested_template,
                     "confidence": confidence,
-                    "reason": reason,
+                    "reason": reason_payload["reason"],
+                    "llm_reason": reason_payload["llm_reason"],
+                    "reason_source": reason_payload["reason_source"],
+                    "reason_model": reason_payload["reason_model"],
                     "status": "pending",
                 }
             )
@@ -2959,7 +3487,8 @@ def fetch_duplicate_pattern_candidates(
             f"""
             SELECT candidate_key, service_name, log_level, signature,
                    fingerprints_json, suggested_regex, suggested_template,
-                   confidence, reason, status, created_at, updated_at
+                   confidence, reason, status, created_at, updated_at,
+                   llm_reason, reason_source, reason_model
             FROM pattern_duplicate_candidates
             {where_sql}
             ORDER BY confidence DESC, datetime(updated_at) DESC
@@ -2986,6 +3515,9 @@ def fetch_duplicate_pattern_candidates(
                     "status": str(row[9]),
                     "created_at": str(row[10]),
                     "updated_at": str(row[11]),
+                    "llm_reason": str(row[12] or ""),
+                    "reason_source": str(row[13] or "deterministic"),
+                    "reason_model": str(row[14] or ""),
                 }
             )
         details: dict[str, dict[str, Any]] = {}
@@ -3014,6 +3546,12 @@ def fetch_duplicate_pattern_candidates(
                 }
                 for row in detail_rows
             }
+        if status == "pending":
+            _refresh_pending_candidate_llm_reasons(
+                conn,
+                candidates=candidates,
+                details=details,
+            )
         for candidate in candidates:
             candidate["fingerprint_details"] = {
                 fingerprint: details.get(fingerprint, {"fingerprint": fingerprint})
