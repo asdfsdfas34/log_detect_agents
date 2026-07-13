@@ -1,5 +1,8 @@
 import axios from 'axios'
 import type {
+  AcceptedNormalPatternActionResponse,
+  AcceptedNormalPatternRequest,
+  AcceptedNormalPatternResponse,
   ApprovalRequest,
   ApprovalResponse,
   AnalyzeRequest,
@@ -73,6 +76,31 @@ export const agentApi = {
   },
   registerException(payload: ExceptionRegisterRequest) {
     return apiClient.post<ExceptionRegisterResponse>('/exceptions', payload)
+  },
+  registerAcceptedNormal(payload: AcceptedNormalPatternRequest) {
+    return apiClient.post<AcceptedNormalPatternActionResponse>(
+      '/normal-patterns',
+      payload
+    )
+  },
+  acceptedNormalPatterns(params?: {
+    fingerprint?: string
+    status?: string
+    limit?: number
+  }) {
+    return apiClient.get<AcceptedNormalPatternResponse>('/normal-patterns', {
+      params
+    })
+  },
+  revokeAcceptedNormal(patternId: number) {
+    return apiClient.post<AcceptedNormalPatternActionResponse>(
+      `/normal-patterns/${patternId}/revoke`
+    )
+  },
+  deleteAcceptedNormal(patternId: number) {
+    return apiClient.delete<AcceptedNormalPatternActionResponse>(
+      `/normal-patterns/${patternId}`
+    )
   },
   saveKnownPattern(payload: KnownPatternSaveRequest) {
     return apiClient.post<KnownPatternSaveResponse>('/known-patterns', payload)

@@ -1087,6 +1087,58 @@ export const useLogDetectStore = defineStore('logDetect', () => {
     })
   }
 
+  function applyAcceptedNormalToClusters(
+    fingerprint: string,
+    reason: string
+  ) {
+    const clusters = state.value?.evidence.clusters
+    if (!clusters) return
+    for (const cluster of clusters) {
+      if (cluster.cluster !== fingerprint) continue
+      cluster.accepted_normal = true
+      cluster.accepted_normal_reason = reason
+      cluster.accepted_normal_status = 'active'
+    }
+  }
+
+  async function registerAcceptedNormalPattern(payload: {
+    fingerprint: string
+    reason: string
+    serviceName?: string
+    anomalyType?: string
+    maxAllowedMultiplier?: number
+    maxAllowedCount?: number | null
+  }) {
+    const fingerprint = payload.fingerprint.trim()
+    if (!fingerprint) {
+      addToast('error', '정상 편입할 fingerprint가 없습니다.')
+      return false
+    }
+
+    return withBackendAction('정상 편입 등록', async () => {
+      try {
+        await agentApi.registerAcceptedNormal({
+          fingerprint,
+          reason: payload.reason,
+          service_name: payload.serviceName ?? '',
+          anomaly_type: payload.anomalyType ?? '',
+          max_allowed_multiplier: payload.maxAllowedMultiplier ?? 1.5,
+          max_allowed_count: payload.maxAllowedCount ?? null
+        })
+        applyAcceptedNormalToClusters(fingerprint, payload.reason)
+        addToast(
+          'info',
+          `정상 편입(Accepted Normal) 승인 완료: ${fingerprint}. 다음 분석 실행부터 anomaly 집계에서 제외됩니다.`
+        )
+        return true
+      } catch (caught) {
+        error.value = (caught as Error).message
+        addToast('error', `정상 편입 실패: ${error.value}`)
+        return false
+      }
+    })
+  }
+
   return {
     executionStatus,
     currentStage,
@@ -1145,6 +1197,7 @@ export const useLogDetectStore = defineStore('logDetect', () => {
     saveCurrentRecommendation,
     approveCurrentRecommendation,
     registerCurrentException,
+    registerAcceptedNormalPattern,
     runAnalysis,
     runClusterRecommendation
   }
