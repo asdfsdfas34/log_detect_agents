@@ -402,6 +402,14 @@
               정상 편입 (Accepted Normal)
             </button>
             <button
+              v-if="activeTab === 'anomaly' && selectedCluster.accepted_normal"
+              class="rounded border border-amber-200 px-3 py-1 text-xs font-semibold text-amber-700 hover:bg-amber-50"
+              type="button"
+              @click="emit('revoke-accepted-normal', selectedCluster)"
+            >
+              지정 해지 (Revoke)
+            </button>
+            <button
               class="rounded px-2 py-1 text-sm text-slate-500 hover:bg-slate-100"
               type="button"
               @click="selectedCluster = null"
@@ -595,6 +603,7 @@ const emit = defineEmits<{
   'suggest-pattern-rule': [cluster: Cluster]
   'manual-merge-known': [fingerprints: string[]]
   'register-accepted-normal': [cluster: Cluster]
+  'revoke-accepted-normal': [cluster: Cluster]
 }>()
 
 const currentPage = ref(1)
