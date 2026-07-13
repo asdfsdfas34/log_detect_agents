@@ -379,21 +379,58 @@
       >
         <div class="flex items-center justify-between border-b px-4 py-3">
           <div>
-            <h4 class="text-base font-semibold text-slate-900">
-              {{ selectedCluster.cluster }}
-            </h4>
+            <div class="flex items-center gap-2">
+              <h4 class="text-base font-semibold text-slate-900">
+                {{ selectedCluster.cluster }}
+              </h4>
+              <span
+                v-if="selectedCluster.accepted_normal"
+                class="rounded bg-emerald-100 px-2 py-0.5 text-xs font-semibold text-emerald-700"
+              >
+                Accepted Normal
+              </span>
+            </div>
             <p class="text-xs text-slate-500">Pattern details</p>
           </div>
-          <button
-            class="rounded px-2 py-1 text-sm text-slate-500 hover:bg-slate-100"
-            type="button"
-            @click="selectedCluster = null"
-          >
-            Close
-          </button>
+          <div class="flex items-center gap-2">
+            <button
+              v-if="activeTab === 'anomaly' && !selectedCluster.accepted_normal"
+              class="rounded border border-emerald-200 px-3 py-1 text-xs font-semibold text-emerald-700 hover:bg-emerald-50"
+              type="button"
+              @click="emit('register-accepted-normal', selectedCluster)"
+            >
+              정상 편입 (Accepted Normal)
+            </button>
+            <button
+              class="rounded px-2 py-1 text-sm text-slate-500 hover:bg-slate-100"
+              type="button"
+              @click="selectedCluster = null"
+            >
+              Close
+            </button>
+          </div>
         </div>
 
         <div class="max-h-[calc(85vh-64px)] space-y-4 overflow-y-auto p-4">
+          <section v-if="selectedCluster.accepted_normal">
+            <h5 class="mb-2 text-sm font-semibold text-slate-700">
+              Accepted Normal
+            </h5>
+            <div
+              class="rounded border border-emerald-100 bg-emerald-50 p-3 text-sm text-emerald-800"
+            >
+              <div class="font-semibold">
+                정상 기준선으로 승인됨 · {{ selectedCluster.accepted_normal_status || 'active' }}
+              </div>
+              <div class="mt-1">
+                {{ selectedCluster.accepted_normal_reason || '사유 없음' }}
+              </div>
+              <div class="mt-1 text-xs text-emerald-700">
+                기준 초과 시 ACCEPTED_NORMAL_BREACH로 다시 탐지됩니다.
+              </div>
+            </div>
+          </section>
+
           <section v-if="selectedCluster.anomaly_detected">
             <h5 class="mb-2 text-sm font-semibold text-slate-700">
               Detection Reason
@@ -557,6 +594,7 @@ const emit = defineEmits<{
   'request-recommendation': [cluster: Cluster]
   'suggest-pattern-rule': [cluster: Cluster]
   'manual-merge-known': [fingerprints: string[]]
+  'register-accepted-normal': [cluster: Cluster]
 }>()
 
 const currentPage = ref(1)
@@ -866,7 +904,9 @@ function anomalyTypeLabel(item: Cluster): string {
     NEW_PATTERN: 'New Pattern',
     PRESENCE: 'New Pattern Presence',
     RECURRENCE: 'Pattern Recurrence',
-    SIMILAR_CASE_MATCH: 'Similar Case Match'
+    SIMILAR_CASE_MATCH: 'Similar Case Match',
+    ACCEPTED_NORMAL: 'Accepted Normal',
+    ACCEPTED_NORMAL_BREACH: 'Accepted Normal Breach'
   }
   return labels[type] ?? type
 }
