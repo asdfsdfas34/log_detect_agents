@@ -1089,7 +1089,8 @@ export const useLogDetectStore = defineStore('logDetect', () => {
 
   function applyAcceptedNormalToClusters(
     fingerprint: string,
-    reason: string
+    reason: string,
+    patternId?: number
   ) {
     const clusters = state.value?.evidence.clusters
     if (!clusters) return
@@ -1098,6 +1099,19 @@ export const useLogDetectStore = defineStore('logDetect', () => {
       cluster.accepted_normal = true
       cluster.accepted_normal_reason = reason
       cluster.accepted_normal_status = 'active'
+      if (patternId !== undefined) cluster.accepted_normal_id = patternId
+    }
+  }
+
+  function clearAcceptedNormalFromClusters(fingerprint: string) {
+    const clusters = state.value?.evidence.clusters
+    if (!clusters) return
+    for (const cluster of clusters) {
+      if (cluster.cluster !== fingerprint) continue
+      cluster.accepted_normal = false
+      cluster.accepted_normal_reason = ''
+      cluster.accepted_normal_status = ''
+      cluster.accepted_normal_id = ''
     }
   }
 
@@ -1117,7 +1131,7 @@ export const useLogDetectStore = defineStore('logDetect', () => {
 
     return withBackendAction('정상 편입 등록', async () => {
       try {
-        await agentApi.registerAcceptedNormal({
+        const { data } = await agentApi.registerAcceptedNormal({
           fingerprint,
           reason: payload.reason,
           service_name: payload.serviceName ?? '',
@@ -1125,7 +1139,7 @@ export const useLogDetectStore = defineStore('logDetect', () => {
           max_allowed_multiplier: payload.maxAllowedMultiplier ?? 1.5,
           max_allowed_count: payload.maxAllowedCount ?? null
         })
-        applyAcceptedNormalToClusters(fingerprint, payload.reason)
+        applyAcceptedNormalToClusters(fingerprint, payload.reason, data.id)
         addToast(
           'info',
           `정상 편입(Accepted Normal) 승인 완료: ${fingerprint}. 다음 분석 실행부터 anomaly 집계에서 제외됩니다.`
@@ -1134,6 +1148,46 @@ export const useLogDetectStore = defineStore('logDetect', () => {
       } catch (caught) {
         error.value = (caught as Error).message
         addToast('error', `정상 편입 실패: ${error.value}`)
+        return false
+      }
+    })
+  }
+
+  async function revokeAcceptedNormalPattern(payload: {
+    fingerprint: string
+    patternId?: number | string
+  }) {
+    const fingerprint = payload.fingerprint.trim()
+    if (!fingerprint) {
+      addToast('error', '지정 해지할 fingerprint가 없습니다.')
+      return false
+    }
+
+    return withBackendAction('정상 편입 해지', async () => {
+      try {
+        let patternId = Number(payload.patternId)
+        if (!Number.isFinite(patternId) || patternId <= 0) {
+          const { data } = await agentApi.acceptedNormalPatterns({
+            fingerprint,
+            status: 'active',
+            limit: 1
+          })
+          patternId = Number(data.patterns[0]?.id)
+        }
+        if (!Number.isFinite(patternId) || patternId <= 0) {
+          addToast('error', `활성 정상 편입 규칙을 찾을 수 없습니다: ${fingerprint}`)
+          return false
+        }
+        await agentApi.revokeAcceptedNormal(patternId)
+        clearAcceptedNormalFromClusters(fingerprint)
+        addToast(
+          'info',
+          `정상 편입 해지 완료: ${fingerprint}. 다음 분석 실행부터 다시 anomaly로 탐지됩니다.`
+        )
+        return true
+      } catch (caught) {
+        error.value = (caught as Error).message
+        addToast('error', `정상 편입 해지 실패: ${error.value}`)
         return false
       }
     })
@@ -1198,6 +1252,7 @@ export const useLogDetectStore = defineStore('logDetect', () => {
     approveCurrentRecommendation,
     registerCurrentException,
     registerAcceptedNormalPattern,
+    revokeAcceptedNormalPattern,
     runAnalysis,
     runClusterRecommendation
   }

@@ -115,6 +115,7 @@
         @suggest-pattern-rule="handleSuggestPatternRule"
         @manual-merge-known="handleManualMergeKnown"
         @register-accepted-normal="handleRegisterAcceptedNormal"
+        @revoke-accepted-normal="handleRevokeAcceptedNormal"
       />
       <RecommendationPanel
         :actions="store.state.final.recommended_actions ?? []"
@@ -484,6 +485,21 @@ async function handleRegisterAcceptedNormal(cluster: Cluster) {
     reason: reason.trim(),
     serviceName: serviceName.value.trim() || cluster.service_name?.trim() || '',
     anomalyType: cluster.anomaly_type ?? ''
+  })
+}
+
+async function handleRevokeAcceptedNormal(cluster: Cluster) {
+  const approved = window.confirm(
+    [
+      `${cluster.cluster} 패턴의 정상 편입(Accepted Normal) 지정을 해지하시겠습니까?`,
+      '',
+      '· 다음 분석 실행부터 다시 anomaly로 탐지됩니다.'
+    ].join('\n')
+  )
+  if (!approved) return
+  await store.revokeAcceptedNormalPattern({
+    fingerprint: cluster.cluster,
+    patternId: cluster.accepted_normal_id
   })
 }
 
