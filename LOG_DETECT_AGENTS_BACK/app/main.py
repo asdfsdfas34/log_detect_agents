@@ -500,10 +500,18 @@ def _enrich_pattern_clusters(
                 "semantic_similarity": semantic_similarity,
                 "similar_clusters": similar_clusters,
                 "anomaly_detected": anomaly is not None,
-                "anomaly_type": anomaly.get("anomaly_type") if anomaly else "",
+                "anomaly_type": (
+                    anomaly.get("anomaly_type")
+                    if anomaly
+                    else str(item.get("anomaly_type") or "")
+                ),
                 "anomaly_severity": anomaly.get("severity") if anomaly else "",
                 "anomaly_reason": _anomaly_reason(anomaly) if anomaly else "",
                 "anomaly_metric": anomaly.get("metric") if anomaly else {},
+                "accepted_normal": bool(item.get("accepted_normal", False)),
+                "accepted_normal_id": item.get("accepted_normal_id", ""),
+                "accepted_normal_reason": str(item.get("accepted_normal_reason", "")),
+                "accepted_normal_status": str(item.get("accepted_normal_status", "")),
             }
         )
     return enriched

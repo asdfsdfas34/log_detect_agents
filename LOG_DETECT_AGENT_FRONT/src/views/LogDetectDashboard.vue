@@ -114,6 +114,7 @@
         @request-recommendation="handleRequestRecommendation"
         @suggest-pattern-rule="handleSuggestPatternRule"
         @manual-merge-known="handleManualMergeKnown"
+        @register-accepted-normal="handleRegisterAcceptedNormal"
       />
       <RecommendationPanel
         :actions="store.state.final.recommended_actions ?? []"
@@ -461,6 +462,29 @@ function handleSaveException() {
   )
   if (!reason?.trim()) return
   void store.registerCurrentException(reason.trim())
+}
+
+async function handleRegisterAcceptedNormal(cluster: Cluster) {
+  const reason = window.prompt(
+    `${cluster.cluster} 패턴을 정상(Accepted Normal) 기준선으로 편입합니다.\n승인 사유를 입력해주세요.`,
+    cluster.message ?? ''
+  )
+  if (!reason?.trim()) return
+  const approved = window.confirm(
+    [
+      `${cluster.cluster} 패턴을 정상 편입하시겠습니까?`,
+      '',
+      '· anomaly 집계에서는 제외되지만 목록에는 계속 표시됩니다.',
+      '· 승인 당시 기준(count/log level)을 초과하면 다시 anomaly로 탐지됩니다.'
+    ].join('\n')
+  )
+  if (!approved) return
+  await store.registerAcceptedNormalPattern({
+    fingerprint: cluster.cluster,
+    reason: reason.trim(),
+    serviceName: serviceName.value.trim() || cluster.service_name?.trim() || '',
+    anomalyType: cluster.anomaly_type ?? ''
+  })
 }
 
 onMounted(async () => {
