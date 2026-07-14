@@ -144,7 +144,21 @@ TRAJECTORY_CLUSTER_RETURN_LIMIT = 8
 TRAJECTORY_NEAREST_RETURN_LIMIT = 3
 TRAJECTORY_CLUSTER_MIN_SIZE = 3
 TRAJECTORY_CLUSTER_MIN_SAMPLES = 2
-TIME_SERIES_BUCKET_SIZES = ("day", "hour", "30min")
+# "10min" is additive; existing 30min/hour/day buckets are preserved unchanged.
+TIME_SERIES_BUCKET_SIZES = ("day", "hour", "30min", "10min")
+# Fine-grained bucket used for the RecFM Preview. Kept as a named constant so the
+# RecFM data path never depends on string sorting of ``bucket_size``.
+RECFM_BUCKET_SIZE = "10min"
+# Nominal spacing between consecutive bucket starts, in seconds. Used to detect
+# missing windows so a 10-minute trajectory is only formed from truly
+# consecutive windows (no gaps). ``None`` means "do not enforce continuity"
+# which preserves the historical behaviour of the day/hour/30min buckets.
+_BUCKET_STEP_SECONDS: dict[str, int | None] = {
+    "10min": 600,
+    "30min": None,
+    "hour": None,
+    "day": None,
+}
 
 
 @lru_cache(maxsize=1)
@@ -4043,6 +4057,13 @@ def _bucket_start(value: str, bucket_size: str) -> str:
         parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     except ValueError:
         parsed = datetime.utcnow()
+    if bucket_size == "10min":
+        # Floor the minute to the nearest 10-minute boundary
+        # (e.g. 10:00-10:09 -> 10:00, 10:10-10:19 -> 10:10).
+        minute = (parsed.minute // 10) * 10
+        return parsed.replace(minute=minute, second=0, microsecond=0).isoformat(
+            timespec="seconds"
+        )
     if bucket_size == "30min":
         minute = 30 if parsed.minute >= 30 else 0
         return parsed.replace(minute=minute, second=0, microsecond=0).isoformat(
@@ -4490,12 +4511,17 @@ def _fetch_event_time_windows(
     *,
     service_name: str | None,
     limit: int = TIME_WINDOW_RETURN_LIMIT,
+    bucket_size: str | None = None,
 ) -> list[dict[str, Any]]:
     params: list[Any] = []
-    where = ""
+    clauses: list[str] = []
     if service_name:
-        where = "WHERE service_name=?"
+        clauses.append("service_name=?")
         params.append(service_name)
+    if bucket_size:
+        clauses.append("bucket_size=?")
+        params.append(bucket_size)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     params.append(limit)
     rows = conn.execute(
         f"""
@@ -4642,12 +4668,17 @@ def _fetch_system_state_vectors(
     *,
     service_name: str | None,
     limit: int = TIME_WINDOW_RETURN_LIMIT,
+    bucket_size: str | None = None,
 ) -> list[dict[str, Any]]:
     params: list[Any] = []
-    where = ""
+    clauses: list[str] = []
     if service_name:
-        where = "WHERE service_name=?"
+        clauses.append("service_name=?")
         params.append(service_name)
+    if bucket_size:
+        clauses.append("bucket_size=?")
+        params.append(bucket_size)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     params.append(limit)
     rows = conn.execute(
         f"""
@@ -4882,6 +4913,48 @@ def _build_trajectory_record(
     }
 
 
+def _split_consecutive_runs(
+    items: list[dict[str, Any]], bucket_size: str
+) -> list[list[dict[str, Any]]]:
+    """Split time-ordered state vectors into runs of consecutive buckets.
+
+    Missing-window policy: for buckets with a fixed nominal step (currently only
+    "10min", 600s) a trajectory is only formed from windows whose ``bucket_start``
+    values are exactly one step apart. A gap (a missing 10-minute window) breaks
+    the run so a non-contiguous span is never treated as a single trajectory.
+    Buckets without a defined step (day/hour/30min) keep the historical behaviour
+    of treating the whole ordered group as one run.
+    """
+    step = _BUCKET_STEP_SECONDS.get(bucket_size)
+    if step is None or len(items) <= 1:
+        return [items] if items else []
+    runs: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    previous: datetime | None = None
+    for item in items:
+        try:
+            current_ts = datetime.fromisoformat(
+                str(item.get("bucket_start") or "").replace("Z", "+00:00")
+            )
+        except ValueError:
+            # Unparseable bucket_start breaks continuity rather than silently
+            # bridging a gap.
+            if current:
+                runs.append(current)
+            current = []
+            previous = None
+            continue
+        if previous is not None and (current_ts - previous).total_seconds() != step:
+            runs.append(current)
+            current = [item]
+        else:
+            current.append(item)
+        previous = current_ts
+    if current:
+        runs.append(current)
+    return runs
+
+
 def _upsert_trajectories(
     conn: sqlite3.Connection, *, service_name: str | None
 ) -> list[dict[str, Any]]:
@@ -4900,16 +4973,19 @@ def _upsert_trajectories(
         buckets.setdefault(key, []).append(vector)
 
     trajectories: list[dict[str, Any]] = []
-    for items in buckets.values():
+    for (_service, bucket_size), items in buckets.items():
         if not items:
             continue
-        window_length = min(TRAJECTORY_FIXED_WINDOW_LENGTH, len(items))
-        if window_length <= 0:
-            continue
-        for index in range(0, len(items) - window_length + 1):
-            trajectories.append(
-                _build_trajectory_record(items[index : index + window_length], windows)
-            )
+        # Only build trajectories from truly consecutive windows (see
+        # _split_consecutive_runs for the missing-window policy).
+        for run in _split_consecutive_runs(items, bucket_size):
+            window_length = min(TRAJECTORY_FIXED_WINDOW_LENGTH, len(run))
+            if window_length <= 0:
+                continue
+            for index in range(0, len(run) - window_length + 1):
+                trajectories.append(
+                    _build_trajectory_record(run[index : index + window_length], windows)
+                )
 
     conn.executemany(
         """
@@ -4959,12 +5035,17 @@ def _fetch_trajectories(
     *,
     service_name: str | None,
     limit: int = TRAJECTORY_RETURN_LIMIT,
+    bucket_size: str | None = None,
 ) -> list[dict[str, Any]]:
     params: list[Any] = []
-    where = ""
+    clauses: list[str] = []
     if service_name:
-        where = "WHERE service_name=?"
+        clauses.append("service_name=?")
         params.append(service_name)
+    if bucket_size:
+        clauses.append("bucket_size=?")
+        params.append(bucket_size)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     params.append(limit)
     rows = conn.execute(
         f"""
@@ -5215,12 +5296,17 @@ def _fetch_trajectory_clusters(
     *,
     service_name: str | None,
     limit: int = TRAJECTORY_CLUSTER_RETURN_LIMIT,
+    bucket_size: str | None = None,
 ) -> list[dict[str, Any]]:
     params: list[Any] = []
-    where = ""
+    clauses: list[str] = []
     if service_name:
-        where = "WHERE service_name=?"
+        clauses.append("service_name=?")
         params.append(service_name)
+    if bucket_size:
+        clauses.append("bucket_size=?")
+        params.append(bucket_size)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     params.append(limit)
     rows = conn.execute(
         f"""
@@ -6205,18 +6291,53 @@ def run_detection_pipeline(
             nearest_trajectory_patterns = _nearest_trajectory_patterns(
                 all_trajectories, trajectory_clusters
             )
+            # Additive RecFM Preview payload: explicitly select the 10-minute
+            # bucket so it is never dropped by string-sorted LIMITs. These are
+            # separate keys and do not alter the existing evidence fields above.
+            event_time_windows_10min = _fetch_event_time_windows(
+                model_conn,
+                service_name=service_name,
+                limit=500,
+                bucket_size=RECFM_BUCKET_SIZE,
+            )
+            system_state_vectors_10min = _fetch_system_state_vectors(
+                model_conn,
+                service_name=service_name,
+                limit=500,
+                bucket_size=RECFM_BUCKET_SIZE,
+            )
+            trajectories_10min = _fetch_trajectories(
+                model_conn,
+                service_name=service_name,
+                limit=500,
+                bucket_size=RECFM_BUCKET_SIZE,
+            )
+            trajectory_clusters_10min = _fetch_trajectory_clusters(
+                model_conn,
+                service_name=service_name,
+                limit=100,
+                bucket_size=RECFM_BUCKET_SIZE,
+            )
         else:
             event_time_windows = []
             system_state_vectors = []
             trajectories = []
             trajectory_clusters = []
             nearest_trajectory_patterns = []
+            event_time_windows_10min = []
+            system_state_vectors_10min = []
+            trajectories_10min = []
+            trajectory_clusters_10min = []
         model_conn.commit()
     latest_event_time_windows = event_time_windows
     latest_system_state_vectors = system_state_vectors
     latest_trajectories = trajectories
     latest_trajectory_clusters = trajectory_clusters
     latest_nearest_trajectory_patterns = nearest_trajectory_patterns
+    latest_event_time_windows_10min = event_time_windows_10min
+    latest_system_state_vectors_10min = system_state_vectors_10min
+    latest_trajectories_10min = trajectories_10min
+    latest_trajectory_clusters_10min = trajectory_clusters_10min
     visible_impacts = [
         impact
         for impact in impacts
@@ -6307,6 +6428,15 @@ def run_detection_pipeline(
         "trajectories": latest_trajectories,
         "trajectory_clusters": latest_trajectory_clusters,
         "nearest_trajectory_patterns": latest_nearest_trajectory_patterns,
+        # Additive, backward-compatible RecFM Preview evidence (10-minute bucket
+        # only). Existing consumers ignore these keys; the RecFM Preview tab
+        # reads them exclusively so 30min/hour/day data is never shown as 10min.
+        "event_time_windows_10min": latest_event_time_windows_10min,
+        "system_state_vectors_10min": latest_system_state_vectors_10min,
+        "trajectories_10min": latest_trajectories_10min,
+        "trajectory_clusters_10min": latest_trajectory_clusters_10min,
+        "recfm_bucket_size": RECFM_BUCKET_SIZE,
+        "recfm_trajectory_window_length": TRAJECTORY_FIXED_WINDOW_LENGTH,
         "summary": {
             "total_logs": total_logs,
             "processed_new_logs": len(rows),

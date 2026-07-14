@@ -529,6 +529,82 @@ export interface NearestTrajectoryPattern {
   top_fingerprints: Array<{ fingerprint: string; count: number }>
 }
 
+// --- RecFM Preview (additive, UI-only) ------------------------------------
+// These types describe the RecFM Preview panel. RecFM Preview is a concept
+// preview only: there is no trained model and no production inference. All
+// derived values are computed on the frontend from Observed /analyze evidence.
+
+export type RecFMDataClass = 'observed' | 'derived' | 'simulation' | 'model_output'
+
+export type RecFMReadinessLevel = 'ready' | 'partial' | 'insufficient'
+
+export interface RecFMDataAvailability {
+  bucketSize: string
+  requiredBucket: string
+  availableBuckets: string[]
+  eventWindowCount: number
+  stateVectorCount: number
+  trajectoryCount: number
+  trajectoryClusterCount: number
+}
+
+export interface RecFMReadiness {
+  level: RecFMReadinessLevel
+  requiredBucket: string
+  availableBuckets: string[]
+  eventWindowCount: number
+  stateVectorCount: number
+  trajectoryCount: number
+  trajectoryClusterCount: number
+  featureSchemaVersion: string
+  stateVectorDimension: number
+  trajectoryWindowLength: number
+  observedDurationMinutes: number
+  availableServices: string[]
+  vectorsWithIncidentIdRatio: number
+  labelDistribution: Record<string, number>
+  composableTrajectoryCount: number
+  targetCandidateCount: number
+  missingWindowCount: number
+  messages: string[]
+}
+
+export interface RecFMStateStep {
+  index: number
+  symbol: string
+  bucketStart: string
+  timeLabel: string
+  label: string
+  totalEvents: number
+  errorRatio: number
+  warnRatio: number
+  anomalyCount: number
+  maxRisk: number
+  topFingerprint: string
+  dataClass: RecFMDataClass
+}
+
+export interface RecFMHorizonPreview {
+  windows: number
+  horizonMinutes: number
+  inputWindows: string
+  targetSymbols: string[]
+  requiredInputWindows: number
+  historicalTargetsAvailable: boolean
+  trainingSampleComposable: boolean
+  status: string
+  missingRequirement: string
+}
+
+export interface RecFMFlowPoint {
+  t: number
+  totalEvents: number
+  errorRatio: number
+  anomalyCount: number
+  maxRisk: number
+  dataClass: RecFMDataClass
+}
+
 export interface Cluster {
   cluster: string
   service_name?: string
@@ -658,6 +734,13 @@ export interface SharedState {
     trajectories?: Trajectory[]
     trajectory_clusters?: TrajectoryCluster[]
     nearest_trajectory_patterns?: NearestTrajectoryPattern[]
+    // Additive RecFM Preview evidence (10-minute bucket only).
+    event_time_windows_10min?: EventTimeWindow[]
+    system_state_vectors_10min?: SystemStateVector[]
+    trajectories_10min?: Trajectory[]
+    trajectory_clusters_10min?: TrajectoryCluster[]
+    recfm_bucket_size?: string
+    recfm_trajectory_window_length?: number
     anomaly_daily_counts?: AnomalyDailyCount[]
     summary?: ScenarioSummary
     recommendation?: Record<string, unknown>
@@ -704,6 +787,10 @@ export interface SharedState {
       trajectories?: Trajectory[]
       trajectory_clusters?: TrajectoryCluster[]
       nearest_trajectory_patterns?: NearestTrajectoryPattern[]
+      event_time_windows_10min?: EventTimeWindow[]
+      system_state_vectors_10min?: SystemStateVector[]
+      trajectories_10min?: Trajectory[]
+      trajectory_clusters_10min?: TrajectoryCluster[]
       pattern_ops_skill_plan?: PatternOpsSkillPlan
       pattern_ops_skill_executions?: PatternOpsSkillExecution[]
       pattern_ops_validator_results?: PatternOpsValidatorResult[]

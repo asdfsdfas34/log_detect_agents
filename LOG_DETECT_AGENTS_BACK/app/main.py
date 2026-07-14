@@ -886,6 +886,21 @@ def _analyze(req: AnalyzeRequest) -> AnalyzeResponse:
     result["evidence"]["nearest_trajectory_patterns"] = scenario.get(
         "nearest_trajectory_patterns", []
     )
+    # Additive RecFM Preview evidence (10-minute bucket only).
+    result["evidence"]["event_time_windows_10min"] = scenario.get(
+        "event_time_windows_10min", []
+    )
+    result["evidence"]["system_state_vectors_10min"] = scenario.get(
+        "system_state_vectors_10min", []
+    )
+    result["evidence"]["trajectories_10min"] = scenario.get("trajectories_10min", [])
+    result["evidence"]["trajectory_clusters_10min"] = scenario.get(
+        "trajectory_clusters_10min", []
+    )
+    result["evidence"]["recfm_bucket_size"] = scenario.get("recfm_bucket_size", "10min")
+    result["evidence"]["recfm_trajectory_window_length"] = scenario.get(
+        "recfm_trajectory_window_length", 6
+    )
     if scenario["fingerprints"]:
         result["evidence"]["pattern_ops_matches"] = _patternops_matches_from_fingerprints(
             service_name=req.service_name,
@@ -986,6 +1001,12 @@ def _analyze(req: AnalyzeRequest) -> AnalyzeResponse:
             "nearest_trajectory_patterns": scenario.get(
                 "nearest_trajectory_patterns", []
             ),
+            "event_time_windows_10min": scenario.get("event_time_windows_10min", []),
+            "system_state_vectors_10min": scenario.get(
+                "system_state_vectors_10min", []
+            ),
+            "trajectories_10min": scenario.get("trajectories_10min", []),
+            "trajectory_clusters_10min": scenario.get("trajectory_clusters_10min", []),
         }
     )
     result["decisions"]["skipped_agents"].append("RecommendationAgent")

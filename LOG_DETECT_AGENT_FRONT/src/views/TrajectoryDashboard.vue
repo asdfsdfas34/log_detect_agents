@@ -68,15 +68,71 @@
       />
       <ErrorState v-else-if="store.error" :message="store.error" />
 
-      <TrajectoryModelingPanel
-        v-if="store.state"
-        :merge-groups="trajectoryMergeGroups"
-        :event-windows="trajectoryEventWindows"
-        :state-vectors="trajectoryStateVectors"
-        :trajectories="trajectories"
-        :trajectory-clusters="trajectoryClusters"
-        :nearest-patterns="nearestTrajectoryPatterns"
-      />
+      <div v-if="store.state">
+        <!-- Tabs: Trajectory Modeling (existing) vs RecFM Preview (new). -->
+        <div
+          role="tablist"
+          aria-label="Trajectory dashboard views"
+          class="flex gap-1 border-b border-slate-200"
+          @keydown="onTabKeydown"
+        >
+          <button
+            v-for="tab in tabs"
+            :id="`tab-${tab.key}`"
+            :key="tab.key"
+            ref="tabButtons"
+            role="tab"
+            :aria-selected="store.activeTrajectoryTab === tab.key"
+            :aria-controls="`tabpanel-${tab.key}`"
+            :tabindex="store.activeTrajectoryTab === tab.key ? 0 : -1"
+            class="-mb-px rounded-t border-b-2 px-4 py-2 text-sm font-medium focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+            :class="
+              store.activeTrajectoryTab === tab.key
+                ? 'border-blue-600 text-blue-700'
+                : 'border-transparent text-slate-500 hover:text-slate-700'
+            "
+            @click="store.activeTrajectoryTab = tab.key"
+          >
+            {{ tab.label }}
+          </button>
+        </div>
+
+        <div
+          v-show="store.activeTrajectoryTab === 'modeling'"
+          id="tabpanel-modeling"
+          role="tabpanel"
+          aria-labelledby="tab-modeling"
+          tabindex="0"
+          class="pt-4"
+        >
+          <TrajectoryModelingPanel
+            :merge-groups="trajectoryMergeGroups"
+            :event-windows="trajectoryEventWindows"
+            :state-vectors="trajectoryStateVectors"
+            :trajectories="trajectories"
+            :trajectory-clusters="trajectoryClusters"
+            :nearest-patterns="nearestTrajectoryPatterns"
+          />
+        </div>
+
+        <div
+          v-show="store.activeTrajectoryTab === 'recfm'"
+          id="tabpanel-recfm"
+          role="tabpanel"
+          aria-labelledby="tab-recfm"
+          tabindex="0"
+          class="pt-4"
+        >
+          <RecFMPreviewPanel
+            :event-windows10min="eventWindows10min"
+            :state-vectors10min="stateVectors10min"
+            :trajectories10min="trajectories10min"
+            :trajectory-clusters10min="trajectoryClusters10min"
+            :available-buckets="availableBuckets"
+            :window-length="recfmWindowLength"
+          />
+        </div>
+      </div>
 
       <EmptyState
         v-if="!store.state && !store.loading"
@@ -150,10 +206,11 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, nextTick, onMounted, ref } from 'vue'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import OverviewCard from '@/components/dashboard/OverviewCard.vue'
 import TrajectoryModelingPanel from '@/components/dashboard/TrajectoryModelingPanel.vue'
+import RecFMPreviewPanel from '@/components/dashboard/RecFMPreviewPanel.vue'
 import AgentProgressTimeline from '@/components/dashboard/AgentProgressTimeline.vue'
 import SkillActivityStreamPanel from '@/components/dashboard/SkillActivityStreamPanel.vue'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
@@ -214,6 +271,57 @@ const nearestTrajectoryPatterns = computed(() => {
   if (evidenceItems?.length) return evidenceItems
   return (evidenceBundle.value?.nearest_trajectory_patterns ?? []) as NearestTrajectoryPattern[]
 })
+
+// --- RecFM Preview (10-minute bucket only) ---------------------------------
+function evidence10min<T>(key: 'event_time_windows_10min' | 'system_state_vectors_10min' | 'trajectories_10min' | 'trajectory_clusters_10min'): T[] {
+  const fromEvidence = store.state?.evidence[key]
+  if (fromEvidence?.length) return fromEvidence as T[]
+  return (evidenceBundle.value?.[key] ?? []) as T[]
+}
+
+const eventWindows10min = computed(() =>
+  evidence10min<EventTimeWindow>('event_time_windows_10min')
+)
+const stateVectors10min = computed(() =>
+  evidence10min<SystemStateVector>('system_state_vectors_10min')
+)
+const trajectories10min = computed(() => evidence10min<Trajectory>('trajectories_10min'))
+const trajectoryClusters10min = computed(() =>
+  evidence10min<TrajectoryCluster>('trajectory_clusters_10min')
+)
+
+const recfmWindowLength = computed(
+  () => store.state?.evidence.recfm_trajectory_window_length ?? 6
+)
+
+// Buckets actually present in the analysis evidence (never fabricated).
+const availableBuckets = computed(() => {
+  const buckets = new Set<string>()
+  for (const w of trajectoryEventWindows.value) if (w.bucket_size) buckets.add(w.bucket_size)
+  for (const v of trajectoryStateVectors.value) if (v.bucket_size) buckets.add(v.bucket_size)
+  if (eventWindows10min.value.length || stateVectors10min.value.length) buckets.add('10min')
+  return Array.from(buckets).sort()
+})
+
+const tabs = [
+  { key: 'modeling' as const, label: 'Trajectory Modeling' },
+  { key: 'recfm' as const, label: 'RecFM Preview' }
+]
+const tabButtons = ref<HTMLButtonElement[]>([])
+
+function onTabKeydown(event: KeyboardEvent) {
+  const order = tabs.map((t) => t.key)
+  const current = order.indexOf(store.activeTrajectoryTab)
+  let next = current
+  if (event.key === 'ArrowRight') next = (current + 1) % order.length
+  else if (event.key === 'ArrowLeft') next = (current - 1 + order.length) % order.length
+  else if (event.key === 'Home') next = 0
+  else if (event.key === 'End') next = order.length - 1
+  else return
+  event.preventDefault()
+  store.activeTrajectoryTab = order[next]
+  void nextTick(() => tabButtons.value[next]?.focus())
+}
 
 async function openServiceLayer() {
   await store.fetchServices()
