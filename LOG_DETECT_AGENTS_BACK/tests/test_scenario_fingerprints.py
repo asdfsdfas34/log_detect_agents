@@ -1918,7 +1918,14 @@ def test_detection_pipeline_processes_only_new_raw_logs_and_tracks_metrics(
             """).fetchall()
 
     assert processed_count == 1
-    assert metric_rows == [("30min", 1, 1), ("day", 1, 1), ("hour", 1, 1)]
+    # ORDER BY bucket_size ASC -> "10min" < "30min" < "day" < "hour".
+    # The 10min bucket is additive; the existing 30min/hour/day rows are unchanged.
+    assert metric_rows == [
+        ("10min", 1, 1),
+        ("30min", 1, 1),
+        ("day", 1, 1),
+        ("hour", 1, 1),
+    ]
 
 
 def test_bucket_start_supports_thirty_minute_windows() -> None:
@@ -1930,6 +1937,176 @@ def test_bucket_start_supports_thirty_minute_windows() -> None:
         scenario_store._bucket_start("2026-06-16T10:30:00", "30min")
         == "2026-06-16T10:30:00"
     )
+
+
+def test_bucket_start_supports_ten_minute_windows() -> None:
+    cases = {
+        "2026-06-16T10:00:00": "2026-06-16T10:00:00",
+        "2026-06-16T10:09:59": "2026-06-16T10:00:00",
+        "2026-06-16T10:10:00": "2026-06-16T10:10:00",
+        "2026-06-16T10:19:59": "2026-06-16T10:10:00",
+        "2026-06-16T10:20:00": "2026-06-16T10:20:00",
+        "2026-06-16T10:29:59": "2026-06-16T10:20:00",
+        "2026-06-16T10:30:00": "2026-06-16T10:30:00",
+        "2026-06-16T10:59:59": "2026-06-16T10:50:00",
+    }
+    for value, expected in cases.items():
+        assert scenario_store._bucket_start(value, "10min") == expected
+
+
+def test_split_consecutive_runs_breaks_on_missing_ten_minute_window() -> None:
+    items = [
+        {"bucket_start": "2026-06-16T10:00:00"},
+        {"bucket_start": "2026-06-16T10:10:00"},
+        {"bucket_start": "2026-06-16T10:20:00"},
+        # 10:30 window is missing -> continuity must break here.
+        {"bucket_start": "2026-06-16T10:40:00"},
+        {"bucket_start": "2026-06-16T10:50:00"},
+    ]
+    runs = scenario_store._split_consecutive_runs(items, "10min")
+    assert [len(run) for run in runs] == [3, 2]
+    # No run bridges the missing 10:30 window.
+    for run in runs:
+        starts = {item["bucket_start"] for item in run}
+        assert not ({"2026-06-16T10:20:00", "2026-06-16T10:40:00"} <= starts)
+
+
+def test_split_consecutive_runs_keeps_single_run_for_legacy_buckets() -> None:
+    # day/hour/30min have no fixed step and must preserve historical behaviour:
+    # the whole ordered group stays a single run even with non-uniform spacing.
+    items = [
+        {"bucket_start": "2026-06-16T10:00:00"},
+        {"bucket_start": "2026-06-16T11:00:00"},
+        {"bucket_start": "2026-06-16T14:00:00"},
+    ]
+    assert scenario_store._split_consecutive_runs(items, "hour") == [items]
+    assert scenario_store._split_consecutive_runs(items, "30min") == [items]
+
+
+def _insert_service_logs_at(
+    db_path: Path, service_name: str, timestamps: list[str]
+) -> None:
+    with sqlite3.connect(db_path) as conn:
+        ensure_schema(conn)
+        conn.executemany(
+            """
+            INSERT INTO service_logs(service_name, level, message, stack_trace, created_at)
+            VALUES (?, 'ERROR', ?, '', ?)
+            """,
+            [
+                (service_name, f"Payment failed at {ts}", ts)
+                for ts in timestamps
+            ],
+        )
+        conn.commit()
+
+
+def test_detection_pipeline_builds_ten_minute_trajectory_over_sixty_minutes(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db_path = tmp_path / "logs.db"
+    monkeypatch.setenv("SQLITE_PATH", str(db_path))
+    # Six consecutive 10-minute windows -> one 6-window (60 minute) trajectory.
+    _insert_service_logs_at(
+        db_path,
+        "billing-service",
+        [f"2026-06-16T10:{minute:02d}:00" for minute in range(0, 60, 10)],
+    )
+
+    result = run_detection_pipeline("billing-service")
+
+    windows_10min = result["event_time_windows_10min"]
+    vectors_10min = result["system_state_vectors_10min"]
+    trajectories_10min = result["trajectories_10min"]
+
+    assert len(windows_10min) == 6
+    assert all(w["bucket_size"] == "10min" for w in windows_10min)
+    assert len(vectors_10min) == 6
+    # Feature schema version and vector dimension are preserved for 10min data.
+    assert all(v["feature_schema_version"] == "system-state-v1" for v in vectors_10min)
+    assert all(len(v["vector"]) == 10 for v in vectors_10min)
+    assert all(v["bucket_size"] == "10min" for v in vectors_10min)
+
+    assert trajectories_10min, "expected at least one 10-minute trajectory"
+    trajectory = trajectories_10min[0]
+    assert trajectory["bucket_size"] == "10min"
+    assert trajectory["window_length"] == 6
+    assert trajectory["start_bucket"] == "2026-06-16T10:00:00"
+    assert trajectory["end_bucket"] == "2026-06-16T10:50:00"
+    # 10min data must never be mixed with other buckets.
+    assert result["recfm_bucket_size"] == "10min"
+    assert result["recfm_trajectory_window_length"] == 6
+
+
+def test_ten_minute_trajectory_does_not_bridge_missing_window(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db_path = tmp_path / "logs.db"
+    monkeypatch.setenv("SQLITE_PATH", str(db_path))
+    # 10:30 is intentionally missing.
+    timestamps = [
+        "2026-06-16T10:00:00",
+        "2026-06-16T10:10:00",
+        "2026-06-16T10:20:00",
+        "2026-06-16T10:40:00",
+        "2026-06-16T10:50:00",
+        "2026-06-16T11:00:00",
+    ]
+    _insert_service_logs_at(db_path, "billing-service", timestamps)
+
+    result = run_detection_pipeline("billing-service")
+    trajectories_10min = result["trajectories_10min"]
+
+    # No 6-window trajectory can form because the gap splits the span.
+    assert all(t["window_length"] < 6 for t in trajectories_10min)
+    # No trajectory bridges the 10:20 -> 10:40 gap.
+    for trajectory in trajectories_10min:
+        assert not (
+            trajectory["start_bucket"] <= "2026-06-16T10:20:00"
+            and trajectory["end_bucket"] >= "2026-06-16T10:40:00"
+        )
+
+
+def test_ten_minute_trajectory_does_not_mix_services(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db_path = tmp_path / "logs.db"
+    monkeypatch.setenv("SQLITE_PATH", str(db_path))
+    stamps = [f"2026-06-16T10:{minute:02d}:00" for minute in range(0, 60, 10)]
+    _insert_service_logs_at(db_path, "billing-service", stamps)
+    _insert_service_logs_at(db_path, "auth-service", stamps)
+
+    result = run_detection_pipeline("billing-service")
+    trajectories_10min = result["trajectories_10min"]
+
+    assert trajectories_10min
+    assert all(t["service_name"] == "billing-service" for t in trajectories_10min)
+
+
+def test_repeated_pipeline_keeps_ten_minute_metrics_idempotent(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db_path = tmp_path / "logs.db"
+    monkeypatch.setenv("SQLITE_PATH", str(db_path))
+    _insert_service_logs_at(
+        db_path,
+        "billing-service",
+        [f"2026-06-16T10:{minute:02d}:00" for minute in range(0, 60, 10)],
+    )
+
+    run_detection_pipeline("billing-service")
+    run_detection_pipeline("billing-service")
+
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT SUM(total_count)
+            FROM pattern_time_series_metrics
+            WHERE bucket_size='10min'
+            """
+        ).fetchone()
+    # Six raw logs -> six 10min occurrences, no double counting on rerun.
+    assert rows[0] == 6
 
 
 def test_detection_pipeline_can_skip_time_window_modeling(

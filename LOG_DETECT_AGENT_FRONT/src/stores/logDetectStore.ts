@@ -109,6 +109,11 @@ export const useLogDetectStore = defineStore('logDetect', () => {
   const error = ref<string | null>(null)
   const serviceOptions = ref<string[]>([])
   const state = ref<SharedState | null>(null)
+  // Trajectory Dashboard UI-only state. Kept separate from analysis results so
+  // switching tabs never mutates or re-fetches /analyze evidence.
+  const activeTrajectoryTab = ref<'modeling' | 'recfm'>('modeling')
+  const selectedRecFMTrajectoryId = ref<string | null>(null)
+  const selectedRecFMHorizon = ref<1 | 2 | 4>(1)
   const recommendationHistory = ref<RecommendationHistoryItem[]>([])
   const knowledgeCards = ref<KnowledgeCardItem[]>([])
   const exceptionRegistry = ref<ExceptionRegistryItem[]>([])
@@ -1213,6 +1218,9 @@ export const useLogDetectStore = defineStore('logDetect', () => {
     backendActionLabel,
     error,
     state,
+    activeTrajectoryTab,
+    selectedRecFMTrajectoryId,
+    selectedRecFMHorizon,
     recommendationHistory,
     knowledgeCards,
     exceptionRegistry,
