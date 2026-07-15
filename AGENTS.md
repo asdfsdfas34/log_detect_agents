@@ -8,7 +8,6 @@ LogDetect는 서비스 로그를 수집·정규화하고, 패턴과 이상 징�
 
 - `LOG_DETECT_AGENTS_BACK`: Python 3.11+, FastAPI, LangGraph 기반 백엔드
 - `LOG_DETECT_AGENT_FRONT`: Vue 3, TypeScript, Vite 기반 기본 대시보드
-- `LOG_DETECT_AGENT_STREAMLIT`: Python, Streamlit 기반 보조 대시보드
 - `docs`: 설계, 시나리오, 실험 및 인수인계 문서
 
 프론트엔드는 백엔드의 `/health`, `/services`, `/analyze`, `/analyze/stream` 및 PatternOps/추천 관련 API를 사용한다. API 계약을 변경할 때는 두 프론트엔드와 관련 테스트 및 문서를 함께 확인한다.
@@ -62,16 +61,6 @@ npm run dev
 
 기본 백엔드 주소는 `http://localhost:8000`, Vite 개발 서버는 `http://localhost:5173`이다.
 
-### Streamlit 프론트엔드
-
-```powershell
-cd LOG_DETECT_AGENT_STREAMLIT
-py -3.11 -m venv .venv
-.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
-python -m streamlit run app.py
-```
-
 ## 4. 환경 변수
 
 백엔드는 `LOG_DETECT_AGENTS_BACK/.env.dev`를 읽는다. 실제 값이나 시크릿은 커밋하지 않고 `.env.example`에는 예시 또는 빈 값만 둔다.
@@ -108,12 +97,11 @@ python -m streamlit run app.py
 ### 프론트엔드 설정
 
 - Vue: `VITE_API_BASE_URL`, `VITE_ANALYZE_SSE_URL`
-- Streamlit: `API_BASE_URL`
 
 ## 5. 변경 원칙
 
 - 요구사항과 직접 관련된 최소 범위만 변경하고 사용자의 기존 변경을 보존한다.
-- 백엔드 API 또는 `SharedState`를 변경하면 Pydantic schema, Vue 타입/store/API client, Streamlit API client 및 관련 테스트를 함께 점검한다.
+- 백엔드 API 또는 `SharedState`를 변경하면 Pydantic schema, Vue 타입/store/API client 및 관련 테스트를 함께 점검한다.
 - 로그 분석의 핵심 판정은 가능한 한 결정적이고 테스트 가능하게 유지한다. LLM 응답은 근거 데이터와 분리하고 실패 시 graceful degradation 경로를 보존한다.
 - fingerprint, 정규화 규칙, suppression, accepted-normal, PatternOps contract의 변경은 기존 데이터 호환성과 탐지 결과 변화를 테스트한다.
 - DB 접근은 `app/db`, MCP 연동은 `app/mcp`, 그래프 흐름은 `app/graph`, 에이전트 행위는 `app/agents`의 기존 경계를 따른다.
@@ -145,15 +133,6 @@ python -m pytest tests/test_health.py -q
 cd LOG_DETECT_AGENT_FRONT
 npm run build
 npm run lint
-```
-
-### Streamlit 프론트엔드
-
-별도 자동화 테스트가 없으므로 변경 시 최소한 import/compile 검사와 백엔드 연동 화면을 확인한다.
-
-```powershell
-cd LOG_DETECT_AGENT_STREAMLIT
-python -m compileall app.py api_client.py
 ```
 
 테스트가 환경 변수, 외부 API, 기존 로컬 데이터 때문에 실행되지 않으면 실패 원인과 미검증 범위를 명확히 기록한다.
