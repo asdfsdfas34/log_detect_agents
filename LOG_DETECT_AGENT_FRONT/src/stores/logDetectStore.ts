@@ -2,6 +2,7 @@ import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 import { agentApi } from '@/api/agentApi'
 import { connectExecutionStream } from '@/services/streamingService'
+import { useObservabilityStore } from '@/stores/observabilityStore'
 import type {
   AgentReasoningEvent,
   AgentStepStatus,
@@ -817,6 +818,12 @@ export const useLogDetectStore = defineStore('logDetect', () => {
   async function runAnalysis(serviceName: string, analysisDate?: string) {
     const streamId = createStreamId()
     const request = buildDefaultRequest(serviceName, analysisDate, streamId)
+    const observability = useObservabilityStore()
+    observability.beginRun({
+      streamId,
+      serviceName,
+      analysisDate: analysisDate || new Date().toISOString().slice(0, 10)
+    })
     loading.value = true
     executionStatus.value = 'running'
     error.value = null
@@ -848,6 +855,9 @@ export const useLogDetectStore = defineStore('logDetect', () => {
       onReasoning: (event) => {
         appendReasoningActivity(event, 'sse')
       },
+      onTrace: (event) => {
+        observability.ingestTraceEvent(streamId, event)
+      },
       onPartial: () => {
         appendSkillActivity({
           skill: currentStage.value,
@@ -863,6 +873,7 @@ export const useLogDetectStore = defineStore('logDetect', () => {
         markTimelineFromState(result)
         appendPatternOpsExecutionActivities(result)
         appendReasoningActivities(result)
+        observability.ingestFinalState(streamId, result)
       },
       onError: (message) => {
         appendSkillActivity({
@@ -873,12 +884,14 @@ export const useLogDetectStore = defineStore('logDetect', () => {
           source: 'sse'
         })
         addToast('error', message)
+        observability.markConnection(streamId, 'reconnecting')
         stream = null
         startLocalStageProgress()
       }
     })
 
     if (!stream) {
+      observability.markConnection(streamId, 'fallback')
       startPollingHealth()
       addToast(
         'info',
@@ -894,6 +907,7 @@ export const useLogDetectStore = defineStore('logDetect', () => {
       markTimelineFromState(data.result)
       appendPatternOpsExecutionActivities(data.result)
       appendReasoningActivities(data.result)
+      observability.ingestFinalState(streamId, data.result)
       executionStatus.value =
         data.result.decisions.failures.length > 0 ? 'failed' : 'completed'
       lastExecutionAt.value = new Date().toISOString()
@@ -912,6 +926,7 @@ export const useLogDetectStore = defineStore('logDetect', () => {
         detail: error.value ?? undefined,
         source: 'backend-result'
       })
+      observability.markRunStatus(streamId, 'failed')
       addToast('error', `분석 실패: ${error.value}`)
     } finally {
       loading.value = false
@@ -947,13 +962,42 @@ export const useLogDetectStore = defineStore('logDetect', () => {
         : 'skipped'
     }))
 
+    // Dedicated Observability run + SSE stream for this recommendation, kept
+    // separate from the /analyze stream so the two never collide.
+    const recStreamId = createStreamId()
+    const observability = useObservabilityStore()
+    observability.beginRun({
+      streamId: recStreamId,
+      serviceName,
+      analysisDate: analysisDate || new Date().toISOString().slice(0, 10),
+      operation: 'recommendation',
+      fingerprint
+    })
+    let recStream = connectExecutionStream(recStreamId, {
+      onStage: (stage) => setCurrentStage(stage, 'sse'),
+      onSkill: (execution) => appendStreamedSkillExecution(execution),
+      onReasoning: (event) => appendReasoningActivity(event, 'sse'),
+      onTrace: (event) => observability.ingestTraceEvent(recStreamId, event),
+      onPartial: () => {},
+      onComplete: (result) => observability.ingestFinalState(recStreamId, result),
+      onError: (message) => {
+        observability.markConnection(recStreamId, 'reconnecting')
+        addToast('error', message)
+        recStream = null
+      }
+    })
+    if (!recStream) {
+      observability.markConnection(recStreamId, 'fallback')
+    }
+
     return withBackendAction('Recommendation 생성', async () => {
       try {
         // Request the backend to execute the downstream recommendation slice for the selected fingerprint.
         const { data } = await agentApi.recommendationForFingerprint({
           service_name: serviceName,
           fingerprint,
-          analysis_date: analysisDate || undefined
+          analysis_date: analysisDate || undefined,
+          stream_id: recStreamId
         })
         if (state.value) {
           state.value = {
@@ -971,6 +1015,8 @@ export const useLogDetectStore = defineStore('logDetect', () => {
         markTimelineFromState(data.result)
         appendPatternOpsExecutionActivities(data.result)
         appendReasoningActivities(data.result)
+        // REST fallback: merge the authoritative trace regardless of SSE state.
+        observability.ingestFinalState(recStreamId, data.result)
         executionStatus.value =
           data.result.decisions.failures.length > 0 ? 'failed' : 'completed'
         setCurrentStage('Completed')
@@ -989,10 +1035,15 @@ export const useLogDetectStore = defineStore('logDetect', () => {
           detail: error.value ?? undefined,
           source: 'backend-result'
         })
+        observability.markRunStatus(recStreamId, 'failed')
         addToast('error', `추천 업데이트 실패: ${error.value}`)
         return false
       } finally {
         recommendationGeneratingFingerprint.value = null
+        if (recStream) {
+          recStream.close()
+          recStream = null
+        }
       }
     })
   }

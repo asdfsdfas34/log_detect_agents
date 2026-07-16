@@ -3,6 +3,7 @@
 from app.patternops.skill_graph import plan_skill_graphs
 from app.reasoning_events import record_reasoning_event
 from app.state import SharedState
+from app.trace_events import record_trace_event
 
 
 class OrchestratorAgent:
@@ -75,6 +76,28 @@ class OrchestratorAgent:
                     ),
                 },
             )
+            matched_skills = sorted(selected_skill_ids.intersection(agent_skills))
+            record_trace_event(
+                state,
+                kind="routing",
+                event_type="route.agent_selected",
+                status="completed",
+                title=f"Routing: {agent_name} 선택",
+                summary=(
+                    f"실행 순서상 다음 실행자로 {agent_name}를 선택했습니다."
+                ),
+                agent_name=self.name,
+                component="OrchestratorAgent",
+                layer="orchestration",
+                decision_summary=(
+                    "선택 근거 스킬: " + (", ".join(matched_skills) or "fallback")
+                ),
+                metadata={
+                    "next_agent": agent_name,
+                    "pending_agents": state["orchestration"]["pending_agents"],
+                    "selected_skill_ids": matched_skills,
+                },
+            )
             return state
 
         for agent_name in self.execution_order:
@@ -93,6 +116,18 @@ class OrchestratorAgent:
             status="completed",
             title="Planning 완료: 실행 계획 종료",
             detail=f"계획된 {len(selected_skill_ids)}개 스킬의 실행 가능 Agent 검토를 마쳤습니다.",
+            metadata={"next_agent": "END"},
+        )
+        record_trace_event(
+            state,
+            kind="routing",
+            event_type="route.end_selected",
+            status="completed",
+            title="Routing 종료: 실행할 Agent 없음",
+            summary="실행 가능한 Agent 스킬이 없어 파이프라인을 종료합니다.",
+            agent_name=self.name,
+            component="OrchestratorAgent",
+            layer="orchestration",
             metadata={"next_agent": "END"},
         )
         return state

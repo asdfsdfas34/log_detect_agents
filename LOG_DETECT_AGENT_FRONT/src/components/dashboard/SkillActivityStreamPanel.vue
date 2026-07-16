@@ -1,9 +1,17 @@
 <template>
   <section class="rounded-lg border border-slate-200 bg-white p-3 shadow-sm">
     <div class="mb-3">
-      <p class="text-xs font-semibold uppercase tracking-wide text-slate-500">
-        Agent 추론 · 스킬 활동 스트림
-      </p>
+      <div class="flex items-center justify-between">
+        <p class="text-xs font-semibold uppercase tracking-wide text-slate-500">
+          Agent 추론 · 스킬 활동 스트림
+        </p>
+        <RouterLink
+          to="/agent-observability"
+          class="text-[11px] font-medium text-blue-600 hover:text-blue-700"
+        >
+          상세 추론 로그 보기 →
+        </RouterLink>
+      </div>
       <div class="mt-2 rounded border border-blue-100 bg-blue-50 p-2">
         <div class="flex items-center justify-between gap-2">
           <p class="text-sm font-semibold text-slate-800">

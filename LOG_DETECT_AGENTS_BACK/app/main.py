@@ -2,6 +2,7 @@
 
 import logging
 from datetime import date
+from time import perf_counter
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException
@@ -56,8 +57,10 @@ from app.patternops.skill_graph import (
     fetch_pattern_skill_edges,
     fetch_pattern_skills,
 )
+from app.reasoning_events import reasoning_state
 from app.state import Scope, SharedState, create_initial_state
 from app.streaming import analysis_stream, sse_lines
+from app.trace_events import record_trace_event, redact_error
 
 
 class _SuppressMessagePrefixFilter(logging.Filter):
@@ -262,6 +265,9 @@ class FingerprintRecommendationRequest(BaseModel):
     fingerprint: str
     analysis_date: date | None = None
     include_time_windows: bool = True
+    stream_id: str | None = Field(
+        default=None, description="Optional client stream id for live progress events"
+    )
 
 
 class ServiceListResponse(BaseModel):
@@ -836,6 +842,46 @@ def _analyze(req: AnalyzeRequest) -> AnalyzeResponse:
         request_id=uuid4().hex,
         save_to_chromadb=req.save_to_chromadb,
     )
+    started_at = perf_counter()
+    record_trace_event(
+        initial_state,
+        kind="request",
+        event_type="request.accepted",
+        status="running",
+        title="분석 요청 접수",
+        summary=(
+            f"{req.service_name} 서비스에 대한 분석 요청을 접수했습니다 "
+            f"(기준일 {analysis_date.isoformat()})."
+        ),
+        agent_name="FastAPI",
+        component="AnalyzeAPI",
+        layer="api",
+        input_summary={"field_names": ["service_name", "analysis_date", "goal"]},
+        metadata={"service_name": req.service_name, "analysis_date": analysis_date.isoformat()},
+    )
+    record_trace_event(
+        initial_state,
+        kind="request",
+        event_type="request.validated",
+        status="completed",
+        title="요청 검증 완료",
+        summary="분석 범위와 대상 서비스, 기준일을 확정했습니다.",
+        agent_name="FastAPI",
+        component="AnalyzeAPI",
+        layer="api",
+    )
+    if req.stream_id:
+        record_trace_event(
+            initial_state,
+            kind="sse",
+            event_type="sse.connected",
+            status="completed",
+            title="SSE 스트림 연결",
+            summary="실시간 진행 이벤트 스트림이 연결되었습니다.",
+            agent_name="FastAPI",
+            component="StreamingService",
+            layer="api",
+        )
     result = graph.invoke(initial_state)
 
     # Run deterministic scenario analysis for dashboard evidence. Final
@@ -1025,8 +1071,79 @@ def _analyze(req: AnalyzeRequest) -> AnalyzeResponse:
         }
     )
 
-    result = KnowledgeBaseRAGAgent().run(result)
-    result = KnowledgeBaseRAGAgent().persist_final_answer(result)
+    with reasoning_state(result, agent_name="KnowledgeBaseRAGAgent"):
+        record_trace_event(
+            result,
+            kind="agent",
+            event_type="agent.started",
+            status="running",
+            title="KnowledgeBaseRAGAgent 실행 시작",
+            summary="Knowledge Card와 Chroma 유사 분석 문서를 조회합니다.",
+            agent_name="KnowledgeBaseRAGAgent",
+            component="KnowledgeBaseRAGAgent",
+            layer="agent",
+            span_id=f"{result.get('request_id', '')}:agent:KnowledgeBaseRAGAgent:1",
+        )
+        try:
+            result = KnowledgeBaseRAGAgent().run(result)
+            result = KnowledgeBaseRAGAgent().persist_final_answer(result)
+            record_trace_event(
+                result,
+                kind="agent",
+                event_type="agent.completed",
+                status="completed",
+                title="KnowledgeBaseRAGAgent 실행 완료",
+                summary=(
+                    "Knowledge Base 조회와 최종 분석 문서 저장 여부 판단을 마쳤습니다."
+                ),
+                agent_name="KnowledgeBaseRAGAgent",
+                component="KnowledgeBaseRAGAgent",
+                layer="agent",
+                span_id=f"{result.get('request_id', '')}:agent:KnowledgeBaseRAGAgent:1",
+                metadata={
+                    "saved_to_chromadb": bool(result.get("rag", {}).get("saved_to_chromadb")),
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            record_trace_event(
+                result,
+                kind="agent",
+                event_type="agent.failed",
+                status="failed",
+                title="KnowledgeBaseRAGAgent 실행 실패",
+                summary="Knowledge Base 조회 또는 저장 단계에서 오류가 발생했습니다.",
+                agent_name="KnowledgeBaseRAGAgent",
+                component="KnowledgeBaseRAGAgent",
+                layer="agent",
+                error=redact_error(exc),
+            )
+            raise
+
+    record_trace_event(
+        result,
+        kind="request",
+        event_type="request.completed",
+        status="completed",
+        title="분석 요청 완료",
+        summary="전체 분석 파이프라인 실행을 완료했습니다.",
+        agent_name="FastAPI",
+        component="AnalyzeAPI",
+        layer="api",
+        duration_ms=int((perf_counter() - started_at) * 1000),
+        metadata={"failures": len(result["decisions"].get("failures", []))},
+    )
+    if req.stream_id:
+        record_trace_event(
+            result,
+            kind="sse",
+            event_type="sse.final_emitted",
+            status="completed",
+            title="최종 결과 전송",
+            summary="최종 분석 결과를 클라이언트로 전송합니다.",
+            agent_name="FastAPI",
+            component="StreamingService",
+            layer="api",
+        )
     return AnalyzeResponse(result=result)
 
 
@@ -1057,9 +1174,77 @@ def delete_recommendation(recommendation_id: int) -> dict[str, int | str]:
 
 
 @app.post("/recommendations/fingerprint", response_model=AnalyzeResponse)
-def recommend_for_fingerprint(req: FingerprintRecommendationRequest) -> AnalyzeResponse:
+def recommend_for_fingerprint(
+    req: FingerprintRecommendationRequest,
+) -> AnalyzeResponse:
+    """Build a recommendation preview for one selected fingerprint.
+
+    Wrapped in an analysis stream so the Agent Process Observability screen can
+    follow recommendation generation live over SSE, exactly like ``/analyze``.
+    """
+
+    with analysis_stream(req.stream_id):
+        return _recommend_for_fingerprint(req)
+
+
+def _recommend_for_fingerprint(req: FingerprintRecommendationRequest) -> AnalyzeResponse:
     """Build a recommendation preview for one selected fingerprint without persisting it."""
     analysis_date = req.analysis_date or date.today()
+
+    # Create the trace state first so request-level events are captured before
+    # any recommendation pre-processing runs.
+    state = create_initial_state(
+        goal=f"selected fingerprint recommendation: {req.fingerprint}",
+        scope={
+            "systems": [req.service_name],
+            "time_range": {"from": "", "to": ""},
+            "filters": {"fingerprint": req.fingerprint},
+        },
+        request_id=uuid4().hex,
+    )
+    request_started_at = perf_counter()
+    record_trace_event(
+        state,
+        kind="request",
+        event_type="request.accepted",
+        status="running",
+        title="추천 요청 접수",
+        summary=(
+            f"{req.service_name} 서비스 fingerprint {req.fingerprint[:12]} 추천 생성 "
+            f"요청을 접수했습니다 (기준일 {analysis_date.isoformat()})."
+        ),
+        agent_name="FastAPI",
+        component="RecommendationAPI",
+        layer="api",
+        input_summary={"field_names": ["service_name", "fingerprint", "analysis_date"]},
+        evidence_refs=[req.fingerprint],
+        metadata={"service_name": req.service_name, "fingerprint": req.fingerprint},
+    )
+    record_trace_event(
+        state,
+        kind="request",
+        event_type="request.validated",
+        status="completed",
+        title="추천 요청 검증 완료",
+        summary="대상 서비스와 선택 fingerprint, 기준일을 확정했습니다.",
+        agent_name="FastAPI",
+        component="RecommendationAPI",
+        layer="api",
+        evidence_refs=[req.fingerprint],
+    )
+    if req.stream_id:
+        record_trace_event(
+            state,
+            kind="sse",
+            event_type="sse.connected",
+            status="completed",
+            title="SSE 스트림 연결",
+            summary="추천 생성 실시간 진행 이벤트 스트림이 연결되었습니다.",
+            agent_name="FastAPI",
+            component="StreamingService",
+            layer="api",
+        )
+
     scenario = run_detection_pipeline(
         req.service_name,
         analysis_date=analysis_date.isoformat(),
@@ -1074,6 +1259,21 @@ def recommend_for_fingerprint(req: FingerprintRecommendationRequest) -> AnalyzeR
         None,
     )
     if selected is None:
+        record_trace_event(
+            state,
+            kind="request",
+            event_type="request.failed",
+            status="failed",
+            title="추천 요청 실패: fingerprint 미발견",
+            summary=(
+                f"{req.service_name} 서비스에서 fingerprint {req.fingerprint[:12]}를 "
+                f"찾지 못했습니다."
+            ),
+            agent_name="FastAPI",
+            component="RecommendationAPI",
+            layer="api",
+            evidence_refs=[req.fingerprint],
+        )
         raise HTTPException(
             status_code=404,
             detail=(
@@ -1081,6 +1281,18 @@ def recommend_for_fingerprint(req: FingerprintRecommendationRequest) -> AnalyzeR
                 f"service '{req.service_name}' on {analysis_date.isoformat()}."
             ),
         )
+    record_trace_event(
+        state,
+        kind="observation",
+        event_type="observation.completed",
+        status="completed",
+        title="선택 fingerprint 분석 완료",
+        summary="선택한 fingerprint의 로그 근거와 영향도를 확인했습니다.",
+        agent_name="RecommendationAPI",
+        component="ScenarioAnalysis",
+        layer="data_access",
+        evidence_refs=[req.fingerprint],
+    )
     selected_recommendation = next(
         (
             item
@@ -1098,15 +1310,6 @@ def recommend_for_fingerprint(req: FingerprintRecommendationRequest) -> AnalyzeR
         {"risk_score": 0, "risk_level": "Low", "detected": False},
     )
 
-    state = create_initial_state(
-        goal=f"selected fingerprint recommendation: {req.fingerprint}",
-        scope={
-            "systems": [req.service_name],
-            "time_range": {"from": "", "to": ""},
-            "filters": {"fingerprint": req.fingerprint},
-        },
-        request_id=uuid4().hex,
-    )
     # Mark only the downstream agents requested by cluster selection as executed.
     state["decisions"]["agents_run"] = [
         "KnowledgeBaseRAGAgent",
@@ -1191,11 +1394,28 @@ def recommend_for_fingerprint(req: FingerprintRecommendationRequest) -> AnalyzeR
     ]
     state["evidence"]["summary"] = scenario["summary"]
     state["evidence"]["recommendation"] = selected_recommendation
-    state["rag"]["related_knowledge"] = _related_knowledge_cards_for_recommendation(
+    related_knowledge = _related_knowledge_cards_for_recommendation(
         fingerprint=req.fingerprint,
         service_name=req.service_name,
         selected=selected,
         limit=5,
+    )
+    state["rag"]["related_knowledge"] = related_knowledge
+    record_trace_event(
+        state,
+        kind="retrieval",
+        event_type="retrieval.completed",
+        status="completed",
+        title="Knowledge Card · RAG 조회 완료",
+        summary=(
+            f"선택 fingerprint에 대한 Knowledge Card / 유사 사례 {len(related_knowledge)}건을 "
+            f"조회했습니다."
+        ),
+        agent_name="KnowledgeBaseRAGAgent",
+        component="ChromaStore",
+        layer="retrieval",
+        output_summary={"type": "list", "count": len(related_knowledge)},
+        evidence_refs=[req.fingerprint],
     )
     state["assessment"]["risk_score"] = selected_impact["risk_score"]
     state["assessment"]["confidence"] = (
@@ -1207,7 +1427,94 @@ def recommend_for_fingerprint(req: FingerprintRecommendationRequest) -> AnalyzeR
         f"Rule/knowledge recommendation hint: {selected_recommendation.get('recommendation', '-')}",
     ]
     state = _refresh_patternops_skill_plan(state)
-    state = RecommendationAgent().run(state)
+
+    agent_started_at = perf_counter()
+    agent_span_id = f"{state['request_id']}:agent:RecommendationAgent:1"
+    record_trace_event(
+        state,
+        kind="agent",
+        event_type="agent.started",
+        status="running",
+        title="RecommendationAgent 실행 시작",
+        summary="선택한 fingerprint에 대한 추천 생성과 품질 검증을 시작합니다.",
+        agent_name="RecommendationAgent",
+        component="RecommendationAgent",
+        layer="agent",
+        span_id=agent_span_id,
+        evidence_refs=[req.fingerprint],
+    )
+    try:
+        with reasoning_state(state, agent_name="RecommendationAgent"):
+            state = RecommendationAgent().run(state)
+    except Exception as exc:  # noqa: BLE001
+        record_trace_event(
+            state,
+            kind="agent",
+            event_type="agent.failed",
+            status="failed",
+            title="RecommendationAgent 실행 실패",
+            summary="추천 생성 또는 품질 검증 단계에서 오류가 발생했습니다.",
+            agent_name="RecommendationAgent",
+            component="RecommendationAgent",
+            layer="agent",
+            span_id=agent_span_id,
+            duration_ms=int((perf_counter() - agent_started_at) * 1000),
+            error=redact_error(exc),
+            evidence_refs=[req.fingerprint],
+        )
+        record_trace_event(
+            state,
+            kind="request",
+            event_type="request.failed",
+            status="failed",
+            title="추천 요청 실패",
+            summary="추천 생성 파이프라인이 오류로 종료되었습니다.",
+            agent_name="FastAPI",
+            component="RecommendationAPI",
+            layer="api",
+            evidence_refs=[req.fingerprint],
+        )
+        raise
+    record_trace_event(
+        state,
+        kind="agent",
+        event_type="agent.completed",
+        status="completed",
+        title="RecommendationAgent 실행 완료",
+        summary="추천 생성과 품질 검증을 완료했습니다.",
+        agent_name="RecommendationAgent",
+        component="RecommendationAgent",
+        layer="agent",
+        span_id=agent_span_id,
+        duration_ms=int((perf_counter() - agent_started_at) * 1000),
+        evidence_refs=[req.fingerprint],
+    )
+    record_trace_event(
+        state,
+        kind="request",
+        event_type="request.completed",
+        status="completed",
+        title="추천 요청 완료",
+        summary="선택 fingerprint 추천 생성을 완료했습니다.",
+        agent_name="FastAPI",
+        component="RecommendationAPI",
+        layer="api",
+        duration_ms=int((perf_counter() - request_started_at) * 1000),
+        evidence_refs=[req.fingerprint],
+        metadata={"failures": len(state["decisions"].get("failures", []))},
+    )
+    if req.stream_id:
+        record_trace_event(
+            state,
+            kind="sse",
+            event_type="sse.final_emitted",
+            status="completed",
+            title="추천 최종 결과 전송",
+            summary="추천 최종 결과를 클라이언트로 전송합니다.",
+            agent_name="FastAPI",
+            component="StreamingService",
+            layer="api",
+        )
     return AnalyzeResponse(result=state)
 
 

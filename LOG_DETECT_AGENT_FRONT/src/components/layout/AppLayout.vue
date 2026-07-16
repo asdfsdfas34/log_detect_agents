@@ -27,6 +27,13 @@
             >
               Skill Dashboard
             </RouterLink>
+            <RouterLink
+              to="/agent-observability"
+              class="font-medium text-slate-600 hover:text-blue-600"
+              active-class="text-blue-700"
+            >
+              Agent Observability
+            </RouterLink>
           </nav>
         </div>
         <slot name="header-right" />

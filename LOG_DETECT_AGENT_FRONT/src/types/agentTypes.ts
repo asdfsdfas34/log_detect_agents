@@ -24,6 +24,7 @@ export interface FingerprintRecommendationRequest {
   service_name: string
   fingerprint: string
   analysis_date?: string
+  stream_id?: string
 }
 
 export interface RecommendationSaveRequest {
@@ -222,6 +223,124 @@ export interface AgentReasoningEvent {
   title: string
   detail: string
   metadata: Record<string, unknown>
+}
+
+// --- Agent Process Observability -------------------------------------------
+// AgentTraceEvent is an additive, richer contract than AgentReasoningEvent. It
+// captures the full process (planning, routing, agent lifecycle, skills, tool
+// observations, validation, self-correction, retrieval, persistence) in a
+// redaction-safe form. Backend emits these on the `trace` SSE channel and in
+// evidence.agent_trace_events. AgentReasoningEvent is preserved unchanged for
+// the existing summary activity stream.
+
+export type TraceKind =
+  | 'request'
+  | 'planning'
+  | 'routing'
+  | 'agent'
+  | 'skill'
+  | 'tool_call'
+  | 'observation'
+  | 'validation'
+  | 'retrieval'
+  | 'persistence'
+  | 'llm'
+  | 'self_correction'
+  | 'quality'
+  | 'fallback'
+  | 'sse'
+
+export type TraceStatus =
+  | 'planned'
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'skipped'
+
+export type TraceLayer =
+  | 'client'
+  | 'api'
+  | 'orchestration'
+  | 'agent'
+  | 'skill'
+  | 'reasoning'
+  | 'data_access'
+  | 'retrieval'
+  | 'llm'
+  | 'persistence'
+
+export interface TraceInputSummary {
+  field_names?: string[]
+  field_count?: number
+}
+
+export interface TraceOutputSummary {
+  type?: string
+  count?: number
+  field_count?: number
+  length?: number
+}
+
+export interface TraceError {
+  type: string
+  summary: string
+}
+
+export interface AgentTraceEvent {
+  event_id: string
+  request_id: string
+  trace_id: string
+  span_id: string
+  parent_span_id: string | null
+  sequence: number
+  timestamp: string
+  duration_ms: number | null
+  layer: TraceLayer
+  component: string
+  agent_name: string
+  kind: TraceKind
+  event_type: string
+  status: TraceStatus
+  title: string
+  summary: string
+  input_summary: TraceInputSummary | null
+  output_summary: TraceOutputSummary | null
+  decision_summary: string | null
+  evidence_refs: string[]
+  attempt: number | null
+  max_attempts: number | null
+  error: TraceError | null
+  fallback_used: boolean
+  metadata: Record<string, unknown>
+}
+
+export type ObservabilityRunStatus =
+  | 'running'
+  | 'completed'
+  | 'degraded'
+  | 'failed'
+
+export type ObservabilityConnectionStatus =
+  | 'idle'
+  | 'connected'
+  | 'reconnecting'
+  | 'fallback'
+  | 'completed'
+
+export type ObservabilityOperation = 'analysis' | 'recommendation'
+
+export interface ObservabilityRun {
+  request_id: string
+  stream_id: string
+  service_name: string
+  analysis_date: string
+  operation: ObservabilityOperation
+  fingerprint?: string
+  status: ObservabilityRunStatus
+  connection: ObservabilityConnectionStatus
+  started_at: string
+  ended_at: string | null
+  events: AgentTraceEvent[]
 }
 
 export interface PatternOpsSkill {
@@ -741,6 +860,7 @@ export interface SharedState {
     pattern_ops_skill_executions?: PatternOpsSkillExecution[]
     pattern_ops_validator_results?: PatternOpsValidatorResult[]
     agent_reasoning_events?: AgentReasoningEvent[]
+    agent_trace_events?: AgentTraceEvent[]
     fingerprint_merge_groups?: FingerprintMergeGroup[]
     event_time_windows?: EventTimeWindow[]
     system_state_vectors?: SystemStateVector[]
@@ -808,6 +928,7 @@ export interface SharedState {
       pattern_ops_skill_executions?: PatternOpsSkillExecution[]
       pattern_ops_validator_results?: PatternOpsValidatorResult[]
       agent_reasoning_events?: AgentReasoningEvent[]
+      agent_trace_events?: AgentTraceEvent[]
       pattern_ops_contracts?: PatternOpsContract[]
       pattern_ops_matches?: Array<Record<string, unknown>>
     } | null

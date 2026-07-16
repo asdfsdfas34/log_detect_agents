@@ -10,6 +10,7 @@ from app.mcp import get_mcp_client
 from app.patternops.runner import pattern_skill_runner
 from app.reasoning_events import record_reasoning_event
 from app.state import SharedState
+from app.trace_events import record_trace_event
 
 _REQUIRED_ACTION_KEYS = {"priority", "action", "owner"}
 _MAX_QUALITY_ATTEMPTS = 3
@@ -101,6 +102,24 @@ class RecommendationAgent:
                     title=f"Self-Correction: 추천 재생성 {attempt}/{_MAX_QUALITY_ATTEMPTS}",
                     detail="직전 품질 평가 피드백을 반영해 추천 후보를 보완합니다.",
                     metadata={"attempt": attempt, "max_attempts": _MAX_QUALITY_ATTEMPTS},
+                    mirror_trace=False,
+                )
+                record_trace_event(
+                    state,
+                    kind="self_correction",
+                    event_type="self_correction.started",
+                    status="running",
+                    title=f"Self-Correction 시작: 추천 재생성 {attempt}/{_MAX_QUALITY_ATTEMPTS}",
+                    summary=(
+                        "직전 품질 점수가 기준에 미달해 평가 피드백을 반영한 추천 후보를 "
+                        "재생성합니다."
+                    ),
+                    agent_name=self.name,
+                    component=self.name,
+                    layer="reasoning",
+                    decision_summary=feedback,
+                    attempt=attempt,
+                    max_attempts=_MAX_QUALITY_ATTEMPTS,
                 )
                 try:
                     recommendation = self._generate_candidate_once(
@@ -145,6 +164,10 @@ class RecommendationAgent:
             recommendation["quality_attempts"] = attempt
             recommendation["quality_feedback"] = evaluation["feedback"]
 
+            # Preserve the reasoning event for the existing summary activity
+            # stream, but drive the trace stream with precise semantics: every
+            # evaluation is `quality.evaluated`; a passing regeneration also
+            # emits `self_correction.completed`.
             record_reasoning_event(
                 state,
                 kind="self_correction",
@@ -165,7 +188,58 @@ class RecommendationAgent:
                     "threshold": _MIN_QUALITY_SCORE,
                     "passed": evaluation["passed"],
                 },
+                mirror_trace=False,
             )
+            record_trace_event(
+                state,
+                kind="quality",
+                event_type="quality.evaluated",
+                status="completed",
+                title=(
+                    f"품질 평가: {evaluation['score']}/{100} "
+                    f"({'통과' if evaluation['passed'] else '보완 필요'})"
+                ),
+                summary=(
+                    f"품질 점수 {evaluation['score']}/100, 통과 기준 {_MIN_QUALITY_SCORE}점 "
+                    f"({'통과' if evaluation['passed'] else '미달'})."
+                ),
+                agent_name=self.name,
+                component=self.name,
+                layer="reasoning",
+                decision_summary=None if evaluation["passed"] else evaluation["feedback"],
+                attempt=attempt,
+                max_attempts=_MAX_QUALITY_ATTEMPTS,
+                metadata={
+                    "attempt": attempt,
+                    "max_attempts": _MAX_QUALITY_ATTEMPTS,
+                    "score": evaluation["score"],
+                    "threshold": _MIN_QUALITY_SCORE,
+                    "passed": evaluation["passed"],
+                },
+            )
+            if attempt > 1 and evaluation["passed"]:
+                record_trace_event(
+                    state,
+                    kind="self_correction",
+                    event_type="self_correction.completed",
+                    status="completed",
+                    title=f"Self-Correction 완료: 추천 재생성 {attempt}/{_MAX_QUALITY_ATTEMPTS}",
+                    summary=(
+                        f"재생성한 추천 후보가 품질 기준({_MIN_QUALITY_SCORE}점)을 "
+                        f"{evaluation['score']}점으로 통과했습니다."
+                    ),
+                    agent_name=self.name,
+                    component=self.name,
+                    layer="reasoning",
+                    attempt=attempt,
+                    max_attempts=_MAX_QUALITY_ATTEMPTS,
+                    metadata={
+                        "attempt": attempt,
+                        "max_attempts": _MAX_QUALITY_ATTEMPTS,
+                        "score": evaluation["score"],
+                        "threshold": _MIN_QUALITY_SCORE,
+                    },
+                )
 
             if best is None or evaluation["score"] > int(best["quality_score"] or 0):
                 best = recommendation
@@ -294,6 +368,26 @@ class RecommendationAgent:
                 referenced_knowledge_card_ids,
             )
         )
+        if recommendation.get("source") == "fallback":
+            record_trace_event(
+                state,
+                kind="fallback",
+                event_type="fallback.activated",
+                status="completed",
+                title="Self-Correction: fallback 추천 사용",
+                summary=(
+                    "품질 기준을 통과한 LLM 추천을 생성하지 못해 규칙 기반 fallback "
+                    "추천을 사용합니다."
+                ),
+                agent_name=self.name,
+                component=self.name,
+                layer="reasoning",
+                fallback_used=True,
+                metadata={
+                    "quality_gate_status": recommendation.get("quality_gate_status"),
+                    "quality_attempts": recommendation.get("quality_attempts"),
+                },
+            )
         evidence_bundle["recommendation_source"] = recommendation["source"]
         evidence_bundle["quality_score"] = recommendation.get("quality_score")
         evidence_bundle["quality_gate_status"] = recommendation.get(
