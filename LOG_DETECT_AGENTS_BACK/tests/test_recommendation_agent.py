@@ -175,6 +175,19 @@ def test_recommendation_agent_retries_until_quality_threshold(monkeypatch):
     assert result["final"]["evidence_bundle"]["quality_score"] == 84
     assert result["final"]["evidence_bundle"]["quality_attempts"] == 2
     assert len([call for call in fake.calls if call[0] == "openai.generate_text"]) == 4
+    reasoning_events = result["evidence"]["agent_reasoning_events"]
+    assert any(
+        event["kind"] == "self_correction"
+        and event["status"] == "running"
+        and event["metadata"]["attempt"] == 2
+        for event in reasoning_events
+    )
+    assert any(
+        event["kind"] == "self_correction"
+        and event["status"] == "completed"
+        and event["metadata"]["score"] == 84
+        for event in reasoning_events
+    )
 
 
 def test_recommendation_agent_hard_fail_overrides_high_score(monkeypatch):

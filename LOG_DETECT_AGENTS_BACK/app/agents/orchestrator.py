@@ -1,6 +1,7 @@
 """Orchestrator agent that controls multi-agent workflow execution."""
 
 from app.patternops.skill_graph import plan_skill_graphs
+from app.reasoning_events import record_reasoning_event
 from app.state import SharedState
 
 
@@ -57,6 +58,23 @@ class OrchestratorAgent:
                 f"{agent_name} from skills="
                 f"{', '.join(sorted(selected_skill_ids.intersection(agent_skills))) or 'fallback'}"
             )
+            record_reasoning_event(
+                state,
+                kind="planning",
+                agent=self.name,
+                status="completed",
+                title=f"Planning: 다음 Agent로 {agent_name} 선택",
+                detail=(
+                    f"전체 계획 {len(selected_skill_ids)}개 스킬 중 "
+                    f"{len(selected_skill_ids.intersection(agent_skills))}개 관련 스킬을 실행합니다."
+                ),
+                metadata={
+                    "next_agent": agent_name,
+                    "selected_skill_ids": sorted(
+                        selected_skill_ids.intersection(agent_skills)
+                    ),
+                },
+            )
             return state
 
         for agent_name in self.execution_order:
@@ -67,5 +85,14 @@ class OrchestratorAgent:
         state["decisions"]["agents_run"].append(self.name)
         state["decisions"]["assumptions"].append(
             "SkillOps global planner reached END with no runnable agent skills."
+        )
+        record_reasoning_event(
+            state,
+            kind="planning",
+            agent=self.name,
+            status="completed",
+            title="Planning 완료: 실행 계획 종료",
+            detail=f"계획된 {len(selected_skill_ids)}개 스킬의 실행 가능 Agent 검토를 마쳤습니다.",
+            metadata={"next_agent": "END"},
         )
         return state

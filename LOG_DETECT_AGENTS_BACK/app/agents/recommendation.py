@@ -8,6 +8,7 @@ from typing import Any
 
 from app.mcp import get_mcp_client
 from app.patternops.runner import pattern_skill_runner
+from app.reasoning_events import record_reasoning_event
 from app.state import SharedState
 
 _REQUIRED_ACTION_KEYS = {"priority", "action", "owner"}
@@ -92,6 +93,15 @@ class RecommendationAgent:
 
         for attempt in range(1, _MAX_QUALITY_ATTEMPTS + 1):
             if attempt > 1:
+                record_reasoning_event(
+                    state,
+                    kind="self_correction",
+                    agent=self.name,
+                    status="running",
+                    title=f"Self-Correction: 추천 재생성 {attempt}/{_MAX_QUALITY_ATTEMPTS}",
+                    detail="직전 품질 평가 피드백을 반영해 추천 후보를 보완합니다.",
+                    metadata={"attempt": attempt, "max_attempts": _MAX_QUALITY_ATTEMPTS},
+                )
                 try:
                     recommendation = self._generate_candidate_once(
                         mcp=mcp,
@@ -134,6 +144,28 @@ class RecommendationAgent:
             )
             recommendation["quality_attempts"] = attempt
             recommendation["quality_feedback"] = evaluation["feedback"]
+
+            record_reasoning_event(
+                state,
+                kind="self_correction",
+                agent=self.name,
+                status="completed" if evaluation["passed"] else "planned",
+                title=(
+                    f"Self-Correction 평가: {evaluation['score']}점 "
+                    f"({'통과' if evaluation['passed'] else '보완 필요'})"
+                ),
+                detail=(
+                    f"품질 게이트 시도 {attempt}/{_MAX_QUALITY_ATTEMPTS}; "
+                    f"기준 점수 {_MIN_QUALITY_SCORE}점"
+                ),
+                metadata={
+                    "attempt": attempt,
+                    "max_attempts": _MAX_QUALITY_ATTEMPTS,
+                    "score": evaluation["score"],
+                    "threshold": _MIN_QUALITY_SCORE,
+                    "passed": evaluation["passed"],
+                },
+            )
 
             if best is None or evaluation["score"] > int(best["quality_score"] or 0):
                 best = recommendation

@@ -209,7 +209,19 @@ export interface SkillActivityStreamItem {
   status: string
   action: string
   detail?: string
+  reasoning_kind?: AgentReasoningEvent['kind']
   source: 'local-stage' | 'sse' | 'backend-result' | 'fallback' | 'user-action'
+}
+
+export interface AgentReasoningEvent {
+  event_id: string
+  request_id: string
+  kind: 'planning' | 'tool_call' | 'self_correction'
+  agent_name: string
+  status: 'planned' | 'running' | 'completed' | 'failed'
+  title: string
+  detail: string
+  metadata: Record<string, unknown>
 }
 
 export interface PatternOpsSkill {
@@ -728,6 +740,7 @@ export interface SharedState {
     pattern_ops_skill_plan?: PatternOpsSkillPlan
     pattern_ops_skill_executions?: PatternOpsSkillExecution[]
     pattern_ops_validator_results?: PatternOpsValidatorResult[]
+    agent_reasoning_events?: AgentReasoningEvent[]
     fingerprint_merge_groups?: FingerprintMergeGroup[]
     event_time_windows?: EventTimeWindow[]
     system_state_vectors?: SystemStateVector[]
@@ -794,6 +807,7 @@ export interface SharedState {
       pattern_ops_skill_plan?: PatternOpsSkillPlan
       pattern_ops_skill_executions?: PatternOpsSkillExecution[]
       pattern_ops_validator_results?: PatternOpsValidatorResult[]
+      agent_reasoning_events?: AgentReasoningEvent[]
       pattern_ops_contracts?: PatternOpsContract[]
       pattern_ops_matches?: Array<Record<string, unknown>>
     } | null

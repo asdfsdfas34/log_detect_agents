@@ -11,6 +11,7 @@ from app.patternops.skill_graph import (
     record_skill_executions,
 )
 from app.patternops.validators import validate_skill_result
+from app.reasoning_events import reasoning_state
 from app.state import SharedState
 from app.streaming import emit_event
 
@@ -60,7 +61,8 @@ class PatternSkillRunner:
                         scope=scope,
                         status="running",
                     )
-                    result_state = operation(state)
+                    with reasoning_state(state, agent_name=agent_name):
+                        result_state = operation(state)
                     status = "success"
                     validator_results = validate_skill_result(
                         skill_id=skill_id,

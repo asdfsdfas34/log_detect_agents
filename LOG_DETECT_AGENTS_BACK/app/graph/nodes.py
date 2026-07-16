@@ -8,6 +8,7 @@ from app.agents.log_analysis import LogAnalysisAgent
 from app.agents.log_collector import LogCollectorAgent
 from app.agents.orchestrator import OrchestratorAgent
 from app.langsmith_tracing import elapsed_ms, record_agent_event, start_timer
+from app.reasoning_events import reasoning_state
 from app.state import SharedState
 from app.streaming import emit_event
 
@@ -31,7 +32,8 @@ def _run_with_retry(state: SharedState, node_name: str, fn: NodeCallable) -> Sha
         record_agent_event(request_id=request_id, agent=node_name, status="started")
         emit_event("stage", node_name)
         try:
-            output = fn(state)
+            with reasoning_state(state, agent_name=node_name):
+                output = fn(state)
             if node_name != "OrchestratorAgent":
                 output["orchestration"]["completed_agents"].append(node_name)
             record_agent_event(

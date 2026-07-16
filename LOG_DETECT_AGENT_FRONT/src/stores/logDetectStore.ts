@@ -3,6 +3,7 @@ import { defineStore } from 'pinia'
 import { agentApi } from '@/api/agentApi'
 import { connectExecutionStream } from '@/services/streamingService'
 import type {
+  AgentReasoningEvent,
   AgentStepStatus,
   AnalyzeRequest,
   Cluster,
@@ -439,6 +440,56 @@ export const useLogDetectStore = defineStore('logDetect', () => {
     })
   }
 
+  function appendReasoningActivity(
+    event: AgentReasoningEvent,
+    source: SkillActivityStreamItem['source']
+  ) {
+    if (streamedSkillExecutionIds.has(event.event_id)) return
+    appendSkillActivity({
+      execution_id: event.event_id,
+      skill: event.title,
+      agent: event.agent_name,
+      status: event.status,
+      action: event.detail,
+      detail: reasoningMetadataSummary(event),
+      reasoning_kind: event.kind,
+      source
+    })
+  }
+
+  function appendReasoningActivities(result: SharedState) {
+    const events =
+      result.evidence.agent_reasoning_events ??
+      result.final.evidence_bundle?.agent_reasoning_events ??
+      []
+    events.forEach((event) => appendReasoningActivity(event, 'backend-result'))
+  }
+
+  function reasoningMetadataSummary(
+    event: AgentReasoningEvent
+  ): string | undefined {
+    if (event.kind === 'planning') {
+      const skills = event.metadata.selected_skill_ids
+      if (Array.isArray(skills) && skills.length) {
+        return `선택 스킬: ${skills.join(', ')}`
+      }
+    }
+    if (
+      event.kind === 'tool_call' &&
+      typeof event.metadata.tool_name === 'string'
+    ) {
+      return `도구: ${event.metadata.tool_name}`
+    }
+    if (event.kind === 'self_correction') {
+      const score = event.metadata.score
+      const threshold = event.metadata.threshold
+      if (typeof score === 'number' && typeof threshold === 'number') {
+        return `품질 점수: ${score}/100 · 통과 기준: ${threshold}`
+      }
+    }
+    return undefined
+  }
+
   function markTimelineFromState(result: SharedState) {
     const run = new Set(result.decisions.agents_run)
     const skipped = new Set(result.decisions.skipped_agents)
@@ -794,6 +845,9 @@ export const useLogDetectStore = defineStore('logDetect', () => {
       onSkill: (execution) => {
         appendStreamedSkillExecution(execution)
       },
+      onReasoning: (event) => {
+        appendReasoningActivity(event, 'sse')
+      },
       onPartial: () => {
         appendSkillActivity({
           skill: currentStage.value,
@@ -808,6 +862,7 @@ export const useLogDetectStore = defineStore('logDetect', () => {
         state.value = result
         markTimelineFromState(result)
         appendPatternOpsExecutionActivities(result)
+        appendReasoningActivities(result)
       },
       onError: (message) => {
         appendSkillActivity({
@@ -838,6 +893,7 @@ export const useLogDetectStore = defineStore('logDetect', () => {
         data.result.evidence.duplicate_pattern_candidates ?? []
       markTimelineFromState(data.result)
       appendPatternOpsExecutionActivities(data.result)
+      appendReasoningActivities(data.result)
       executionStatus.value =
         data.result.decisions.failures.length > 0 ? 'failed' : 'completed'
       lastExecutionAt.value = new Date().toISOString()
@@ -914,6 +970,7 @@ export const useLogDetectStore = defineStore('logDetect', () => {
         }
         markTimelineFromState(data.result)
         appendPatternOpsExecutionActivities(data.result)
+        appendReasoningActivities(data.result)
         executionStatus.value =
           data.result.decisions.failures.length > 0 ? 'failed' : 'completed'
         setCurrentStage('Completed')

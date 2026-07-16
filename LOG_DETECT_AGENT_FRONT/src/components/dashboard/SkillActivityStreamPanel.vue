@@ -2,7 +2,7 @@
   <section class="rounded-lg border border-slate-200 bg-white p-3 shadow-sm">
     <div class="mb-3">
       <p class="text-xs font-semibold uppercase tracking-wide text-slate-500">
-        스킬 활동 스트림
+        Agent 추론 · 스킬 활동 스트림
       </p>
       <div class="mt-2 rounded border border-blue-100 bg-blue-50 p-2">
         <div class="flex items-center justify-between gap-2">
@@ -39,6 +39,13 @@
             <p class="truncate font-semibold text-slate-700">
               {{ item.skill }}
             </p>
+            <span
+              v-if="item.reasoning_kind"
+              class="mt-1 inline-flex rounded px-1.5 py-0.5 text-[9px] font-semibold uppercase"
+              :class="reasoningClass(item.reasoning_kind)"
+            >
+              {{ reasoningLabel(item.reasoning_kind) }}
+            </span>
             <p v-if="item.agent" class="mt-0.5 text-[11px] text-slate-400">
               {{ agentLabel(item.agent) }}
             </p>
@@ -133,6 +140,15 @@ const statusLabels: Record<string, string> = {
   skipped: '건너뜀'
 }
 
+const reasoningLabels: Record<
+  NonNullable<SkillActivityStreamItem['reasoning_kind']>,
+  string
+> = {
+  planning: 'Planning',
+  tool_call: 'Tool Call',
+  self_correction: 'Self-Correction'
+}
+
 const sourceLabels: Record<SkillActivityStreamItem['source'], string> = {
   'local-stage': '로컬 단계',
   sse: '실시간 이벤트',
@@ -185,6 +201,20 @@ function agentLabel(value: string): string {
 
 function statusLabel(value: string): string {
   return statusLabels[value] ?? value
+}
+
+function reasoningLabel(
+  value: NonNullable<SkillActivityStreamItem['reasoning_kind']>
+): string {
+  return reasoningLabels[value]
+}
+
+function reasoningClass(
+  value: NonNullable<SkillActivityStreamItem['reasoning_kind']>
+): string {
+  if (value === 'planning') return 'bg-violet-100 text-violet-700'
+  if (value === 'tool_call') return 'bg-cyan-100 text-cyan-700'
+  return 'bg-fuchsia-100 text-fuchsia-700'
 }
 
 function sourceLabel(value: SkillActivityStreamItem['source']): string {

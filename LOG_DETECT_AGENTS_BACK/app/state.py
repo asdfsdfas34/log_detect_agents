@@ -24,6 +24,7 @@ class Evidence(TypedDict):
     pattern_ops_skill_plan: dict
     pattern_ops_skill_executions: list[dict]
     pattern_ops_validator_results: list[dict]
+    agent_reasoning_events: list[dict]
     fingerprint_merge_groups: list[dict]
     event_time_windows: list[dict]
     system_state_vectors: list[dict]
@@ -118,6 +119,7 @@ def create_initial_state(
             "pattern_ops_skill_plan": {},
             "pattern_ops_skill_executions": [],
             "pattern_ops_validator_results": [],
+            "agent_reasoning_events": [],
             "fingerprint_merge_groups": [],
             "event_time_windows": [],
             "system_state_vectors": [],

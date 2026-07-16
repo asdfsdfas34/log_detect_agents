@@ -1,4 +1,5 @@
 import type {
+  AgentReasoningEvent,
   AnalyzeResponse,
   PatternOpsSkillExecution,
   SharedState
@@ -7,6 +8,7 @@ import type {
 interface StreamHandlers {
   onStage: (stage: string) => void
   onSkill: (execution: PatternOpsSkillExecution & { skill_name?: string }) => void
+  onReasoning: (event: AgentReasoningEvent) => void
   onPartial: (statePatch: Partial<SharedState>) => void
   onComplete: (result: SharedState) => void
   onError: (message: string) => void
@@ -34,6 +36,14 @@ export function connectExecutionStream(
           skill_name?: string
         }
       )
+    } catch (error) {
+      handlers.onError((error as Error).message)
+    }
+  })
+
+  source.addEventListener('reasoning', (event: MessageEvent<string>) => {
+    try {
+      handlers.onReasoning(JSON.parse(event.data) as AgentReasoningEvent)
     } catch (error) {
       handlers.onError((error as Error).message)
     }

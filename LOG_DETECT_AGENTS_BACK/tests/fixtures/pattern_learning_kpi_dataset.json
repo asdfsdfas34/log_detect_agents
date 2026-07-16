@@ -1,0 +1,39 @@
+{
+  "target_count_per_kpi": 50,
+  "normalization_variants": [
+    "OrderSync region ALPHA request=req-a001 retry=1 status=timeout",
+    "OrderSync region BRAVO request=req-b002 retry=2 status=timeout",
+    "OrderSync region CHARLIE request=req-c003 retry=3 status=timeout",
+    "OrderSync region DELTA request=req-d004 retry=4 status=timeout",
+    "OrderSync region ECHO request=req-e005 retry=5 status=timeout",
+    "OrderSync region FOXTROT request=req-f006 retry=6 status=timeout",
+    "OrderSync region GOLF request=req-a007 retry=7 status=timeout",
+    "OrderSync region HOTEL request=req-b008 retry=8 status=timeout",
+    "OrderSync region INDIA request=req-c009 retry=9 status=timeout",
+    "OrderSync region JULIET request=req-d010 retry=10 status=timeout"
+  ],
+  "known_pattern_unseen_variants": [
+    "OrderSync region KILO request=req-e011 retry=11 status=timeout",
+    "OrderSync region LIMA request=req-f012 retry=12 status=timeout",
+    "OrderSync region MIKE request=req-a013 retry=13 status=timeout",
+    "OrderSync region NOVEMBER request=req-b014 retry=14 status=timeout",
+    "OrderSync region OSCAR request=req-c015 retry=15 status=timeout",
+    "OrderSync region PAPA request=req-d016 retry=16 status=timeout",
+    "OrderSync region QUEBEC request=req-e017 retry=17 status=timeout",
+    "OrderSync region ROMEO request=req-f018 retry=18 status=timeout",
+    "OrderSync region SIERRA request=req-a019 retry=19 status=timeout",
+    "OrderSync region TANGO request=req-b020 retry=20 status=timeout"
+  ],
+  "incremental_logs": [
+    {"message": "Worker heartbeat sequence=101 node=node-a", "created_at": "2026-07-15T10:00:00"},
+    {"message": "Worker heartbeat sequence=102 node=node-b", "created_at": "2026-07-15T10:01:00"},
+    {"message": "Worker heartbeat sequence=103 node=node-c", "created_at": "2026-07-15T10:02:00"},
+    {"message": "Worker heartbeat sequence=104 node=node-d", "created_at": "2026-07-15T10:03:00"},
+    {"message": "Worker heartbeat sequence=105 node=node-e", "created_at": "2026-07-15T10:04:00"},
+    {"message": "Worker heartbeat sequence=106 node=node-f", "created_at": "2026-07-15T10:05:00"},
+    {"message": "Worker heartbeat sequence=107 node=node-g", "created_at": "2026-07-15T10:06:00"},
+    {"message": "Worker heartbeat sequence=108 node=node-h", "created_at": "2026-07-15T10:07:00"},
+    {"message": "Worker heartbeat sequence=109 node=node-i", "created_at": "2026-07-15T10:08:00"},
+    {"message": "Worker heartbeat sequence=110 node=node-j", "created_at": "2026-07-15T10:09:00"}
+  ]
+}

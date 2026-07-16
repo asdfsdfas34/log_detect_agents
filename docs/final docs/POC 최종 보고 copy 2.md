@@ -12,8 +12,11 @@ LangGraph의 **Planning → Execution → Verification → Memory Update** 흐�
 
 ## 핵심 알고리즘 / 아키텍처 결정
 
-정규식 치환 → 해시 Fingerprint → Drain template → 구조·token·stack trace·embedding 가중 유사도 → connected component/HDBSCAN 순으로 후보를 좁혀, 의미 유사도만 높은 오탐 병합을 차단했다. 관련 근거는 [Drain (He et al., 2017)](https://doi.org/10.1109/ICWS.2017.13), [HDBSCAN (McInnes et al., 2017)](https://doi.org/10.21105/joss.00205)이다.  
-승인 결과는 SQLite의 rule/alias/Known Pattern 및 PatternOps contract로 버전 가능한 지식이 되고, Knowledge Card는 ChromaDB RAG로 권고에 재사용한다([Lewis et al., 2020](https://papers.nips.cc/paper/2020/hash/6b493230205f780e1bc26945df7481e5-Abstract.html)).
+정규식 치환 → 해시 Fingerprint → Drain template → 구조·token·stack trace·embedding 가중 유사도 → connected component/HDBSCAN 순으로 후보를 좁혀, 의미 유사도만 높은 오탐 병합을 차단했다. 
+승인 결과는 SQLite의 rule/alias/Known Pattern 및 PatternOps contract로 버전 가능한 지식이 되고, Knowledge Card는 ChromaDB RAG로 권고에 재사용한다
+관련 근거는 
+[Drain (He et al., 2017)](https://doi.org/10.1109/ICWS.2017.13), [HDBSCAN (McInnes et al., 2017)](https://doi.org/10.21105/joss.00205)이다. 
+([Lewis et al., 2020](https://papers.nips.cc/paper/2020/hash/6b493230205f780e1bc26945df7481e5-Abstract.html)).
 
 ## 왜 이 접근이 필요했는가?
 
