@@ -67,27 +67,23 @@ request ID·경로·숫자 같은 변동값 때문에 동일 장애가 여러 Fi
 정규화를 일회성 전처리가 아닌 **검증·축적·재사용 가능한 운영 학습 레이어**로 전환해야 했다.
 
 ### 엔지니어링 접근 방법
-
-결정적 정규화 후 구조·의미 근거로 중복 후보를 생성하고, 운영자 승인 시에만 normalization rule·canonical alias·Known Pattern을 영속화했다.  
-이를 다음 분석에 환류하는 **후보 생성 → 검증 → 지식화 → 재사용**의 Human-in-the-loop 폐루프를 설계했다.
+정규화와 Fingerprint를 1차 기준으로 두고, Drain3·hybrid similarity·HDBSCAN으로 중복 후보를 만든 뒤 운영자 승인 시 normalization rule, canonical Fingerprint alias, Known Pattern을 함께 저장하도록 설계하여
+“Human-in-the-loop 기반 지속 학습형 운영 메모리”를 사용한다.
 
 ### 핵심 알고리즘
+정규화 후 Drain3·hybrid similarity·HDBSCAN으로 중복 후보를 만들고, 승인된 rule·alias·Known Pattern을 저장했다. 
 
-정규화·Fingerprint → token/구조/stack trace/embedding 가중 유사도 → connected component/HDBSCAN 군집화를 적용하고, embedding 실패 시 Drain3 template으로 전환한다.
-
-### 아키텍처 결정
-
-LangGraph `SharedState`가 Agent 흐름을 조율하고, 승인 지식은 SQLite·PatternOps에 저장하며 ChromaDB RAG와 MCP-style registry로 검색·도구 경계를 분리한다.
+LangGraph와 PatternOps가 이를 다음 분석에 재적용하는 “Human-in-the-loop 운영 메모리”를 구성했다.은 SQLite·PatternOps에 저장하며 ChromaDB RAG와 MCP-style registry로 검색·도구 경계를 분리한다.
 
 ### 왜 이 접근이 필요한가?
-
-정규식만으로는 새 변형을 놓치고 embedding만으로는 구조가 다른 로그를 잘못 합칠 수 있어, 결정적 기준·다중 근거·운영자 승인을 결합했다.
+정규식만으로는 새 변형을 놓치고, embedding만으로는 구조가 다른 로그를 잘못 합칠 수 있다. 
+결정적 규칙·다중 근거·운영자 승인을 결합해 재현성과 오탐 통제를 확보했다.
 
 ### 결과 및 성과
 
 | 성과지표 | 평가 조건 | 결과 |
 |---|---|---:|
-| **Fingerprint 수렴률** | 동일 패턴 변형 50건 | **50→1, 98%** |
+| **Fingerprint 수렴률** | 복 후보 Fingerprint 수렴 정확도 |동일 패턴 변형 50건 | **50→1, 98%** |
 | **Known Pattern 재사용률** | 승인에 미사용한 신규 변형 50건 | **50/50, 100%** |
 | **증분 처리 절감률** | 신규 로그 50건 동일 조건 재분석 | **50→0, 100%** |
 

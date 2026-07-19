@@ -60,6 +60,23 @@ def _incremental_logs(dataset: dict[str, Any]) -> list[dict[str, str]]:
     return logs
 
 
+def _new_anomaly_logs(dataset: dict[str, Any]) -> list[dict[str, str]]:
+    logs = list(dataset["new_anomaly_logs"])
+    target_count = int(dataset["target_count_per_kpi"])
+    for index in range(len(logs), target_count):
+        suffix = _alpha_suffix(index).lower()
+        logs.append(
+            {
+                "message": (
+                    f"Novel gateway failure signature=novel-{suffix} "
+                    f"code=E{7001 + index} shard=shard-{suffix}"
+                ),
+                "created_at": f"2026-07-15T12:{index:02d}:00",
+            }
+        )
+    return logs
+
+
 def _prepare_database(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     db_path = tmp_path / "logs.db"
     monkeypatch.setenv("SQLITE_PATH", str(db_path))
@@ -115,7 +132,7 @@ def test_fingerprint_convergence_uses_fifty_labeled_variants(
     assert convergence_rate >= 0.9
 
 
-def test_known_pattern_reuse_uses_fifty_unseen_variants(
+def test_known_pattern_detection_rate_uses_fifty_unseen_variants(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     db_path = _prepare_database(tmp_path, monkeypatch)
@@ -178,12 +195,50 @@ def test_known_pattern_reuse_uses_fifty_unseen_variants(
         include_time_windows=False,
     )
     fingerprint = result["fingerprints"][0]
-    reuse_rate = fingerprint["occurrence_count"] / len(messages)
+    detection_rate = fingerprint["occurrence_count"] / len(messages)
+    target_rate = float(dataset["kpi_targets"]["known_pattern_detection_rate"])
 
     assert result["summary"]["total_fingerprints"] == 1
     assert fingerprint["fingerprint"] == canonical_fingerprint
     assert fingerprint["pattern_status"] == "known_exact"
-    assert reuse_rate >= 0.9
+    assert detection_rate >= target_rate
+
+
+def test_new_anomaly_identification_rate_uses_fifty_labeled_logs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = _prepare_database(tmp_path, monkeypatch)
+    _disable_external_similarity(monkeypatch)
+    dataset = _load_dataset()
+    logs = _new_anomaly_logs(dataset)
+    assert len(logs) == 50
+
+    with sqlite3.connect(db_path) as conn:
+        conn.executemany(
+            """
+            INSERT INTO service_logs(
+                service_name, level, message, stack_trace, created_at
+            ) VALUES (?, 'ERROR', ?, '', ?)
+            """,
+            [(SERVICE_NAME, item["message"], item["created_at"]) for item in logs],
+        )
+        conn.commit()
+
+    result = run_detection_pipeline(
+        SERVICE_NAME,
+        analysis_date="2026-07-15",
+        include_time_windows=False,
+    )
+    identified_logs = sum(
+        int(item["occurrence_count"])
+        for item in result["fingerprints"]
+        if item["pattern_status"] == "new_pattern"
+    )
+    identification_rate = identified_logs / len(logs)
+    target_rate = float(dataset["kpi_targets"]["new_anomaly_identification_rate"])
+
+    assert result["summary"]["total_logs"] == len(logs)
+    assert identification_rate >= target_rate
 
 
 def test_incremental_processing_uses_fifty_logs(

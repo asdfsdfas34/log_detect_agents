@@ -33,6 +33,8 @@
 | Blocking | 검증 완료 | Accepted Normal 억제/노출/breach/revoke | anomaly fingerprint를 정상 기준선으로 승인한 뒤 재분석, 허용 count 초과, revoke 실행 | 목록에는 계속 보이고, 기준 이내에서는 anomaly 제외, 초과 시 breach, revoke 후 기존 판정 복귀 | `accepted_normal_count=1`, 초과 시 `accepted_normal_breach_count=1`, revoke 후 count 0 | 통과 |
 | Core | 검증 완료 | embedding batch 및 기존 ID skip | 여러 pattern/query와 이미 저장된 v2 document ID 포함 | embedding 호출을 batch화하고 기존 ID는 저장 대상에서 제외 | batch query는 embedding client 1회 호출, 저장 테스트에서 `v2_skipped=1` 확인 | 통과 |
 | Core | 검증 완료 | pipeline cache/incremental 처리 | 동일 서비스/조건으로 pipeline 2회 실행 | 첫 실행만 신규 로그 처리, 재실행은 신규 처리 0건 | `processed_new_logs`가 1에서 0으로 감소 | 통과 |
+| Core | 검증 완료 | Known Pattern 탐지율 | 정답 Known Pattern으로 라벨링한 미관측 변형 로그 50건 | 올바르게 탐지한 로그 비율 80% 이상 | 50건 중 50건을 `known_exact`로 탐지해 탐지율 100% | 통과 |
+| Core | 검증 완료 | 신규 이상 징후 식별률 | 기존 Known Pattern과 중복되지 않는 신규 이상 징후 라벨 로그 50건 | 신규 이상 징후로 올바르게 식별한 로그 비율 80% 이상 | 50건 중 50건을 `new_pattern`으로 식별해 식별률 100% | 통과 |
 | Core | 검증 완료 | Time-window 선택 실행 | `include_time_windows=false`로 분석 실행 | time-window/state vector 테이블을 생성하지 않고 빈 결과 반환 | `event_time_windows=[]`, `system_state_vectors=[]`, DB count 0 | 통과 |
 | Core | 검증 완료 | Drain3 batch template mining | 로그 메시지 3건을 template mining 대상으로 입력 | row별 miner 생성이 아니라 batch 1회 처리 | batch 호출 1회, batch 내부 메시지 3건 확인 | 통과 |
 | Supporting | 부분 적용 | `service_logs_v2` event ontology | redis timeout raw log 1건을 v2 event로 변환 | template, canonical event, dependency, entity, parameter 추출 | `dependency_timeout`, `redis_timeout`, `duration_ms=5000` 추출 확인. 단, 주 pipeline 연계는 후속 범위 | 통과 |
@@ -52,6 +54,15 @@
 | Drain3 batch | 로그 3건을 miner batch 1회로 처리 |
 | 대시보드 반환 제한 | time-window 24건, trajectory 12건, trajectory cluster 8건, nearest trajectory 3건으로 반환 상한 설정 |
 
+### 0.3.1 Core 탐지 품질 정량 측정 지표
+
+| 중요도 | 평가 케이스 | 측정 지표 및 산식 | 목표 기준 | 테스트 데이터 | 측정 결과 |
+| --- | --- | --- | --- | --- | --- |
+| Core | Known Pattern 탐지 | **Known Pattern 탐지율** = 정답 Known Pattern을 올바르게 탐지한 로그 수 ÷ Ground Truth Known Pattern 로그 수 × 100 | **80% 이상** | 라벨이 확정된 미관측 변형 50건 | 50 ÷ 50 × 100 = **100%**, 통과 |
+| Core | 신규 이상 징후 식별 | **신규 이상 징후 식별률** = 신규 이상 징후로 올바르게 식별한 로그 수 ÷ Ground Truth 신규 이상 징후 로그 수 × 100 | **80% 이상** | 기존 Known Pattern과 중복되지 않는 신규 이상 징후 라벨 50건 | 50 ÷ 50 × 100 = **100%**, 통과 |
+
+두 지표는 `tests/fixtures/pattern_learning_kpi_dataset.json`의 정답 라벨을 기준으로 산출하고 `tests/test_pattern_learning_kpis.py`에서 80% 기준을 자동 검증한다. 위 결과는 격리된 PoC fixture 측정치이며, 운영 일반화 성능은 별도 독립 데이터셋으로 재검증해야 한다.
+
 ### 0.4 PoC 범위와 확장 범위
 
 | 항목 | 중요도 | 적용 상태 | 범위 판단 |
@@ -61,6 +72,8 @@
 | Accepted Normal과 Exception 분리 | Blocking | 검증 완료 | 운영 피드백 반영 범위 |
 | batch embedding/query, 기존 ID skip | Core | 검증 완료 | 비용/성능 고도화 범위 |
 | pipeline cache와 incremental 처리 | Core | 검증 완료 | 반복 분석 성능 고도화 범위 |
+| Known Pattern 탐지율 80% 이상 | Core | 검증 완료 | 라벨 50건 기반 탐지율 100%로 기준 충족 |
+| 신규 이상 징후 식별률 80% 이상 | Core | 검증 완료 | 라벨 50건 기반 식별률 100%로 기준 충족 |
 | SSE 실행 상태 표시 | Supporting | 부분 적용 | 화면 관측성 개선 범위. 브라우저 E2E 자동 검증은 후속 보강 필요 |
 | pattern/semantic/trajectory evidence 분리 | Supporting | 부분 적용 | 분석 evidence 구조 확장. 모델 예측 정확도 검증은 아님 |
 | `service_logs_v2` event ontology | Supporting | 부분 적용 | 변환 함수와 테스트는 있으나 주 pipeline 입력 전환은 후속 범위 |

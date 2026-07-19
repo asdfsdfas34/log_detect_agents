@@ -1,5 +1,9 @@
 {
   "target_count_per_kpi": 50,
+  "kpi_targets": {
+    "known_pattern_detection_rate": 0.8,
+    "new_anomaly_identification_rate": 0.8
+  },
   "normalization_variants": [
     "OrderSync region ALPHA request=req-a001 retry=1 status=timeout",
     "OrderSync region BRAVO request=req-b002 retry=2 status=timeout",
@@ -23,6 +27,18 @@
     "OrderSync region ROMEO request=req-f018 retry=18 status=timeout",
     "OrderSync region SIERRA request=req-a019 retry=19 status=timeout",
     "OrderSync region TANGO request=req-b020 retry=20 status=timeout"
+  ],
+  "new_anomaly_logs": [
+    {"message": "Novel gateway failure signature=novel-a code=E7001 shard=alpha", "created_at": "2026-07-15T12:00:00"},
+    {"message": "Novel gateway failure signature=novel-b code=E7002 shard=bravo", "created_at": "2026-07-15T12:01:00"},
+    {"message": "Novel gateway failure signature=novel-c code=E7003 shard=charlie", "created_at": "2026-07-15T12:02:00"},
+    {"message": "Novel gateway failure signature=novel-d code=E7004 shard=delta", "created_at": "2026-07-15T12:03:00"},
+    {"message": "Novel gateway failure signature=novel-e code=E7005 shard=echo", "created_at": "2026-07-15T12:04:00"},
+    {"message": "Novel gateway failure signature=novel-f code=E7006 shard=foxtrot", "created_at": "2026-07-15T12:05:00"},
+    {"message": "Novel gateway failure signature=novel-g code=E7007 shard=golf", "created_at": "2026-07-15T12:06:00"},
+    {"message": "Novel gateway failure signature=novel-h code=E7008 shard=hotel", "created_at": "2026-07-15T12:07:00"},
+    {"message": "Novel gateway failure signature=novel-i code=E7009 shard=india", "created_at": "2026-07-15T12:08:00"},
+    {"message": "Novel gateway failure signature=novel-j code=E7010 shard=juliet", "created_at": "2026-07-15T12:09:00"}
   ],
   "incremental_logs": [
     {"message": "Worker heartbeat sequence=101 node=node-a", "created_at": "2026-07-15T10:00:00"},
