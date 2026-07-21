@@ -11,6 +11,7 @@ import type {
   DuplicatePatternCandidate,
   ExceptionRegistryItem,
   ExecutionStatus,
+  FingerprintManualMergeResponse,
   KnowledgeCardItem,
   PatternClusterPartialRefreshResponse,
   PatternOpsSkill,
@@ -108,6 +109,8 @@ export const useLogDetectStore = defineStore('logDetect', () => {
   const recommendationGeneratingFingerprint = ref<string | null>(null)
   const backendActionCount = ref(0)
   const backendActionLabel = ref('')
+  const selectedServiceName = ref('')
+  const selectedAnalysisDate = ref(new Date().toISOString().slice(0, 10))
   const error = ref<string | null>(null)
   const serviceOptions = ref<string[]>([])
   const state = ref<SharedState | null>(null)
@@ -770,15 +773,17 @@ export const useLogDetectStore = defineStore('logDetect', () => {
 
   async function manualMergeFingerprints(payload: {
     service_name: string
+    analysis_date?: string
     fingerprints: string[]
     cause: string
     recommendation: string
     confidence?: string
-  }) {
+  }): Promise<FingerprintManualMergeResponse | null> {
     return withBackendAction('Fingerprint 병합', async () => {
       try {
         const { data } = await agentApi.manualMergeFingerprints({
           service_name: payload.service_name,
+          analysis_date: payload.analysis_date,
           fingerprints: payload.fingerprints,
           cause: payload.cause,
           recommendation: payload.recommendation,
@@ -787,17 +792,21 @@ export const useLogDetectStore = defineStore('logDetect', () => {
         applyPatternClusterPartialRefresh(data.partial_refresh)
         const canonical =
           data.canonical_fingerprint ?? data.merge?.canonical_fingerprint
-        addToast(
-          'info',
-          canonical
-            ? `선택 FP 병합 및 Known 등록 완료: ${canonical}`
-            : '선택 FP 병합 및 Known 등록 완료'
-        )
-        return true
+        if (data.status !== 'merged' || !canonical) {
+          const reason = data.merge?.reason ?? '생성된 fingerprint를 확인할 수 없습니다.'
+          error.value = reason
+          addToast('error', `선택 FP 병합 실패: ${reason}`)
+          return null
+        }
+        addToast('info', `선택 FP 병합 및 Known 등록 완료: ${canonical}`)
+        return {
+          ...data,
+          canonical_fingerprint: canonical
+        }
       } catch (caught) {
         error.value = (caught as Error).message
         addToast('error', `선택 FP 병합 실패: ${error.value}`)
-        return false
+        return null
       }
     })
   }
@@ -816,6 +825,8 @@ export const useLogDetectStore = defineStore('logDetect', () => {
   }
 
   async function runAnalysis(serviceName: string, analysisDate?: string) {
+    selectedServiceName.value = serviceName
+    if (analysisDate) selectedAnalysisDate.value = analysisDate
     const streamId = createStreamId()
     const request = buildDefaultRequest(serviceName, analysisDate, streamId)
     const observability = useObservabilityStore()
@@ -1324,6 +1335,8 @@ export const useLogDetectStore = defineStore('logDetect', () => {
     recommendationGeneratingFingerprint,
     backendActionPending,
     backendActionLabel,
+    selectedServiceName,
+    selectedAnalysisDate,
     error,
     state,
     activeTrajectoryTab,

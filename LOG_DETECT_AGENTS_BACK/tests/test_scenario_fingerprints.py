@@ -15,6 +15,7 @@ from app.db.scenario_store import (
     fetch_anomaly_daily_counts,
     fetch_duplicate_pattern_candidates,
     fetch_exception_registry,
+    fetch_fingerprint_counts_for_analysis_date,
     fetch_knowledge_cards,
     fetch_semantic_log_clusters,
     fingerprint_id,
@@ -48,6 +49,46 @@ def test_fingerprint_normalizes_json_payload_values() -> None:
     assert fingerprint_id("devops-service", "INFO", first, "") == fingerprint_id(
         "devops-service", "INFO", second, ""
     )
+
+
+def test_fingerprint_counts_for_analysis_date_resolve_canonical_alias(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db_path = tmp_path / "logs.db"
+    monkeypatch.setenv("SQLITE_PATH", str(db_path))
+    clear_normalization_rule_cache()
+    message = "Worker failed for request 123"
+    raw_fingerprint = fingerprint_id("test-service", "ERROR", message, "")
+    canonical_fingerprint = "FP-CANON1"
+    with sqlite3.connect(db_path) as conn:
+        ensure_schema(conn)
+        conn.executemany(
+            """
+            INSERT INTO service_logs(service_name, level, message, stack_trace, created_at)
+            VALUES ('test-service', 'ERROR', ?, '', ?)
+            """,
+            [
+                (message, "2026-07-19T10:00:00"),
+                (message, "2026-07-19T11:00:00"),
+                (message, "2026-07-20T10:00:00"),
+            ],
+        )
+        conn.execute(
+            """
+            INSERT INTO fingerprint_aliases(old_fingerprint, canonical_fingerprint)
+            VALUES (?, ?)
+            """,
+            (raw_fingerprint, canonical_fingerprint),
+        )
+        conn.commit()
+
+    counts = fetch_fingerprint_counts_for_analysis_date(
+        service_name="test-service",
+        fingerprints=[canonical_fingerprint, "FP-MISSING"],
+        analysis_date="2026-07-19",
+    )
+
+    assert counts == {canonical_fingerprint: 2, "FP-MISSING": 0}
 
 
 def test_build_service_log_v2_event_extracts_dependency_timeout() -> None:

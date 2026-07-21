@@ -109,14 +109,14 @@ def _post(monkeypatch, responses: list[str], stream_id: str | None = None) -> di
 
 
 def test_recommendation_response_includes_trace_events(stub_pipeline, monkeypatch) -> None:
-    result = _post(monkeypatch, [_recommendation(), _evaluation(86, True)])
+    result = _post(monkeypatch, [_recommendation(), _evaluation(92, True)])
     events = result["evidence"]["agent_trace_events"]
     assert events, "recommendation result must carry agent_trace_events"
     assert all(event["request_id"] == result["request_id"] for event in events)
 
 
 def test_recommendation_lifecycle_order(stub_pipeline, monkeypatch) -> None:
-    events = _post(monkeypatch, [_recommendation(), _evaluation(86, True)])[
+    events = _post(monkeypatch, [_recommendation(), _evaluation(92, True)])[
         "evidence"
     ]["agent_trace_events"]
     types = [event["event_type"] for event in events]
@@ -154,12 +154,12 @@ def test_recommendation_lifecycle_order(stub_pipeline, monkeypatch) -> None:
 def test_first_pass_records_quality_without_self_correction(
     stub_pipeline, monkeypatch
 ) -> None:
-    events = _post(monkeypatch, [_recommendation(), _evaluation(86, True)])[
+    events = _post(monkeypatch, [_recommendation(), _evaluation(92, True)])[
         "evidence"
     ]["agent_trace_events"]
     quality = [e for e in events if e["event_type"] == "quality.evaluated"]
     assert len(quality) == 1
-    assert quality[0]["metadata"]["score"] == 86
+    assert quality[0]["metadata"]["score"] == 92
     assert quality[0]["metadata"]["passed"] is True
     # No Self-Correction when the first candidate already passes.
     assert not [e for e in events if e["kind"] == "self_correction"]
@@ -174,14 +174,14 @@ def test_self_correction_recorded_after_first_failure(
             _recommendation("timeout 원인을 검토합니다"),
             _evaluation(72, False, "구체적인 수정 대상을 추가하세요."),
             _recommendation("PaymentClient.call timeout 처리 로직을 보강합니다"),
-            _evaluation(84, True),
+            _evaluation(92, True),
         ],
     )["evidence"]["agent_trace_events"]
 
     quality_scores = [
         e["metadata"]["score"] for e in events if e["event_type"] == "quality.evaluated"
     ]
-    assert quality_scores == [72, 84]
+    assert quality_scores == [72, 92]
     started = [e for e in events if e["event_type"] == "self_correction.started"]
     completed = [e for e in events if e["event_type"] == "self_correction.completed"]
     assert [e["attempt"] for e in started] == [2]
@@ -200,7 +200,7 @@ def test_fallback_activated(stub_pipeline, monkeypatch) -> None:
 def test_recommendation_without_stream_id_still_works(
     stub_pipeline, monkeypatch
 ) -> None:
-    result = _post(monkeypatch, [_recommendation(), _evaluation(86, True)], stream_id=None)
+    result = _post(monkeypatch, [_recommendation(), _evaluation(92, True)], stream_id=None)
     events = result["evidence"]["agent_trace_events"]
     assert events
     types = [event["event_type"] for event in events]
@@ -212,7 +212,7 @@ def test_trace_does_not_leak_prompts_args_or_secrets(stub_pipeline, monkeypatch)
         monkeypatch,
         [
             _recommendation("PaymentClient.call timeout 처리 로직을 보강합니다"),
-            _evaluation(86, True),
+            _evaluation(92, True),
         ],
     )["evidence"]["agent_trace_events"]
     blob = json.dumps(events, ensure_ascii=False)

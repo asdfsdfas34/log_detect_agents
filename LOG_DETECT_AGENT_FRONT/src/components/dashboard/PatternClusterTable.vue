@@ -178,8 +178,8 @@
       </p>
     </div>
 
-    <div class="overflow-x-auto">
-      <table class="min-w-full table-fixed text-left text-sm">
+    <div class="overflow-hidden">
+      <table class="w-full table-fixed text-left text-sm">
         <thead class="text-xs uppercase text-slate-500">
           <tr>
             <th class="w-10 py-2">
@@ -194,10 +194,15 @@
             <th class="w-32 py-2">Cluster</th>
             <th class="py-2">Error Message</th>
             <th class="w-24 py-2">Level</th>
-            <th class="w-36 py-2">Status</th>
-            <th class="w-20 py-2 text-right">Count</th>
-            <th class="w-28 py-2 text-right">Similarity</th>
-            <th class="w-56 py-2 text-right">Actions</th>
+            <th class="w-36 py-2 pl-4">Status</th>
+            <th class="w-14 py-2 text-right">Count</th>
+            <th
+              v-if="activeTab === 'similar'"
+              class="w-28 py-2 text-right"
+            >
+              Similarity
+            </th>
+            <th class="w-36 py-2 text-right">Actions</th>
           </tr>
         </thead>
         <tbody>
@@ -220,10 +225,11 @@
             >
               {{ item.cluster }}
             </td>
-            <td class="py-2 pr-4 text-slate-700">
+            <td class="max-w-0 overflow-hidden py-2 pr-4 text-slate-700">
               <button
-                class="line-clamp-2 w-full text-left text-blue-700 hover:text-blue-900 hover:underline"
+                class="block min-w-0 max-w-full truncate text-left text-blue-700 hover:text-blue-900 hover:underline"
                 type="button"
+                :title="item.message ?? 'No message captured for this pattern'"
                 @click="selectedCluster = item"
               >
                 {{ item.message ?? 'No message captured for this pattern' }}
@@ -244,7 +250,7 @@
                 {{ item.log_level ?? '-' }}
               </span>
             </td>
-            <td class="py-2">
+            <td class="py-2 pl-4">
               <button
                 v-if="item.pattern_status === 'known_similar'"
                 class="rounded px-2 py-1 text-xs font-semibold hover:ring-2 hover:ring-cyan-200"
@@ -263,7 +269,7 @@
               </span>
             </td>
             <td class="py-2 text-right tabular-nums">{{ item.count }}</td>
-            <td class="py-2 text-right">
+            <td v-if="activeTab === 'similar'" class="py-2 text-right">
               <div class="font-semibold text-slate-700">
                 {{ similarity(item) }}%
               </div>
@@ -280,17 +286,18 @@
                 <span v-else>Load matches</span>
               </button>
             </td>
-            <td class="py-2 text-right">
-              <div class="flex justify-end gap-2">
+            <td class="overflow-hidden py-2 text-right align-top">
+              <div class="flex flex-col items-end gap-1">
                 <button
-                  class="rounded border border-emerald-200 px-2 py-1 text-xs font-semibold text-emerald-700 hover:bg-emerald-50"
+                  v-if="activeTab !== 'known'"
+                  class="whitespace-nowrap rounded border border-emerald-200 px-2 py-1 text-xs font-semibold text-emerald-700 hover:bg-emerald-50"
                   type="button"
                   @click="emit('save-known-pattern', item)"
                 >
                   Known Pattern
                 </button>
                 <button
-                  class="rounded border border-blue-200 px-2 py-1 text-xs font-semibold text-blue-700 hover:bg-blue-50"
+                  class="whitespace-nowrap rounded border border-blue-200 px-2 py-1 text-xs font-semibold text-blue-700 hover:bg-blue-50"
                   type="button"
                   :disabled="props.recommendationBusyFingerprint === item.cluster"
                   :class="
@@ -307,7 +314,7 @@
                   }}
                 </button>
                 <button
-                  class="rounded border border-violet-200 px-2 py-1 text-xs font-semibold text-violet-700 hover:bg-violet-50"
+                  class="whitespace-nowrap rounded border border-violet-200 px-2 py-1 text-xs font-semibold text-violet-700 hover:bg-violet-50"
                   type="button"
                   @click="emit('suggest-pattern-rule', item)"
                 >
@@ -319,7 +326,7 @@
           <tr v-if="pagedClusters.length === 0">
             <td
               class="border-t py-8 text-center text-sm text-slate-500"
-              colspan="8"
+              :colspan="activeTab === 'similar' ? 8 : 7"
             >
               No pattern clusters found.
             </td>
@@ -420,6 +427,30 @@
         </div>
 
         <div class="max-h-[calc(85vh-64px)] space-y-4 overflow-y-auto p-4">
+          <section v-if="selectedCluster.count_scope">
+            <h5 class="mb-2 text-sm font-semibold text-slate-700">
+              Log Count
+            </h5>
+            <dl class="grid gap-3 sm:grid-cols-2">
+              <div class="rounded border border-blue-100 bg-blue-50 p-3">
+                <dt class="text-xs font-semibold text-blue-700">
+                  {{ selectedCluster.count_scope.date }} count
+                </dt>
+                <dd class="mt-1 text-xl font-semibold text-blue-900">
+                  {{ formatCount(selectedCluster.count) }}
+                </dd>
+              </div>
+              <div class="rounded border border-slate-200 bg-slate-50 p-3">
+                <dt class="text-xs font-semibold text-slate-600">
+                  Lifetime count
+                </dt>
+                <dd class="mt-1 text-xl font-semibold text-slate-900">
+                  {{ formatCount(selectedCluster.lifetime_count ?? selectedCluster.count) }}
+                </dd>
+              </div>
+            </dl>
+          </section>
+
           <section v-if="selectedCluster.accepted_normal">
             <h5 class="mb-2 text-sm font-semibold text-slate-700">
               Accepted Normal

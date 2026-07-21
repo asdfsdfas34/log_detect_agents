@@ -121,13 +121,13 @@ class OrchestratorAgent:
         record_trace_event(
             state,
             kind="routing",
-            event_type="route.end_selected",
+            event_type="route.verification_selected",
             status="completed",
-            title="Routing 종료: 실행할 Agent 없음",
-            summary="실행 가능한 Agent 스킬이 없어 파이프라인을 종료합니다.",
+            title="Routing 완료: Verification 전환",
+            summary="Agent·Skill 실행을 마치고 결과 적합성 검증 단계로 전환합니다.",
             agent_name=self.name,
             component="OrchestratorAgent",
             layer="orchestration",
-            metadata={"next_agent": "END"},
+            metadata={"next_agent": "END", "next_stage": "Verification"},
         )
         return state

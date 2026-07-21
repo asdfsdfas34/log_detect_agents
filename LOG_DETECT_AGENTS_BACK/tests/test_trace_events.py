@@ -5,7 +5,7 @@ import json
 from fastapi.testclient import TestClient
 
 from app.graph.nodes import _run_with_retry
-from app.main import app
+from app.main import _record_pattern_verification_traces, app
 from app.mcp.client import MCPClient
 from app.reasoning_events import reasoning_state
 from app.state import create_initial_state
@@ -107,9 +107,7 @@ def test_tool_call_failure_records_safe_error() -> None:
             pass
 
     tool_events = [
-        event
-        for event in state["evidence"]["agent_trace_events"]
-        if event["kind"] == "tool_call"
+        event for event in state["evidence"]["agent_trace_events"] if event["kind"] == "tool_call"
     ]
     failed = [event for event in tool_events if event["event_type"] == "tool.failed"]
     assert len(failed) == 1
@@ -130,9 +128,7 @@ def test_agent_lifecycle_records_attempts_and_retry() -> None:
     _run_with_retry(state, "LogCollectorAgent", always_fail)
 
     agent_events = [
-        event
-        for event in state["evidence"]["agent_trace_events"]
-        if event["kind"] == "agent"
+        event for event in state["evidence"]["agent_trace_events"] if event["kind"] == "agent"
     ]
     types = [event["event_type"] for event in agent_events]
     assert types == ["agent.started", "agent.retrying", "agent.started", "agent.failed"]
@@ -156,7 +152,7 @@ def test_self_correction_trace_records_score_and_attempt_in_order(monkeypatch) -
             _recommendation("timeout 원인을 검토합니다"),
             _evaluation(72, False, "구체적인 수정 대상을 추가하세요."),
             _recommendation("PaymentClient.call timeout 처리 로직을 보강합니다"),
-            _evaluation(84, True),
+            _evaluation(92, True),
         ]
     )
     monkeypatch.setattr("app.agents.recommendation.get_mcp_client", lambda: fake)
@@ -168,11 +164,9 @@ def test_self_correction_trace_records_score_and_attempt_in_order(monkeypatch) -
     events = result["evidence"]["agent_trace_events"]
     # Every evaluation is a quality.evaluated event, in evaluation order.
     quality_scores = [
-        event["metadata"]["score"]
-        for event in events
-        if event["event_type"] == "quality.evaluated"
+        event["metadata"]["score"] for event in events if event["event_type"] == "quality.evaluated"
     ]
-    assert quality_scores == [72, 84]
+    assert quality_scores == [72, 92]
 
     # Self-Correction only appears for the regeneration (attempt 2), not the
     # first evaluation.
@@ -180,7 +174,7 @@ def test_self_correction_trace_records_score_and_attempt_in_order(monkeypatch) -
     completed = [event for event in events if event["event_type"] == "self_correction.completed"]
     assert [event["attempt"] for event in started] == [2]
     assert [event["attempt"] for event in completed] == [2]
-    assert completed[-1]["metadata"]["score"] == 84
+    assert completed[-1]["metadata"]["score"] == 92
 
 
 def test_trace_recording_failure_does_not_break_flow(monkeypatch) -> None:
@@ -235,9 +229,101 @@ def test_request_isolation_keeps_events_separate() -> None:
     assert len(state_a["evidence"]["agent_trace_events"]) == 3
     assert len(state_b["evidence"]["agent_trace_events"]) == 1
     assert all(
-        event["request_id"] == "req-a"
-        for event in state_a["evidence"]["agent_trace_events"]
+        event["request_id"] == "req-a" for event in state_a["evidence"]["agent_trace_events"]
     )
+
+
+def test_pattern_verification_trace_exposes_metrics_without_raw_content() -> None:
+    state = _state("req-verification")
+    scenario = {
+        "summary": {
+            "total_logs": 50,
+            "processed_new_logs": 50,
+            "total_fingerprints": 2,
+            "known_patterns": 1,
+            "new_patterns": 1,
+            "anomalies_detected": 1,
+        },
+        "fingerprints": [
+            {
+                "fingerprint": "fp-1",
+                "normalized_message": "secret normalized message",
+                "drain_template": "secret drain template",
+                "stacktrace": "secret stack trace",
+                "pattern_status": "known_exact",
+                "match_source": "normalization_rule",
+            },
+            {
+                "fingerprint": "fp-2",
+                "normalized_message": "another secret message",
+                "drain_template": "another secret template",
+                "stacktrace": "",
+                "pattern_status": "new_pattern",
+                "match_source": "new",
+            },
+        ],
+        "pattern_clusters": [
+            {
+                "algorithm": "connected_component+hdbscan",
+                "member_count": 2,
+                "total_occurrence_count": 50,
+                "avg_pattern_similarity": 0.94,
+                "min_pattern_similarity": 0.9,
+                "avg_semantic_similarity": 0.89,
+                "max_semantic_similarity": 0.91,
+            }
+        ],
+        "semantic_clusters": [
+            {
+                "algorithm": "hybrid-event-v1_hdbscan",
+                "fingerprint_count": 2,
+                "count": 50,
+            }
+        ],
+        "duplicate_pattern_candidates": [
+            {
+                "fingerprints": ["fp-1", "fp-2"],
+                "status": "pending",
+                "confidence": 0.95,
+                "regex_matches_all": True,
+                "structure_similarity": 0.9,
+                "structure_similarity_threshold": 0.74,
+                "variable_token_ratio": 0.2,
+                "variable_token_ratio_threshold": 0.35,
+            }
+        ],
+        "fingerprint_merge_groups": [{"status": "pending"}],
+    }
+
+    _record_pattern_verification_traces(state, scenario)
+
+    events = state["evidence"]["agent_trace_events"]
+    assert [event["event_type"] for event in events] == [
+        "verification.started",
+        "verification.normalization_completed",
+        "verification.hybrid_similarity_completed",
+        "verification.pattern_status_completed",
+        "verification.pattern_clustering_completed",
+        "verification.semantic_clustering_completed",
+        "verification.duplicate_recommendations_completed",
+        "verification.completed",
+    ]
+    assert all(event["kind"] == "validation" for event in events)
+    assert events[0]["span_id"] == events[-1]["span_id"]
+    assert all(
+        event["parent_span_id"] == events[0]["span_id"] for event in events[1:-1]
+    )
+    clustering = next(
+        event
+        for event in events
+        if event["event_type"] == "verification.pattern_clustering_completed"
+    )
+    assert clustering["metadata"]["algorithms"] == ["connected_component+hdbscan=1"]
+    assert clustering["metadata"]["clustered_fingerprint_count"] == 2
+    rendered = json.dumps(events, ensure_ascii=False)
+    assert "secret normalized message" not in rendered
+    assert "secret drain template" not in rendered
+    assert "secret stack trace" not in rendered
 
 
 def test_analyze_emits_trace_across_process_layers() -> None:
@@ -263,9 +349,39 @@ def test_analyze_emits_trace_across_process_layers() -> None:
     # Request lifecycle plus FastAPI-service-flow (KnowledgeBaseRAGAgent) are covered.
     assert "request.accepted" in event_types
     assert "request.completed" in event_types
+    assert "verification.normalization_completed" in event_types
+    assert "verification.hybrid_similarity_completed" in event_types
+    assert "verification.pattern_clustering_completed" in event_types
+    assert "verification.semantic_clustering_completed" in event_types
+    assert "verification.duplicate_recommendations_completed" in event_types
     assert {"request", "routing", "skill"}.issubset(kinds)
-    assert any(
-        event["agent_name"] == "KnowledgeBaseRAGAgent" for event in events
+    assert any(event["agent_name"] == "KnowledgeBaseRAGAgent" for event in events)
+
+    duplicate_skill_events = [
+        event
+        for event in events
+        if event.get("metadata", {}).get("skill_id") == "duplicate_pattern_detection"
+    ]
+    assert any(event["event_type"] == "skill.completed" for event in duplicate_skill_events)
+    duplicate_skill_sequence = max(
+        event["sequence"]
+        for event in duplicate_skill_events
+        if event["event_type"] == "skill.completed"
+    )
+    routing_sequence = next(
+        event["sequence"]
+        for event in events
+        if event["event_type"] == "route.verification_selected"
+    )
+    verification_sequence = next(
+        event["sequence"] for event in events if event["event_type"] == "verification.started"
+    )
+    assert duplicate_skill_sequence < routing_sequence < verification_sequence
+    assert not any(
+        event["sequence"] > verification_sequence
+        and event["kind"] == "skill"
+        and event["agent_name"] == "ScenarioAnalysis"
+        for event in events
     )
 
     # Sequences are monotonic and unique within the request.

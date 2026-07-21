@@ -14,7 +14,7 @@ from app.trace_events import record_trace_event
 
 _REQUIRED_ACTION_KEYS = {"priority", "action", "owner"}
 _MAX_QUALITY_ATTEMPTS = 3
-_MIN_QUALITY_SCORE = 80
+_MIN_QUALITY_SCORE = 90
 
 
 class RecommendationAgent:
@@ -215,6 +215,7 @@ class RecommendationAgent:
                     "score": evaluation["score"],
                     "threshold": _MIN_QUALITY_SCORE,
                     "passed": evaluation["passed"],
+                    "hard_fail_count": len(evaluation.get("hard_fail_reasons") or []),
                 },
             )
             if attempt > 1 and evaluation["passed"]:
@@ -582,6 +583,18 @@ class RecommendationAgent:
             "- Secret or credential rotation\n"
             "- Destructive operational commands\n"
             "- Unsupported guesses not grounded in evidence\n\n"
+            "Scoring calibration:\n"
+            "- 100 is exceptional, not the default for a complete JSON response.\n"
+            "- 90-94 means excellent with only minor, explicitly identified weaknesses.\n"
+            "- 80-89 is below the release gate and must be regenerated with concrete "
+            "improvements.\n"
+            "- Do not award full points merely because required fields are present.\n"
+            "- Full actionability requires at least 2 independently executable, "
+            "evidence-linked actions.\n"
+            "- Full verification requires at least 3 concrete checks, including a "
+            "measurable threshold, baseline, count, rate, or time window.\n"
+            "- Full prevention requires at least 2 complementary controls across code, "
+            "operations, tests, or monitoring.\n\n"
             "Return rubric_scores for each item. Do not return a top-level score; "
             "the application will compute the total score by summing rubric_scores.\n"
             "Set passed=true only when the recommendation satisfies every hard fail "
@@ -668,10 +681,15 @@ class RecommendationAgent:
         evidence_bundle: dict[str, Any],
         recommendation: dict[str, Any],
     ) -> dict[str, Any]:
+        evaluation = self._calibrate_high_score(
+            evaluation=evaluation,
+            recommendation=recommendation,
+        )
         failures = self._hard_fail_reasons(
             evidence_bundle=evidence_bundle,
             recommendation=recommendation,
         )
+        evaluation["hard_fail_reasons"] = failures
         if not failures:
             return evaluation
 
@@ -688,6 +706,71 @@ class RecommendationAgent:
             ]
             if item
         )
+        return evaluation
+
+    @staticmethod
+    def _calibrate_high_score(
+        *, evaluation: dict[str, Any], recommendation: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Reserve near-perfect scores for recommendations with exceptional depth.
+
+        The LLM remains responsible for the rubric assessment, but scores of 95 or
+        more receive deterministic structural checks. This prevents a merely complete
+        response from receiving 100 while leaving rubric scores below 95 unchanged.
+        """
+
+        if int(evaluation.get("score") or 0) < 95:
+            return evaluation
+
+        rubric = dict(evaluation.get("rubric_scores") or {})
+        calibration_notes: list[str] = []
+        actions = recommendation.get("recommended_actions") or []
+        verification_steps = recommendation.get("verification_steps") or []
+        prevention_steps = recommendation.get("prevention_steps") or []
+
+        if len(actions) < 2:
+            rubric["actionability"] = min(int(rubric.get("actionability") or 0), 22)
+            calibration_notes.append(
+                "만점 수준의 실행 가능성을 위해 독립적으로 수행 가능한 조치를 2개 이상 제시하세요."
+            )
+
+        if len(verification_steps) < 3:
+            rubric["verification"] = min(int(rubric.get("verification") or 0), 17)
+            calibration_notes.append(
+                "만점 수준의 검증을 위해 서로 다른 구체적 확인 절차를 3개 이상 제시하세요."
+            )
+        measurable_pattern = re.compile(
+            r"(?:\d+(?:\.\d+)?\s*(?:%|ms|초|분|시간|건|회)?|기준선|임계(?:값)?|"
+            r"baseline|threshold|p\d{2})",
+            re.I,
+        )
+        if not any(measurable_pattern.search(str(step)) for step in verification_steps):
+            rubric["verification"] = min(int(rubric.get("verification") or 0), 15)
+            calibration_notes.append(
+                "검증 단계에 수치 기준, 기준선, 발생 건수, 비율 또는 시간 구간을 포함하세요."
+            )
+
+        if len(prevention_steps) < 2:
+            rubric["prevention"] = min(int(rubric.get("prevention") or 0), 12)
+            calibration_notes.append(
+                "만점 수준의 재발 방지를 위해 코드·테스트·운영·모니터링 중 2개 이상의 통제를 제시하세요."
+            )
+
+        calibrated_score = sum(int(value) for value in rubric.values())
+        evaluation["rubric_scores"] = rubric
+        evaluation["score"] = calibrated_score
+        evaluation["passed"] = bool(evaluation.get("passed")) and (
+            calibrated_score >= _MIN_QUALITY_SCORE
+        )
+        if calibration_notes:
+            existing_weak = list(evaluation.get("weak_points") or [])
+            evaluation["weak_points"] = existing_weak + calibration_notes
+            existing_feedback = str(evaluation.get("feedback") or "").strip()
+            evaluation["feedback"] = " ".join(
+                item
+                for item in [existing_feedback, "고득점 보정:", " ".join(calibration_notes)]
+                if item
+            )
         return evaluation
 
     @staticmethod

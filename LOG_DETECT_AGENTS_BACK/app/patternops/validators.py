@@ -56,6 +56,30 @@ def _run_validator(
             or evidence.get("pattern_ops_matches")
             or evidence.get("clusters")
         ), "pattern match artifacts present"
+    if skill_id == "duplicate_pattern_detection" and validator_type in {
+        "similarity_threshold",
+        "variable_token_ratio",
+    }:
+        candidates = evidence.get("duplicate_pattern_candidates") or []
+        if not candidates:
+            return True, "no duplicate recommendation required"
+        if validator_type == "similarity_threshold":
+            passed = all(
+                len(item.get("fingerprints") or []) >= 2
+                and bool(item.get("regex_matches_all"))
+                and float(item.get("structure_similarity", 0))
+                >= float(item.get("structure_similarity_threshold", 1))
+                for item in candidates
+                if isinstance(item, dict)
+            )
+            return passed, "duplicate recommendation structure and regex verified"
+        passed = all(
+            float(item.get("variable_token_ratio", 1))
+            <= float(item.get("variable_token_ratio_threshold", 0))
+            for item in candidates
+            if isinstance(item, dict)
+        )
+        return passed, "duplicate recommendation variable-token ratio verified"
     if validator_type in {"baseline_comparison", "severity_reason"}:
         return "anomalies" in evidence, "anomaly artifact key present"
     if validator_type in {"fingerprint_match", "confidence_present"}:

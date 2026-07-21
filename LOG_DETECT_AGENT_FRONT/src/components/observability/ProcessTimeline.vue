@@ -112,6 +112,10 @@ const emit = defineEmits<{
 const scrollRef = ref<HTMLElement | null>(null)
 
 function indent(node: TimelineNode): number {
+  if (node.eventType === 'verification.completed' || node.eventType === 'verification.started') {
+    return 0
+  }
+  if (node.eventType.startsWith('verification.')) return 1
   return kindMeta(node.kind).indent
 }
 

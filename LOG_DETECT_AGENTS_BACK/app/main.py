@@ -24,12 +24,14 @@ from app.db.scenario_store import (
     fetch_accepted_normal_patterns,
     fetch_duplicate_pattern_candidates,
     fetch_exception_registry,
+    fetch_fingerprint_counts_for_analysis_date,
     fetch_knowledge_cards,
     fetch_knowledge_cards_by_ids,
     fetch_pattern_cluster,
     merge_duplicate_pattern_candidate,
     merge_selected_fingerprints_as_known_pattern,
     normalize_log_text,
+    pattern_verification_profile,
     register_accepted_normal_pattern,
     register_exception,
     revoke_accepted_normal_pattern,
@@ -111,6 +113,268 @@ configure_langsmith()
 
 SIMILAR_PATTERN_LIST_THRESHOLD = 0.8
 
+
+def _mean_metric(items: list[dict], key: str) -> float:
+    values = [float(item[key]) for item in items if isinstance(item.get(key), (int, float))]
+    return round(sum(values) / len(values), 4) if values else 0.0
+
+
+def _count_by(items: list[dict], key: str) -> list[str]:
+    counts: dict[str, int] = {}
+    for item in items:
+        value = str(item.get(key) or "unknown")
+        counts[value] = counts.get(value, 0) + 1
+    return [f"{name}={count}" for name, count in sorted(counts.items())]
+
+
+def _record_pattern_verification_traces(state: SharedState, scenario: dict) -> None:
+    """Expose deterministic verification stages without streaming raw log content."""
+
+    started_at = perf_counter()
+    request_id = str(state.get("request_id") or "")
+    verification_span_id = f"{request_id}:verification"
+    record_trace_event(
+        state,
+        kind="validation",
+        event_type="verification.started",
+        status="running",
+        title="Verification 실행",
+        summary="Agent와 Skill 실행 결과에 대한 종합 검증을 시작합니다.",
+        agent_name="ScenarioAnalysis",
+        component="PatternVerification",
+        layer="reasoning",
+        span_id=verification_span_id,
+    )
+    summary = scenario.get("summary") if isinstance(scenario.get("summary"), dict) else {}
+    fingerprints = scenario.get("fingerprints")
+    fingerprints = fingerprints if isinstance(fingerprints, list) else []
+    pattern_clusters = scenario.get("pattern_clusters")
+    pattern_clusters = pattern_clusters if isinstance(pattern_clusters, list) else []
+    semantic_clusters = scenario.get("semantic_clusters")
+    semantic_clusters = semantic_clusters if isinstance(semantic_clusters, list) else []
+    candidates = scenario.get("duplicate_pattern_candidates")
+    candidates = candidates if isinstance(candidates, list) else []
+    merge_groups = scenario.get("fingerprint_merge_groups")
+    merge_groups = merge_groups if isinstance(merge_groups, list) else []
+    profile = pattern_verification_profile()
+
+    total_logs = int(summary.get("total_logs") or 0)
+    fingerprint_count = int(summary.get("total_fingerprints") or len(fingerprints))
+    record_trace_event(
+        state,
+        kind="validation",
+        event_type="verification.normalization_completed",
+        status="completed",
+        title="Verification: 정규화·Fingerprint 검증",
+        summary=f"{total_logs:,}개 로그를 정규화해 {fingerprint_count:,}개 Fingerprint로 집계했습니다.",
+        agent_name="ScenarioAnalysis",
+        component="PatternVerification",
+        layer="reasoning",
+        parent_span_id=verification_span_id,
+        evidence_refs=["evidence.summary", "evidence.fingerprints"],
+        metadata={
+            "total_logs": total_logs,
+            "processed_new_logs": int(summary.get("processed_new_logs") or 0),
+            "fingerprint_count": fingerprint_count,
+            "normalized_message_count": sum(
+                bool(item.get("normalized_message")) for item in fingerprints
+            ),
+            "drain_template_count": sum(bool(item.get("drain_template")) for item in fingerprints),
+            "stacktrace_evidence_count": sum(bool(item.get("stacktrace")) for item in fingerprints),
+        },
+    )
+    record_trace_event(
+        state,
+        kind="validation",
+        event_type="verification.hybrid_similarity_completed",
+        status="completed",
+        title="Verification: 복합 유사도 계산",
+        summary="Drain3·token·구조·key-value·metadata·stack trace·embedding 근거를 가중 결합했습니다.",
+        agent_name="ScenarioAnalysis",
+        component="PatternVerification",
+        layer="reasoning",
+        parent_span_id=verification_span_id,
+        decision_summary="단일 유사도 대신 구조와 의미 근거를 함께 사용해 오탐 병합을 통제합니다.",
+        evidence_refs=["evidence.fingerprints", "evidence.pattern_clusters"],
+        metadata=profile,
+    )
+
+    status_counts = _count_by(fingerprints, "pattern_status")
+    match_sources = sorted(
+        {str(item.get("match_source")) for item in fingerprints if item.get("match_source")}
+    )
+    record_trace_event(
+        state,
+        kind="validation",
+        event_type="verification.pattern_status_completed",
+        status="completed",
+        title="Verification: Known/New Pattern 판정",
+        summary=(
+            f"Known {int(summary.get('known_patterns') or 0):,}건, "
+            f"New {int(summary.get('new_patterns') or 0):,}건으로 판정했습니다."
+        ),
+        agent_name="ScenarioAnalysis",
+        component="PatternVerification",
+        layer="reasoning",
+        parent_span_id=verification_span_id,
+        evidence_refs=["evidence.summary", "evidence.pattern_ops_matches"],
+        metadata={
+            "pattern_status_counts": status_counts,
+            "match_sources": match_sources,
+            "known_pattern_count": int(summary.get("known_patterns") or 0),
+            "new_pattern_count": int(summary.get("new_patterns") or 0),
+            "anomaly_count": int(summary.get("anomalies_detected") or 0),
+        },
+    )
+
+    clustered_members = sum(int(item.get("member_count") or 0) for item in pattern_clusters)
+    clustered_occurrences = sum(
+        int(item.get("total_occurrence_count") or 0) for item in pattern_clusters
+    )
+    record_trace_event(
+        state,
+        kind="validation",
+        event_type="verification.pattern_clustering_completed",
+        status="completed",
+        title="Verification: Pattern Cluster 생성",
+        summary=(
+            f"Fingerprint {clustered_members:,}개를 {len(pattern_clusters):,}개 Pattern Cluster로 구성했습니다."
+        ),
+        agent_name="ScenarioAnalysis",
+        component="PatternVerification",
+        layer="reasoning",
+        parent_span_id=verification_span_id,
+        evidence_refs=["evidence.pattern_clusters"],
+        metadata={
+            "cluster_count": len(pattern_clusters),
+            "clustered_fingerprint_count": clustered_members,
+            "clustered_occurrence_count": clustered_occurrences,
+            "algorithms": _count_by(pattern_clusters, "algorithm"),
+            "avg_pattern_similarity": _mean_metric(pattern_clusters, "avg_pattern_similarity"),
+            "min_pattern_similarity": min(
+                (float(item.get("min_pattern_similarity") or 0) for item in pattern_clusters),
+                default=0.0,
+            ),
+            "avg_semantic_similarity": _mean_metric(pattern_clusters, "avg_semantic_similarity"),
+            "max_semantic_similarity": max(
+                (float(item.get("max_semantic_similarity") or 0) for item in pattern_clusters),
+                default=0.0,
+            ),
+            "hdbscan_min_cluster_size": profile["hdbscan_min_cluster_size"],
+            "hdbscan_min_samples": profile["hdbscan_min_samples"],
+        },
+    )
+
+    semantic_fingerprints = sum(
+        int(item.get("fingerprint_count") or 0) for item in semantic_clusters
+    )
+    semantic_occurrences = sum(int(item.get("count") or 0) for item in semantic_clusters)
+    fallback_cluster_count = sum(
+        "fallback" in str(item.get("algorithm") or "") for item in semantic_clusters
+    )
+    record_trace_event(
+        state,
+        kind="validation",
+        event_type="verification.semantic_clustering_completed",
+        status="completed",
+        title="Verification: HDBSCAN 중복 후보군 생성",
+        summary=(
+            f"{semantic_fingerprints:,}개 Fingerprint를 {len(semantic_clusters):,}개 의미 군집으로 검증했습니다."
+        ),
+        agent_name="ScenarioAnalysis",
+        component="PatternVerification",
+        layer="reasoning",
+        parent_span_id=verification_span_id,
+        evidence_refs=["evidence.semantic_clusters"],
+        fallback_used=fallback_cluster_count > 0,
+        metadata={
+            "semantic_cluster_count": len(semantic_clusters),
+            "semantic_fingerprint_count": semantic_fingerprints,
+            "semantic_occurrence_count": semantic_occurrences,
+            "algorithms": _count_by(semantic_clusters, "algorithm"),
+            "fallback_cluster_count": fallback_cluster_count,
+            "hdbscan_min_cluster_size": profile["semantic_hdbscan_min_cluster_size"],
+            "hdbscan_min_samples": profile["semantic_hdbscan_min_samples"],
+            "hybrid_vector_schema_version": profile["hybrid_vector_schema_version"],
+        },
+    )
+
+    candidate_fingerprints = sum(
+        len(item.get("fingerprints") or []) for item in candidates if isinstance(item, dict)
+    )
+    confidence_values = [
+        float(item["confidence"])
+        for item in candidates
+        if isinstance(item, dict) and isinstance(item.get("confidence"), (int, float))
+    ]
+    verified_candidates = [
+        item
+        for item in candidates
+        if isinstance(item, dict)
+        and len(item.get("fingerprints") or []) >= 2
+        and bool(item.get("regex_matches_all"))
+        and float(item.get("structure_similarity", 0))
+        >= float(item.get("structure_similarity_threshold", 1))
+        and float(item.get("variable_token_ratio", 1))
+        <= float(item.get("variable_token_ratio_threshold", 0))
+    ]
+    failed_candidate_count = len(candidates) - len(verified_candidates)
+    record_trace_event(
+        state,
+        kind="validation",
+        event_type="verification.duplicate_recommendations_completed",
+        status="failed" if failed_candidate_count else "completed",
+        title="Verification: 중복 패턴 추천 검증",
+        summary=(
+            f"추천 {len(candidates):,}건 중 {len(verified_candidates):,}건이 "
+            "구조·regex·변동 token 기준을 통과했습니다."
+        ),
+        agent_name="ScenarioAnalysis",
+        component="PatternVerification",
+        layer="reasoning",
+        parent_span_id=verification_span_id,
+        evidence_refs=[
+            "evidence.duplicate_pattern_candidates",
+            "evidence.fingerprint_merge_groups",
+        ],
+        metadata={
+            "candidate_count": len(candidates),
+            "verified_candidate_count": len(verified_candidates),
+            "failed_candidate_count": failed_candidate_count,
+            "candidate_fingerprint_count": candidate_fingerprints,
+            "candidate_status_counts": _count_by(candidates, "status"),
+            "merge_group_count": len(merge_groups),
+            "avg_candidate_confidence": (
+                round(sum(confidence_values) / len(confidence_values), 4)
+                if confidence_values
+                else 0.0
+            ),
+            "max_candidate_confidence": max(confidence_values, default=0.0),
+        },
+    )
+    record_trace_event(
+        state,
+        kind="validation",
+        event_type="verification.completed",
+        status="failed" if failed_candidate_count else "completed",
+        title="Verification 실패" if failed_candidate_count else "Verification 완료",
+        summary=(
+            f"중복 패턴 추천 {failed_candidate_count:,}건이 검증 기준을 충족하지 못했습니다."
+            if failed_candidate_count
+            else "정규화, 패턴 판정, 군집화 및 중복 패턴 추천 검증을 완료했습니다."
+        ),
+        agent_name="ScenarioAnalysis",
+        component="PatternVerification",
+        layer="reasoning",
+        span_id=verification_span_id,
+        duration_ms=round((perf_counter() - started_at) * 1000),
+        metadata={
+            "verification_step_count": 6,
+            "verification_passed": failed_candidate_count == 0,
+        },
+    )
+
+
 app = FastAPI(title="Failure Prevention AI Backend", version="0.2.0")
 
 origins = ["http://localhost:5173", "http://127.0.0.1:5173"]
@@ -128,15 +392,9 @@ class AnalyzeRequest(BaseModel):
     """Analyze API input schema."""
 
     service_name: str = Field(..., min_length=1, description="Target service name")
-    goal: str = Field(
-        default="service log anomaly investigation", description="Analysis goal"
-    )
-    scope: Scope | None = Field(
-        default=None, description="Optional detailed analysis scope"
-    )
-    save_to_chromadb: bool = Field(
-        default=True, description="Persist final answer to ChromaDB"
-    )
+    goal: str = Field(default="service log anomaly investigation", description="Analysis goal")
+    scope: Scope | None = Field(default=None, description="Optional detailed analysis scope")
+    save_to_chromadb: bool = Field(default=True, description="Persist final answer to ChromaDB")
     analysis_date: date | None = Field(
         default=None, description="Only analyze service_logs from this date"
     )
@@ -182,6 +440,7 @@ class FingerprintManualMergeRequest(BaseModel):
     """Request body for user-selected fingerprint merge and known registration."""
 
     service_name: str
+    analysis_date: date | None = None
     fingerprints: list[str] = Field(..., min_length=2)
     cause: str = Field(..., min_length=1)
     recommendation: str = Field(..., min_length=1)
@@ -341,9 +600,7 @@ def _pattern_cluster_context(
     )
 
 
-def _is_same_pattern_match(
-    match: dict, *, service_name: str, fingerprint: str
-) -> bool:
+def _is_same_pattern_match(match: dict, *, service_name: str, fingerprint: str) -> bool:
     metadata = match.get("metadata") if isinstance(match.get("metadata"), dict) else {}
     match_fingerprint = str(metadata.get("fingerprint") or "")
     if match_fingerprint != fingerprint:
@@ -384,9 +641,7 @@ def _stored_similar_pattern_match(
         else f"fingerprint={similar_fingerprint}"
     )
     return {
-        "id": f"{target_service}:{similar_fingerprint}"
-        if target_service
-        else similar_fingerprint,
+        "id": f"{target_service}:{similar_fingerprint}" if target_service else similar_fingerprint,
         "document": document,
         "metadata": {
             "fingerprint": similar_fingerprint,
@@ -409,9 +664,7 @@ def _prepend_stored_similar_match(
     )
     if not stored_match:
         return matches
-    stored_fingerprint = str(
-        (stored_match.get("metadata") or {}).get("fingerprint") or ""
-    )
+    stored_fingerprint = str((stored_match.get("metadata") or {}).get("fingerprint") or "")
     deduped = [
         match
         for match in matches
@@ -507,9 +760,7 @@ def _enrich_pattern_clusters(
                 "similar_clusters": similar_clusters,
                 "anomaly_detected": anomaly is not None,
                 "anomaly_type": (
-                    anomaly.get("anomaly_type")
-                    if anomaly
-                    else str(item.get("anomaly_type") or "")
+                    anomaly.get("anomaly_type") if anomaly else str(item.get("anomaly_type") or "")
                 ),
                 "anomaly_severity": anomaly.get("severity") if anomaly else "",
                 "anomaly_reason": _anomaly_reason(anomaly) if anomaly else "",
@@ -539,6 +790,7 @@ def _pattern_cluster_partial_refresh(
     *,
     service_name: str = "",
     fingerprints: list[str],
+    analysis_date: date | None = None,
     include_similar_clusters: bool = True,
     n_results: int = 5,
 ) -> dict[str, object]:
@@ -558,14 +810,27 @@ def _pattern_cluster_partial_refresh(
 
     updated_clusters: list[dict] = []
     for cluster_service, cluster_rows in groups_by_service.items():
-        updated_clusters.extend(
-            _enrich_pattern_clusters(
-                service_name=cluster_service,
-                fingerprints=cluster_rows,
-                n_results=max(1, n_results),
-                include_similar_clusters=include_similar_clusters,
-            )
+        enriched_rows = _enrich_pattern_clusters(
+            service_name=cluster_service,
+            fingerprints=cluster_rows,
+            n_results=max(1, n_results),
+            include_similar_clusters=include_similar_clusters,
         )
+        if analysis_date:
+            scoped_counts = fetch_fingerprint_counts_for_analysis_date(
+                service_name=cluster_service,
+                fingerprints=[str(row.get("cluster") or "") for row in enriched_rows],
+                analysis_date=analysis_date.isoformat(),
+            )
+            for row in enriched_rows:
+                fingerprint = str(row.get("cluster") or "")
+                row["lifetime_count"] = int(row.get("count") or 0)
+                row["count"] = scoped_counts.get(fingerprint, 0)
+                row["count_scope"] = {
+                    "type": "analysis_date",
+                    "date": analysis_date.isoformat(),
+                }
+        updated_clusters.extend(enriched_rows)
 
     return {
         "affected_fingerprints": requested,
@@ -726,9 +991,7 @@ def _related_knowledge_cards_for_recommendation(
         stacktrace=str(selected.get("stacktrace") or ""),
     )
     try:
-        groups = find_similar_analysis_documents_batch(
-            queries=[query], n_results=max(1, limit)
-        )
+        groups = find_similar_analysis_documents_batch(queries=[query], n_results=max(1, limit))
     except Exception:  # noqa: BLE001
         groups = []
     ranked_matches = sorted(
@@ -742,9 +1005,7 @@ def _related_knowledge_cards_for_recommendation(
     )
     similar_card_ids = [
         card_id
-        for card_id in (
-            _knowledge_card_id_from_match(match) for match in ranked_matches
-        )
+        for card_id in (_knowledge_card_id_from_match(match) for match in ranked_matches)
         if card_id
     ]
     exact_card_ids = {str(card.get("card_id") or "") for card in exact_cards}
@@ -884,18 +1145,21 @@ def _analyze(req: AnalyzeRequest) -> AnalyzeResponse:
         )
     result = graph.invoke(initial_state)
 
-    # Run deterministic scenario analysis for dashboard evidence. Final
-    # recommendations are generated only through the explicit recommendation API.
-    try:
-        scenario = run_detection_pipeline(
-            req.service_name,
-            analysis_date=analysis_date.isoformat(),
-            include_time_windows=req.include_time_windows,
-        )
-    except TypeError:
-        scenario = run_detection_pipeline(req.service_name)
-    except ValueError:
-        scenario = {
+    # Duplicate recommendations are generated by LogAnalysisAgent's
+    # duplicate_pattern_detection skill. Keep a fallback for degraded runs in
+    # which that skill could not produce the shared scenario artifact.
+    scenario = result["evidence"].get("scenario_analysis")
+    if not isinstance(scenario, dict) or not scenario:
+        try:
+            scenario = run_detection_pipeline(
+                req.service_name,
+                analysis_date=analysis_date.isoformat(),
+                include_time_windows=req.include_time_windows,
+            )
+        except TypeError:
+            scenario = run_detection_pipeline(req.service_name)
+        except ValueError:
+            scenario = {
             "fingerprints": [],
             "anomalies": [],
             "anomaly_daily_counts": [],
@@ -906,43 +1170,30 @@ def _analyze(req: AnalyzeRequest) -> AnalyzeResponse:
             "summary": {},
             "recommendation": {},
             "recommendations": [],
-        }
+            }
+    _record_pattern_verification_traces(result, scenario)
     result["evidence"]["summary"] = scenario["summary"]
     result["evidence"]["recommendation"] = scenario["recommendation"]
-    result["evidence"]["anomaly_daily_counts"] = scenario.get(
-        "anomaly_daily_counts", []
-    )
+    result["evidence"]["anomaly_daily_counts"] = scenario.get("anomaly_daily_counts", [])
     result["evidence"]["duplicate_pattern_candidates"] = scenario.get(
         "duplicate_pattern_candidates", []
     )
-    result["evidence"]["fingerprint_merge_groups"] = scenario.get(
-        "fingerprint_merge_groups", []
-    )
-    result["evidence"]["event_time_windows"] = scenario.get(
-        "event_time_windows", []
-    )
-    result["evidence"]["system_state_vectors"] = scenario.get(
-        "system_state_vectors", []
-    )
+    result["evidence"]["fingerprint_merge_groups"] = scenario.get("fingerprint_merge_groups", [])
+    result["evidence"]["event_time_windows"] = scenario.get("event_time_windows", [])
+    result["evidence"]["system_state_vectors"] = scenario.get("system_state_vectors", [])
     result["evidence"]["semantic_clusters"] = scenario.get("semantic_clusters", [])
     result["evidence"]["trajectories"] = scenario.get("trajectories", [])
-    result["evidence"]["trajectory_clusters"] = scenario.get(
-        "trajectory_clusters", []
-    )
+    result["evidence"]["trajectory_clusters"] = scenario.get("trajectory_clusters", [])
     result["evidence"]["nearest_trajectory_patterns"] = scenario.get(
         "nearest_trajectory_patterns", []
     )
     # Additive RecFM Preview evidence (10-minute bucket only).
-    result["evidence"]["event_time_windows_10min"] = scenario.get(
-        "event_time_windows_10min", []
-    )
+    result["evidence"]["event_time_windows_10min"] = scenario.get("event_time_windows_10min", [])
     result["evidence"]["system_state_vectors_10min"] = scenario.get(
         "system_state_vectors_10min", []
     )
     result["evidence"]["trajectories_10min"] = scenario.get("trajectories_10min", [])
-    result["evidence"]["trajectory_clusters_10min"] = scenario.get(
-        "trajectory_clusters_10min", []
-    )
+    result["evidence"]["trajectory_clusters_10min"] = scenario.get("trajectory_clusters_10min", [])
     result["evidence"]["recfm_bucket_size"] = scenario.get("recfm_bucket_size", "10min")
     result["evidence"]["recfm_trajectory_window_length"] = scenario.get(
         "recfm_trajectory_window_length", 6
@@ -975,9 +1226,7 @@ def _analyze(req: AnalyzeRequest) -> AnalyzeResponse:
         result["evidence"]["pattern_clusters"] = scenario.get("pattern_clusters", [])
         result["evidence"]["anomalies"] = scenario["anomalies"]
         result["evidence"]["stack_traces"] = [
-            item["stacktrace"]
-            for item in scenario["fingerprints"]
-            if item["stacktrace"]
+            item["stacktrace"] for item in scenario["fingerprints"] if item["stacktrace"]
         ]
         result["assessment"]["risk_score"] = scenario["summary"]["risk_score"]
         result["assessment"]["confidence"] = (
@@ -988,16 +1237,12 @@ def _analyze(req: AnalyzeRequest) -> AnalyzeResponse:
             f"Detection Status: {scenario['summary']['detection_status']}",
             f"Analysis date: {analysis_date.isoformat()}",
         ]
-        result["evidence"]["known_pattern_matches"] = scenario.get(
-            "recommendations", []
-        )[:5]
+        result["evidence"]["known_pattern_matches"] = scenario.get("recommendations", [])[:5]
         result["evidence"]["incident_candidates"] = [
             {
                 "fingerprint": scenario["recommendation"].get("fingerprint"),
                 "root_cause_hint": scenario["recommendation"].get("cause", ""),
-                "recommended_action_hint": scenario["recommendation"].get(
-                    "recommendation", ""
-                ),
+                "recommended_action_hint": scenario["recommendation"].get("recommendation", ""),
                 "summary": scenario["summary"],
             }
         ]
@@ -1018,20 +1263,12 @@ def _analyze(req: AnalyzeRequest) -> AnalyzeResponse:
                 "suppressed": len(result["evidence"].get("suppressed_logs", [])),
             },
             "pattern_ops_summary": {
-                "matched_contracts": len(
-                    result["evidence"].get("pattern_ops_matches", [])
-                ),
-                "loaded_contracts": len(
-                    result["evidence"].get("pattern_ops_contracts", [])
-                ),
+                "matched_contracts": len(result["evidence"].get("pattern_ops_matches", [])),
+                "loaded_contracts": len(result["evidence"].get("pattern_ops_contracts", [])),
             },
             "pattern_ops_matches": result["evidence"].get("pattern_ops_matches", []),
-            "pattern_ops_contracts": result["evidence"].get(
-                "pattern_ops_contracts", []
-            ),
-            "pattern_ops_skill_plan": result["evidence"].get(
-                "pattern_ops_skill_plan", {}
-            ),
+            "pattern_ops_contracts": result["evidence"].get("pattern_ops_contracts", []),
+            "pattern_ops_skill_plan": result["evidence"].get("pattern_ops_skill_plan", {}),
             "pattern_ops_skill_executions": result["evidence"].get(
                 "pattern_ops_skill_executions", []
             ),
@@ -1044,24 +1281,17 @@ def _analyze(req: AnalyzeRequest) -> AnalyzeResponse:
             "semantic_clusters": scenario.get("semantic_clusters", []),
             "trajectories": scenario.get("trajectories", []),
             "trajectory_clusters": scenario.get("trajectory_clusters", []),
-            "nearest_trajectory_patterns": scenario.get(
-                "nearest_trajectory_patterns", []
-            ),
+            "nearest_trajectory_patterns": scenario.get("nearest_trajectory_patterns", []),
             "event_time_windows_10min": scenario.get("event_time_windows_10min", []),
-            "system_state_vectors_10min": scenario.get(
-                "system_state_vectors_10min", []
-            ),
+            "system_state_vectors_10min": scenario.get("system_state_vectors_10min", []),
             "trajectories_10min": scenario.get("trajectories_10min", []),
             "trajectory_clusters_10min": scenario.get("trajectory_clusters_10min", []),
         }
     )
     result["decisions"]["skipped_agents"].append("RecommendationAgent")
-    result = _refresh_patternops_skill_plan(result)
     result["final"]["evidence_bundle"].update(
         {
-            "pattern_ops_skill_plan": result["evidence"].get(
-                "pattern_ops_skill_plan", {}
-            ),
+            "pattern_ops_skill_plan": result["evidence"].get("pattern_ops_skill_plan", {}),
             "pattern_ops_skill_executions": result["evidence"].get(
                 "pattern_ops_skill_executions", []
             ),
@@ -1093,9 +1323,7 @@ def _analyze(req: AnalyzeRequest) -> AnalyzeResponse:
                 event_type="agent.completed",
                 status="completed",
                 title="KnowledgeBaseRAGAgent 실행 완료",
-                summary=(
-                    "Knowledge Base 조회와 최종 분석 문서 저장 여부 판단을 마쳤습니다."
-                ),
+                summary=("Knowledge Base 조회와 최종 분석 문서 저장 여부 판단을 마쳤습니다."),
                 agent_name="KnowledgeBaseRAGAgent",
                 component="KnowledgeBaseRAGAgent",
                 layer="agent",
@@ -1251,11 +1479,7 @@ def _recommend_for_fingerprint(req: FingerprintRecommendationRequest) -> Analyze
         include_time_windows=req.include_time_windows,
     )
     selected = next(
-        (
-            item
-            for item in scenario["fingerprints"]
-            if item["fingerprint"] == req.fingerprint
-        ),
+        (item for item in scenario["fingerprints"] if item["fingerprint"] == req.fingerprint),
         None,
     )
     if selected is None:
@@ -1302,11 +1526,7 @@ def _recommend_for_fingerprint(req: FingerprintRecommendationRequest) -> Analyze
         scenario["recommendation"],
     )
     selected_impact = next(
-        (
-            item
-            for item in scenario.get("impacts", [])
-            if item["fingerprint"] == req.fingerprint
-        ),
+        (item for item in scenario.get("impacts", []) if item["fingerprint"] == req.fingerprint),
         {"risk_score": 0, "risk_level": "Low", "detected": False},
     )
 
@@ -1360,15 +1580,11 @@ def _recommend_for_fingerprint(req: FingerprintRecommendationRequest) -> Analyze
             }
         ]
         state["evidence"]["anomalies"] = [
-            item
-            for item in scenario.get("anomalies", [])
-            if item.get("pattern") == req.fingerprint
+            item for item in scenario.get("anomalies", []) if item.get("pattern") == req.fingerprint
         ]
         state["evidence"]["semantic_clusters"] = selected_semantic_clusters
         state["evidence"]["trajectories"] = scenario.get("trajectories", [])
-        state["evidence"]["trajectory_clusters"] = scenario.get(
-            "trajectory_clusters", []
-        )
+        state["evidence"]["trajectory_clusters"] = scenario.get("trajectory_clusters", [])
         state["evidence"]["nearest_trajectory_patterns"] = scenario.get(
             "nearest_trajectory_patterns", []
         )
@@ -1385,9 +1601,7 @@ def _recommend_for_fingerprint(req: FingerprintRecommendationRequest) -> Analyze
         {
             "fingerprint": req.fingerprint,
             "root_cause_hint": selected_recommendation.get("cause", ""),
-            "recommended_action_hint": selected_recommendation.get(
-                "recommendation", ""
-            ),
+            "recommended_action_hint": selected_recommendation.get("recommendation", ""),
             "impact": selected_impact,
             "selected_log": selected or {},
         }
@@ -1519,9 +1733,7 @@ def _recommend_for_fingerprint(req: FingerprintRecommendationRequest) -> Analyze
 
 
 @app.get("/exceptions", response_model=ExceptionRegistryResponse)
-def list_exceptions(
-    fingerprint: str | None = None, limit: int = 20
-) -> ExceptionRegistryResponse:
+def list_exceptions(fingerprint: str | None = None, limit: int = 20) -> ExceptionRegistryResponse:
     """Return registered exception fingerprints, newest first."""
     return ExceptionRegistryResponse(
         exceptions=fetch_exception_registry(fingerprint=fingerprint, limit=limit)
@@ -1604,15 +1816,11 @@ def get_similar_pattern_clusters(
         log_level=str(cluster.get("log_level") or ""),
         stacktrace=str(cluster.get("stacktrace") or ""),
     )
-    groups = find_similar_pattern_clusters_batch(
-        queries=[query], n_results=max(1, limit) + 1
-    )
+    groups = find_similar_pattern_clusters_batch(queries=[query], n_results=max(1, limit) + 1)
     matches = [
         match
         for match in (groups[0] if groups else [])
-        if not _is_same_pattern_match(
-            match, service_name=service_name, fingerprint=fingerprint
-        )
+        if not _is_same_pattern_match(match, service_name=service_name, fingerprint=fingerprint)
         and float(match.get("similarity") or 0) >= SIMILAR_PATTERN_LIST_THRESHOLD
     ][:limit]
     matches = _prepend_stored_similar_match(
@@ -1662,9 +1870,7 @@ def list_normal_patterns(
 ) -> AcceptedNormalPatternResponse:
     """Return accepted normal patterns (approved baselines kept under observation)."""
     return AcceptedNormalPatternResponse(
-        patterns=fetch_accepted_normal_patterns(
-            fingerprint=fingerprint, status=status, limit=limit
-        )
+        patterns=fetch_accepted_normal_patterns(fingerprint=fingerprint, status=status, limit=limit)
     )
 
 
@@ -1750,11 +1956,12 @@ def manual_merge_fingerprints(req: FingerprintManualMergeRequest) -> dict[str, o
             confidence=req.confidence,
         )
         sync_pattern_contracts_from_legacy_tables()
+        action_payload = req.model_dump(mode="json")
         action_id = record_pattern_ops_action(
             action_type="merge",
             pattern_id=str(result.get("canonical_fingerprint", "")),
             status="applied",
-            payload=req.dict(),
+            payload=action_payload,
             result=result,
             reason="Manual selected fingerprint merge",
         )
@@ -1764,6 +1971,7 @@ def manual_merge_fingerprints(req: FingerprintManualMergeRequest) -> dict[str, o
             "partial_refresh": _pattern_cluster_partial_refresh(
                 service_name=req.service_name,
                 fingerprints=_merge_refresh_fingerprints(result),
+                analysis_date=req.analysis_date,
             ),
         }
     except ValueError as exc:
@@ -1774,9 +1982,7 @@ def manual_merge_fingerprints(req: FingerprintManualMergeRequest) -> dict[str, o
 def suggest_pattern_rule(req: PatternRuleSuggestRequest) -> PatternRuleProposalResponse:
     """Suggest a deterministic normalization regex/template for a cluster."""
 
-    proposal = PatternRuleSuggestionAgent().propose(
-        cluster=req.cluster, message=req.message
-    )
+    proposal = PatternRuleSuggestionAgent().propose(cluster=req.cluster, message=req.message)
     return PatternRuleProposalResponse(**proposal.__dict__)
 
 
@@ -1823,11 +2029,7 @@ def approve_duplicate_pattern_candidate(candidate_key: str) -> dict[str, object]
 
     candidates = fetch_duplicate_pattern_candidates(status="", limit=500)
     candidate = next(
-        (
-            item
-            for item in candidates
-            if str(item.get("candidate_key")) == candidate_key
-        ),
+        (item for item in candidates if str(item.get("candidate_key")) == candidate_key),
         None,
     )
     if candidate is None:

@@ -37,7 +37,7 @@
           :disabled="store.loading || !serviceName.trim() || !analysisDate"
           @click="handleRunAnalysis"
         >
-          Re-run analysis
+          run analysis
         </button>
       </div>
     </template>
@@ -227,8 +227,18 @@ import type {
 } from '@/types/agentTypes'
 
 const store = useLogDetectStore()
-const serviceName = ref('')
-const analysisDate = ref(new Date().toISOString().slice(0, 10))
+const serviceName = computed({
+  get: () => store.selectedServiceName,
+  set: (value: string) => {
+    store.selectedServiceName = value
+  }
+})
+const analysisDate = computed({
+  get: () => store.selectedAnalysisDate,
+  set: (value: string) => {
+    store.selectedAnalysisDate = value
+  }
+})
 const showServiceLayer = ref(false)
 
 const evidenceBundle = computed(

@@ -36,7 +36,7 @@ import type {
 
 const apiClient = axios.create({
   baseURL: import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000',
-  timeout: 300000
+  timeout: 3000000
 })
 
 export const agentApi = {

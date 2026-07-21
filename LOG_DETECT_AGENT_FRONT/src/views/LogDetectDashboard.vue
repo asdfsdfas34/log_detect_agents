@@ -37,7 +37,7 @@
           :disabled="store.loading || !serviceName.trim() || !analysisDate"
           @click="handleRunAnalysis"
         >
-          Re-run analysis
+          run analysis
         </button>
       </div>
     </template>
@@ -183,6 +183,34 @@
     </div>
 
     <div
+      v-if="mergedFingerprint"
+      class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+      @click.self="mergedFingerprint = null"
+    >
+      <div class="w-full max-w-lg rounded-lg bg-white p-5 shadow-xl">
+        <h3 class="text-lg font-semibold text-slate-900">Merge + Known 완료</h3>
+        <p class="mt-2 text-sm text-slate-600">
+          선택한 패턴을 병합하여 다음 fingerprint를 생성하고 Known Pattern으로
+          등록했습니다.
+        </p>
+        <div
+          class="mt-4 break-all rounded border border-emerald-200 bg-emerald-50 px-4 py-3 font-mono text-sm font-semibold text-emerald-800"
+        >
+          {{ mergedFingerprint }}
+        </div>
+        <div class="mt-5 flex justify-end">
+          <button
+            class="rounded bg-slate-800 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-700"
+            type="button"
+            @click="mergedFingerprint = null"
+          >
+            확인
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div
       v-if="showServiceLayer"
       class="fixed inset-0 z-40 flex items-center justify-center bg-black/40"
       @click.self="showServiceLayer = false"
@@ -243,9 +271,20 @@ import { useLogDetectStore } from '@/stores/logDetectStore'
 import type { Cluster, DuplicatePatternCandidate } from '@/types/agentTypes'
 
 const store = useLogDetectStore()
-const serviceName = ref('')
-const analysisDate = ref(new Date().toISOString().slice(0, 10))
+const serviceName = computed({
+  get: () => store.selectedServiceName,
+  set: (value: string) => {
+    store.selectedServiceName = value
+  }
+})
+const analysisDate = computed({
+  get: () => store.selectedAnalysisDate,
+  set: (value: string) => {
+    store.selectedAnalysisDate = value
+  }
+})
 const showServiceLayer = ref(false)
+const mergedFingerprint = ref<string | null>(null)
 const duplicateCandidateBusyKey = ref<string | null>(null)
 const patternClusterTable = ref<InstanceType<
   typeof PatternClusterTable
@@ -332,15 +371,17 @@ async function handleManualMergeKnown(fingerprints: string[]) {
     'Normalize variable NUM length values and review the function parameter mapping.'
   )
   if (!recommendation?.trim()) return
-  const merged = await store.manualMergeFingerprints({
+  const result = await store.manualMergeFingerprints({
     service_name: trimmed,
+    analysis_date: analysisDate.value,
     fingerprints,
     cause,
     recommendation,
     confidence: 'HIGH'
   })
-  if (merged) {
+  if (result?.canonical_fingerprint) {
     patternClusterTable.value?.clearSelectedFingerprints()
+    mergedFingerprint.value = result.canonical_fingerprint
   }
 }
 

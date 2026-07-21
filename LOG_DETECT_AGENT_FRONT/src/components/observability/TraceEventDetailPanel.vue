@@ -91,6 +91,19 @@
         <p class="mt-0.5">{{ validatorInfo.text }}</p>
       </div>
 
+      <div
+        v-if="verificationRows.length"
+        class="rounded border border-lime-200 bg-lime-50 px-3 py-2 text-xs"
+      >
+        <p class="font-semibold text-lime-800">Verification 근거·결과</p>
+        <dl class="mt-1.5 grid grid-cols-1 gap-1 sm:grid-cols-2">
+          <div v-for="row in verificationRows" :key="row.key">
+            <dt class="text-lime-600">{{ row.label }}</dt>
+            <dd class="break-words text-lime-900">{{ row.value }}</dd>
+          </div>
+        </dl>
+      </div>
+
       <div v-if="qualityInfo" class="rounded border border-rose-100 bg-rose-50 px-3 py-2 text-xs text-rose-800">
         <p class="font-semibold">품질 평가</p>
         <p class="mt-0.5">{{ qualityInfo }}</p>
@@ -164,7 +177,7 @@ const outputSummaryLabel = computed(() => {
 })
 
 const validatorInfo = computed(() => {
-  if (props.event?.kind !== 'validation') return null
+  if (!props.event?.event_type.startsWith('validator.')) return null
   const passed = props.event.metadata?.passed === true
   const validatorType = metaString('validator_type') ?? '검증'
   return passed
@@ -173,6 +186,72 @@ const validatorInfo = computed(() => {
         box: 'border-red-200 bg-red-50 text-red-700',
         text: `${validatorType} 실패 — ${props.event.summary}`
       }
+})
+
+const VERIFICATION_LABELS: Record<string, string> = {
+  total_logs: '전체 로그',
+  processed_new_logs: '처리 로그',
+  fingerprint_count: 'Fingerprint',
+  normalized_message_count: '정규화 메시지',
+  drain_template_count: 'Drain3 Template',
+  stacktrace_evidence_count: 'Stack trace 근거',
+  evidence_dimensions: '비교 근거',
+  weights: '근거별 가중치',
+  known_similarity_threshold: 'Known 판정 임계값',
+  duplicate_similarity_threshold: '중복 판정 임계값',
+  cluster_member_threshold: 'Cluster 편입 임계값',
+  semantic_link_threshold: 'Semantic link 임계값',
+  hdbscan_min_cluster_size: 'HDBSCAN 최소 Cluster 크기',
+  hdbscan_min_samples: 'HDBSCAN 최소 Sample',
+  semantic_hdbscan_min_cluster_size: 'Semantic HDBSCAN 최소 Cluster 크기',
+  semantic_hdbscan_min_samples: 'Semantic HDBSCAN 최소 Sample',
+  hybrid_vector_schema_version: 'Hybrid vector schema',
+  pattern_status_counts: 'Pattern 상태',
+  match_sources: '판정 출처',
+  known_pattern_count: 'Known Pattern',
+  new_pattern_count: 'New Pattern',
+  anomaly_count: '이상 징후',
+  cluster_count: 'Pattern Cluster',
+  clustered_fingerprint_count: 'Cluster 소속 Fingerprint',
+  clustered_occurrence_count: 'Cluster 소속 로그',
+  algorithms: '적용 알고리즘',
+  avg_pattern_similarity: '평균 Pattern 유사도',
+  min_pattern_similarity: '최소 Pattern 유사도',
+  avg_semantic_similarity: '평균 Semantic 유사도',
+  max_semantic_similarity: '최대 Semantic 유사도',
+  semantic_cluster_count: 'Semantic Cluster',
+  semantic_fingerprint_count: 'Semantic Fingerprint',
+  semantic_occurrence_count: 'Semantic 소속 로그',
+  fallback_cluster_count: 'Fallback Cluster',
+  candidate_count: '중복 후보',
+  verified_candidate_count: '검증 통과 추천',
+  failed_candidate_count: '검증 실패 추천',
+  candidate_fingerprint_count: '후보 Fingerprint',
+  candidate_status_counts: '후보 상태',
+  merge_group_count: '검토 대기 병합 그룹',
+  avg_candidate_confidence: '평균 후보 신뢰도',
+  max_candidate_confidence: '최대 후보 신뢰도',
+  verification_step_count: 'Verification 세부 단계',
+  verification_passed: 'Verification 통과'
+}
+
+function formatMetadataValue(value: unknown): string {
+  if (Array.isArray(value)) return value.length ? value.join(', ') : '없음'
+  if (typeof value === 'number') {
+    return Number.isInteger(value) ? value.toLocaleString('ko-KR') : value.toFixed(4)
+  }
+  if (typeof value === 'boolean') return value ? '예' : '아니오'
+  if (value == null || value === '') return '없음'
+  return String(value)
+}
+
+const verificationRows = computed(() => {
+  if (!props.event?.event_type.startsWith('verification.')) return []
+  return Object.entries(props.event.metadata ?? {}).map(([key, value]) => ({
+    key,
+    label: VERIFICATION_LABELS[key] ?? key.split('_').join(' '),
+    value: formatMetadataValue(value)
+  }))
 })
 
 const qualityInfo = computed(() => {

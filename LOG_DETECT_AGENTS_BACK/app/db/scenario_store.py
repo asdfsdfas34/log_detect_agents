@@ -58,15 +58,11 @@ JSON_LITERAL_VALUE_RE = re.compile(
     re.IGNORECASE,
 )
 QUOTED_VOLATILE_RE = re.compile(r'"(?=[^"]*\d)[A-Za-z0-9_.:/\\-]{2,}"')
-ASSIGNED_VALUE_RE = re.compile(
-    r"(\b[A-Za-z_][\w.-]*\s*[:=]\s*)(\"[^\"]*\"|'[^']*'|[^\s,;}\]]+)"
-)
+ASSIGNED_VALUE_RE = re.compile(r"(\b[A-Za-z_][\w.-]*\s*[:=]\s*)(\"[^\"]*\"|'[^']*'|[^\s,;}\]]+)")
 CANDIDATE_KEY_VALUE_RE = re.compile(
     r"(\b[A-Za-z_][\w.-]*\s*[:=]\s*)(\"[^\"]*\"|'[^']*'|[^\s,;}\]]+)"
 )
-SEMANTIC_VALUE_RE = re.compile(
-    r"\b(JobName|functionName)\s*:\s*([^\r\n]+)", re.IGNORECASE
-)
+SEMANTIC_VALUE_RE = re.compile(r"\b(JobName|functionName)\s*:\s*([^\r\n]+)", re.IGNORECASE)
 URL_FIELD_RE = re.compile(r"\b(AbsoluteUri)\s*:\s*([^\s\r\n]+)", re.IGNORECASE)
 IDENTIFIER_KEY_VALUE_RE = re.compile(
     r"(\b[A-Za-z_][\w.-]*(?:ID|Id|Status|Code|No|Number|Seq|Date|Time|Token|Key|"
@@ -163,6 +159,26 @@ TRAJECTORY_CLUSTER_RETURN_LIMIT = 8
 TRAJECTORY_NEAREST_RETURN_LIMIT = 3
 TRAJECTORY_CLUSTER_MIN_SIZE = 3
 TRAJECTORY_CLUSTER_MIN_SAMPLES = 2
+
+
+def pattern_verification_profile() -> dict[str, Any]:
+    """Return the public, redaction-safe configuration used for pattern verification."""
+
+    return {
+        "evidence_dimensions": list(PATTERN_WEIGHTS),
+        "weights": [f"{name}={weight:.2f}" for name, weight in PATTERN_WEIGHTS.items()],
+        "known_similarity_threshold": PATTERN_KNOWN_SIMILARITY_THRESHOLD,
+        "duplicate_similarity_threshold": PATTERN_DUPLICATE_SIMILARITY_THRESHOLD,
+        "cluster_member_threshold": PATTERN_CLUSTER_MEMBER_THRESHOLD,
+        "semantic_link_threshold": PATTERN_CLUSTER_SEMANTIC_LINK_THRESHOLD,
+        "hdbscan_min_cluster_size": HDBSCAN_MIN_CLUSTER_SIZE,
+        "hdbscan_min_samples": HDBSCAN_MIN_SAMPLES,
+        "semantic_hdbscan_min_cluster_size": SEMANTIC_CLUSTER_MIN_CLUSTER_SIZE,
+        "semantic_hdbscan_min_samples": SEMANTIC_CLUSTER_MIN_SAMPLES,
+        "hybrid_vector_schema_version": HYBRID_VECTOR_SCHEMA_VERSION,
+    }
+
+
 # "10min" is additive; existing 30min/hour/day buckets are preserved unchanged.
 TIME_SERIES_BUCKET_SIZES = ("day", "hour", "30min", "10min")
 # Fine-grained bucket used for the RecFM Preview. Kept as a named constant so the
@@ -313,16 +329,10 @@ def _normalize_url(match: re.Match[str]) -> str:
     except ValueError:
         return "URL" + suffix
     path_parts = [
-        (
-            "*"
-            if UUID_RE.fullmatch(part) or part.isdigit() or HASH_LIKE_RE.fullmatch(part)
-            else part
-        )
+        ("*" if UUID_RE.fullmatch(part) or part.isdigit() or HASH_LIKE_RE.fullmatch(part) else part)
         for part in parsed.path.split("/")
     ]
-    query = "&".join(
-        f"{key}=*" for key, _ in parse_qsl(parsed.query, keep_blank_values=True)
-    )
+    query = "&".join(f"{key}=*" for key, _ in parse_qsl(parsed.query, keep_blank_values=True))
     normalized = urlunsplit(("URL", parsed.netloc, "/".join(path_parts), query, ""))
     return normalized + suffix
 
@@ -466,10 +476,7 @@ def _apply_drain_templates(groups: list[dict[str, Any]]) -> list[dict[str, Any]]
 
 def fingerprint_id(service_name: str, level: str, message: str, stacktrace: str) -> str:
     """Create a stable short fingerprint identifier from normalized error content."""
-    raw = (
-        f"{service_name}|{level}|"
-        f"{normalize_log_text(message)}|{normalize_stacktrace(stacktrace)}"
-    )
+    raw = f"{service_name}|{level}|{normalize_log_text(message)}|{normalize_stacktrace(stacktrace)}"
     return "FP-" + hashlib.sha1(raw.encode("utf-8")).hexdigest()[:6].upper()
 
 
@@ -658,8 +665,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     cur = conn.cursor()
     # Migrate older demo tables that used a service-level impact schema.
     existing_columns = [
-        row[1]
-        for row in cur.execute("PRAGMA table_info(impact_evaluations)").fetchall()
+        row[1] for row in cur.execute("PRAGMA table_info(impact_evaluations)").fetchall()
     ]
     if existing_columns and "fingerprint" not in existing_columns:
         cur.execute("DROP TABLE impact_evaluations")
@@ -1044,9 +1050,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     }.items():
         duplicate_candidate_columns = [
             row[1]
-            for row in cur.execute(
-                "PRAGMA table_info(pattern_duplicate_candidates)"
-            ).fetchall()
+            for row in cur.execute("PRAGMA table_info(pattern_duplicate_candidates)").fetchall()
         ]
         if column not in duplicate_candidate_columns:
             cur.execute(
@@ -1059,13 +1063,10 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         "similarity_score": "REAL",
     }.items():
         analysis_columns = [
-            row[1]
-            for row in cur.execute("PRAGMA table_info(log_analysis_results)").fetchall()
+            row[1] for row in cur.execute("PRAGMA table_info(log_analysis_results)").fetchall()
         ]
         if column not in analysis_columns:
-            cur.execute(
-                f"ALTER TABLE log_analysis_results ADD COLUMN {column} {definition}"
-            )
+            cur.execute(f"ALTER TABLE log_analysis_results ADD COLUMN {column} {definition}")
     for column, definition in {
         "resolution_method": "TEXT DEFAULT ''",
         "title": "TEXT DEFAULT ''",
@@ -1081,8 +1082,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         "embedding_status": "TEXT DEFAULT 'pending'",
     }.items():
         knowledge_columns = [
-            row[1]
-            for row in cur.execute("PRAGMA table_info(knowledge_cards)").fetchall()
+            row[1] for row in cur.execute("PRAGMA table_info(knowledge_cards)").fetchall()
         ]
         if column not in knowledge_columns:
             cur.execute(f"ALTER TABLE knowledge_cards ADD COLUMN {column} {definition}")
@@ -1093,20 +1093,16 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         "normalized_message": "TEXT DEFAULT ''",
     }.items():
         exception_columns = [
-            row[1]
-            for row in cur.execute("PRAGMA table_info(exception_registry)").fetchall()
+            row[1] for row in cur.execute("PRAGMA table_info(exception_registry)").fetchall()
         ]
         if column not in exception_columns:
-            cur.execute(
-                f"ALTER TABLE exception_registry ADD COLUMN {column} {definition}"
-            )
+            cur.execute(f"ALTER TABLE exception_registry ADD COLUMN {column} {definition}")
     for column, definition in {
         "hybrid_vector_json": "TEXT NOT NULL DEFAULT '[]'",
         "hybrid_vector_schema_version": "TEXT NOT NULL DEFAULT ''",
     }.items():
         pattern_cluster_columns = [
-            row[1]
-            for row in cur.execute("PRAGMA table_info(pattern_clusters)").fetchall()
+            row[1] for row in cur.execute("PRAGMA table_info(pattern_clusters)").fetchall()
         ]
         if column not in pattern_cluster_columns:
             cur.execute(f"ALTER TABLE pattern_clusters ADD COLUMN {column} {definition}")
@@ -1116,9 +1112,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     ensure_patternops_schema(conn)
 
 
-def populate_service_logs_v2(
-    conn: sqlite3.Connection, *, replace: bool = False
-) -> int:
+def populate_service_logs_v2(conn: sqlite3.Connection, *, replace: bool = False) -> int:
     """Populate service_logs_v2 from service_logs and return inserted/updated row count."""
 
     ensure_schema(conn)
@@ -1328,7 +1322,9 @@ def _drain_template_similarity(left: str, right: str) -> float:
     right_template = str(right_result.get("template_mined") or right_normalized).strip()
     if left_template == right_template:
         return 1.0
-    same_cluster_bonus = 0.1 if left_result.get("cluster_id") == right_result.get("cluster_id") else 0.0
+    same_cluster_bonus = (
+        0.1 if left_result.get("cluster_id") == right_result.get("cluster_id") else 0.0
+    )
     return min(1.0, _sequence_similarity(left_template, right_template) + same_cluster_bonus)
 
 
@@ -1338,8 +1334,7 @@ def _template_structure_similarity(left: str, right: str) -> float:
 
 def _key_value_schema(text: str) -> set[str]:
     keys = {
-        match.group(1).lower()
-        for match in re.finditer(r"\b([a-zA-Z_][\w.-]*)\s*[:=]\s*", text)
+        match.group(1).lower() for match in re.finditer(r"\b([a-zA-Z_][\w.-]*)\s*[:=]\s*", text)
     }
     keys.update(
         match.group(1).lower()
@@ -1436,10 +1431,7 @@ def _metadata_match_score(item: dict[str, Any], match: dict[str, Any]) -> float:
 def _match_message(match: dict[str, Any]) -> str:
     metadata = _metadata_from_match(match)
     return str(
-        metadata.get("normalized_message")
-        or metadata.get("message")
-        or match.get("document")
-        or ""
+        metadata.get("normalized_message") or metadata.get("message") or match.get("document") or ""
     )
 
 
@@ -1572,9 +1564,7 @@ def _suggest_regex_from_duplicate_signature(signature: str) -> str:
     return f"^{escaped}$"
 
 
-def _suggest_regex_from_duplicate_items(
-    signature: str, items: list[dict[str, Any]]
-) -> str:
+def _suggest_regex_from_duplicate_items(signature: str, items: list[dict[str, Any]]) -> str:
     messages = [str(item.get("message") or "") for item in items if item.get("message")]
     if not messages:
         return _suggest_regex_from_duplicate_signature(signature)
@@ -1657,8 +1647,7 @@ def _structure_similarity(items: list[dict[str, Any]]) -> tuple[float, float]:
 def _candidate_regex_matches_all(regex: str, items: list[dict[str, Any]]) -> bool:
     try:
         return all(
-            re.search(regex, str(item.get("message") or ""), flags=re.IGNORECASE)
-            for item in items
+            re.search(regex, str(item.get("message") or ""), flags=re.IGNORECASE) for item in items
         )
     except re.error:
         return False
@@ -1691,9 +1680,7 @@ def _relax_regex_trailing_context(regex: str) -> str:
     return f"{regex}[\\s\\S]*$"
 
 
-def _rescue_regex_from_raw_rows(
-    signature: str, rows: list[sqlite3.Row | tuple[Any, ...]]
-) -> str:
+def _rescue_regex_from_raw_rows(signature: str, rows: list[sqlite3.Row | tuple[Any, ...]]) -> str:
     items = [
         {
             "message": str(row[3] or ""),
@@ -1748,9 +1735,7 @@ def _raw_log_rows_for_fingerprints(
         """,
         [*fingerprints, service_name, log_level],
     ).fetchall()
-    deduped: dict[int, sqlite3.Row | tuple[Any, ...]] = {
-        int(row[0]): row for row in rows
-    }
+    deduped: dict[int, sqlite3.Row | tuple[Any, ...]] = {int(row[0]): row for row in rows}
     service_rows = conn.execute(
         """
         SELECT rowid, service_name, level, message, COALESCE(stack_trace, ''), created_at
@@ -1783,9 +1768,7 @@ def _llm_pattern_reason_enabled() -> bool:
     if not enabled:
         return False
     return bool(
-        os.getenv("OPENAI_API_KEY")
-        or settings.openai_api_key
-        or os.getenv("OPENAI_BASE_URL")
+        os.getenv("OPENAI_API_KEY") or settings.openai_api_key or os.getenv("OPENAI_BASE_URL")
     )
 
 
@@ -1815,9 +1798,7 @@ def _sample_reason_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "fingerprint": str(item.get("fingerprint") or ""),
             "occurrence_count": int(item.get("occurrence_count") or 0),
             "message": str(item.get("message") or "")[:400],
-            "normalized_message": normalize_log_text(str(item.get("message") or ""))[
-                :400
-            ],
+            "normalized_message": normalize_log_text(str(item.get("message") or ""))[:400],
             "drain_template": str(item.get("drain_template") or "")[:400],
         }
         for item in ranked[:4]
@@ -1911,8 +1892,7 @@ def _refresh_pending_candidate_llm_reasons(
             continue
         fingerprints = [str(item) for item in candidate.get("fingerprints", [])]
         items = [
-            details.get(fingerprint, {"fingerprint": fingerprint})
-            for fingerprint in fingerprints
+            details.get(fingerprint, {"fingerprint": fingerprint}) for fingerprint in fingerprints
         ]
         reason_payload = _generate_duplicate_pattern_reason(
             deterministic_reason=str(candidate.get("reason") or ""),
@@ -1975,9 +1955,7 @@ def detect_duplicate_pattern_candidates(
         log_level = str(representative.get("log_level") or "").upper()
         signature = _common_duplicate_signature(semantic_group)
         if service_name and log_level and signature:
-            buckets.setdefault((service_name, log_level, signature), []).extend(
-                semantic_group
-            )
+            buckets.setdefault((service_name, log_level, signature), []).extend(semantic_group)
 
     candidates: list[dict[str, Any]] = []
     with sqlite3.connect(_resolve_db_path()) as conn:
@@ -1992,17 +1970,11 @@ def detect_duplicate_pattern_candidates(
             if not _candidate_items_allowed(items):
                 continue
             fingerprints = sorted(
-                {
-                    str(item.get("fingerprint") or "")
-                    for item in items
-                    if item.get("fingerprint")
-                }
+                {str(item.get("fingerprint") or "") for item in items if item.get("fingerprint")}
             )
             if len(fingerprints) < min_group_size:
                 continue
-            candidate_key = _duplicate_candidate_key(
-                service_name, log_level, signature
-            )
+            candidate_key = _duplicate_candidate_key(service_name, log_level, signature)
             existing = conn.execute(
                 """
                 SELECT status
@@ -2021,6 +1993,7 @@ def detect_duplicate_pattern_candidates(
             suggested_regex = _suggest_regex_from_duplicate_items(signature, items)
             if not _candidate_regex_matches_all(suggested_regex, items):
                 continue
+            structure_similarity, variable_token_ratio = _structure_similarity(items)
             suggested_template = _suggest_template_from_duplicate_signature(signature)
             reason_payload = _generate_duplicate_pattern_reason(
                 deterministic_reason=deterministic_reason,
@@ -2083,6 +2056,12 @@ def detect_duplicate_pattern_candidates(
                     "reason_source": reason_payload["reason_source"],
                     "reason_model": reason_payload["reason_model"],
                     "status": "pending",
+                    "member_count": len(fingerprints),
+                    "regex_matches_all": True,
+                    "structure_similarity": round(structure_similarity, 4),
+                    "structure_similarity_threshold": DUPLICATE_MIN_STRUCTURE_SIMILARITY,
+                    "variable_token_ratio": round(variable_token_ratio, 4),
+                    "variable_token_ratio_threshold": DUPLICATE_MAX_VARIABLE_TOKEN_RATIO,
                 }
             )
             candidates_by_key[candidate_key] = candidates[-1]
@@ -2189,10 +2168,9 @@ def _hdbscan_component_allowed(
             scores.append(pair_scores.get((left, right), pair_scores.get((right, left), 0.0)))
     if not scores:
         return False
-    return (
-        max(scores) >= PATTERN_DUPLICATE_SIMILARITY_THRESHOLD
-        and sum(scores) / len(scores) >= 1.0 - (HDBSCAN_MAX_DISTANCE * 1.5)
-    )
+    return max(scores) >= PATTERN_DUPLICATE_SIMILARITY_THRESHOLD and sum(scores) / len(
+        scores
+    ) >= 1.0 - (HDBSCAN_MAX_DISTANCE * 1.5)
 
 
 def _hdbscan_duplicate_groups(
@@ -2322,9 +2300,7 @@ def _build_semantic_cluster_record(
         "representative_fingerprint": representative_fp,
         "representative_log": str(representative.get("message") or ""),
         "representative_cause": str(representative_recommendation.get("cause") or ""),
-        "recommendation_hint": str(
-            representative_recommendation.get("recommendation") or ""
-        ),
+        "recommendation_hint": str(representative_recommendation.get("recommendation") or ""),
         "risk_score": max(risk_scores, default=0),
         "anomaly_count": sum(1 for fp in fingerprints if fp in anomalies_by_fp),
         "pattern_statuses": sorted(
@@ -2398,9 +2374,7 @@ def build_semantic_log_clusters(
                 else:
                     by_label.setdefault(label, []).append(item)
             cluster_groups = [
-                items
-                for items in by_label.values()
-                if len(items) >= SEMANTIC_CLUSTER_MIN_SAMPLES
+                items for items in by_label.values() if len(items) >= SEMANTIC_CLUSTER_MIN_SAMPLES
             ]
             if noise_items:
                 cluster_groups.extend(_fallback_semantic_cluster_groups(noise_items))
@@ -2533,9 +2507,7 @@ def _fetch_semantic_log_clusters(
     ).fetchall()
     clusters: list[dict[str, Any]] = []
     for row in rows:
-        cluster_fingerprints = [
-            str(item) for item in _load_json_list(str(row[10] or "[]"))
-        ]
+        cluster_fingerprints = [str(item) for item in _load_json_list(str(row[10] or "[]"))]
         if fingerprints and not (set(cluster_fingerprints) & fingerprints):
             continue
         clusters.append(
@@ -2551,9 +2523,7 @@ def _fetch_semantic_log_clusters(
                 "recommendation_hint": str(row[8] or ""),
                 "drain_template": str(row[9] or ""),
                 "fingerprints": cluster_fingerprints,
-                "pattern_statuses": [
-                    str(item) for item in _load_json_list(str(row[11] or "[]"))
-                ],
+                "pattern_statuses": [str(item) for item in _load_json_list(str(row[11] or "[]"))],
                 "count": int(row[12] or 0),
                 "fingerprint_count": int(row[13] or 0),
                 "risk_score": int(row[14] or 0),
@@ -2671,10 +2641,7 @@ def _hybrid_numeric_features(item: dict[str, Any]) -> list[float]:
     anomaly_count = max(
         0.0,
         float(
-            item.get("anomaly_count")
-            or item.get("anomaly_detected")
-            or item.get("anomalies")
-            or 0
+            item.get("anomaly_count") or item.get("anomaly_detected") or item.get("anomalies") or 0
         ),
     )
     status = str(item.get("pattern_status") or "")
@@ -2688,9 +2655,7 @@ def _hybrid_numeric_features(item: dict[str, Any]) -> list[float]:
     ]
 
 
-def _hybrid_vector(
-    item: dict[str, Any], text_embedding: list[float] | None
-) -> list[float]:
+def _hybrid_vector(item: dict[str, Any], text_embedding: list[float] | None) -> list[float]:
     categorical = _hash_category_features(item)
     numeric = _hybrid_numeric_features(item)
     if text_embedding:
@@ -2715,10 +2680,7 @@ def _hybrid_vectors_for_groups(groups: list[dict[str, Any]]) -> list[list[float]
         text_embeddings = embeddings
     else:
         text_embeddings = [None for _ in groups]
-    return [
-        _hybrid_vector(item, text_embeddings[index])
-        for index, item in enumerate(groups)
-    ]
+    return [_hybrid_vector(item, text_embeddings[index]) for index, item in enumerate(groups)]
 
 
 def _mean_vector(vectors: list[list[float]]) -> list[float]:
@@ -2763,9 +2725,7 @@ def _attach_detection_features(
                 "accepted_normal_id": accepted.get("accepted_normal_id", ""),
                 "accepted_normal_reason": str(accepted.get("accepted_normal_reason", "")),
                 "accepted_normal_status": str(accepted.get("accepted_normal_status", "")),
-                "anomaly_type": str(
-                    accepted.get("anomaly_type", group.get("anomaly_type", ""))
-                ),
+                "anomaly_type": str(accepted.get("anomaly_type", group.get("anomaly_type", ""))),
             }
         )
     return enriched
@@ -2779,8 +2739,7 @@ def _pattern_cluster_match_from_group(
         "service_name": str(target.get("service_name") or ""),
         "log_level": str(target.get("log_level") or ""),
         "normalized_message": str(
-            target.get("normalized_message")
-            or normalize_log_text(str(target.get("message") or ""))
+            target.get("normalized_message") or normalize_log_text(str(target.get("message") or ""))
         ),
         "message": str(target.get("message") or ""),
         "stacktrace": str(target.get("stacktrace") or ""),
@@ -2818,9 +2777,7 @@ def _pattern_cluster_match_type(
     return "weak"
 
 
-def _pattern_cluster_member_pair(
-    *, pattern_similarity: float, semantic_similarity: float
-) -> bool:
+def _pattern_cluster_member_pair(*, pattern_similarity: float, semantic_similarity: float) -> bool:
     return _pattern_cluster_match_type(
         pattern_similarity=pattern_similarity,
         semantic_similarity=semantic_similarity,
@@ -2842,8 +2799,7 @@ def _pattern_cluster_pair_scores(
         if str(item.get("fingerprint") or "")
     }
     signatures = [
-        duplicate_candidate_signature(str(item.get("message") or ""))
-        for item in enriched
+        duplicate_candidate_signature(str(item.get("message") or "")) for item in enriched
     ]
     scores: dict[tuple[str, str], dict[str, float]] = {}
     for left_index, left in enumerate(enriched):
@@ -2856,16 +2812,16 @@ def _pattern_cluster_pair_scores(
                 continue
             if str(left.get("service_name") or "") != str(right.get("service_name") or ""):
                 continue
-            if str(left.get("log_level") or "").upper() != str(
-                right.get("log_level") or ""
-            ).upper():
+            if (
+                str(left.get("log_level") or "").upper()
+                != str(right.get("log_level") or "").upper()
+            ):
                 continue
             semantic_similarity = _cosine_score(vectors[left_index], vectors[right_index])
             right_template = str(right.get("drain_template") or "")
             same_template = bool(left_template and left_template == right_template)
             same_signature = bool(
-                signatures[left_index]
-                and signatures[left_index] == signatures[right_index]
+                signatures[left_index] and signatures[left_index] == signatures[right_index]
             )
             if (
                 not same_template
@@ -2883,9 +2839,7 @@ def _pattern_cluster_pair_scores(
                 _pattern_similarity(left, left_match),
                 _pattern_similarity(right, right_match),
             )
-            hybrid_score = _hybrid_cluster_score(
-                pattern_similarity, semantic_similarity
-            )
+            hybrid_score = _hybrid_cluster_score(pattern_similarity, semantic_similarity)
             scores[(left_fp, right_fp)] = {
                 "pattern_similarity": pattern_similarity,
                 "semantic_similarity": semantic_similarity,
@@ -2982,7 +2936,9 @@ def _hdbscan_pattern_components(
     return components
 
 
-def _merge_pattern_components(components: list[set[str]], all_fingerprints: set[str]) -> list[set[str]]:
+def _merge_pattern_components(
+    components: list[set[str]], all_fingerprints: set[str]
+) -> list[set[str]]:
     merged: list[set[str]] = []
     for component in components:
         if not component:
@@ -3020,9 +2976,7 @@ def _pattern_cluster_id(service_name: str, log_level: str, canonical_fingerprint
     return "PC-" + hashlib.sha1(raw.encode("utf-8")).hexdigest()[:10].upper()
 
 
-def _pattern_cluster_algorithm(
-    component: set[str], hdbscan_components: list[set[str]]
-) -> str:
+def _pattern_cluster_algorithm(component: set[str], hdbscan_components: list[set[str]]) -> str:
     if any(component <= hdbscan_component for hdbscan_component in hdbscan_components):
         return "connected_component+hdbscan"
     return "connected_component"
@@ -3071,7 +3025,9 @@ def _upsert_pattern_cluster_records(
     hdbscan_components: list[set[str]],
 ) -> list[dict[str, Any]]:
     lookup = {str(group.get("fingerprint") or ""): group for group in groups}
-    service_names = {str(group.get("service_name") or "") for group in groups if group.get("service_name")}
+    service_names = {
+        str(group.get("service_name") or "") for group in groups if group.get("service_name")
+    }
     _delete_pattern_clusters_for_services(conn, service_names)
 
     cluster_records: list[dict[str, Any]] = []
@@ -3092,17 +3048,12 @@ def _upsert_pattern_cluster_records(
             for item in items
         ]
         pattern_values = [float(score.get("pattern_similarity") or 0) for score in member_scores]
-        semantic_values = [
-            float(score.get("semantic_similarity") or 0) for score in member_scores
-        ]
+        semantic_values = [float(score.get("semantic_similarity") or 0) for score in member_scores]
         total_count = sum(int(item.get("occurrence_count") or 0) for item in items)
         known_status = str(canonical.get("pattern_status") or "")
         algorithm = _pattern_cluster_algorithm(component, hdbscan_components)
         hybrid_vector = _mean_vector(
-            [
-                hybrid_vectors_by_fp.get(str(item.get("fingerprint") or ""), [])
-                for item in items
-            ]
+            [hybrid_vectors_by_fp.get(str(item.get("fingerprint") or ""), []) for item in items]
         )
         representative_template = str(
             canonical.get("drain_template")
@@ -3222,15 +3173,11 @@ def _upsert_pattern_cluster_records(
                 "avg_pattern_similarity": round(sum(pattern_values) / len(pattern_values), 4)
                 if pattern_values
                 else 0,
-                "min_pattern_similarity": round(min(pattern_values), 4)
-                if pattern_values
-                else 0,
+                "min_pattern_similarity": round(min(pattern_values), 4) if pattern_values else 0,
                 "avg_semantic_similarity": round(sum(semantic_values) / len(semantic_values), 4)
                 if semantic_values
                 else 0,
-                "max_semantic_similarity": round(max(semantic_values), 4)
-                if semantic_values
-                else 0,
+                "max_semantic_similarity": round(max(semantic_values), 4) if semantic_values else 0,
                 "known_status": known_status,
                 "hybrid_vector": hybrid_vector,
                 "hybrid_vector_schema_version": HYBRID_VECTOR_SCHEMA_VERSION,
@@ -3326,9 +3273,7 @@ def build_pattern_clusters(
         return []
     enriched_groups, pair_scores, hybrid_vectors_by_fp = _pattern_cluster_pair_scores(groups)
     all_fingerprints = {
-        str(group.get("fingerprint") or "")
-        for group in enriched_groups
-        if group.get("fingerprint")
+        str(group.get("fingerprint") or "") for group in enriched_groups if group.get("fingerprint")
     }
     connected_components = _connected_pattern_components(enriched_groups, pair_scores)
     hdbscan_components = _hdbscan_pattern_components(enriched_groups, pair_scores)
@@ -3640,11 +3585,7 @@ def update_duplicate_pattern_candidate_status(
     _PIPELINE_CACHE.clear()
     candidates = fetch_duplicate_pattern_candidates(status="", limit=500)
     return next(
-        (
-            candidate
-            for candidate in candidates
-            if candidate["candidate_key"] == candidate_key
-        ),
+        (candidate for candidate in candidates if candidate["candidate_key"] == candidate_key),
         None,
     )
 
@@ -3687,11 +3628,7 @@ def merge_duplicate_pattern_candidate(candidate_key: str, *, rule_id: int) -> di
                 """,
                 (candidate_service, candidate_level),
             ).fetchall()
-            raw_rows = [
-                row
-                for row in service_rows
-                if matcher.search(str(row[3] or ""))
-            ]
+            raw_rows = [row for row in service_rows if matcher.search(str(row[3] or ""))]
         if not raw_rows and candidate_service and candidate_level:
             rescued_rows = _raw_log_rows_for_fingerprints(
                 conn,
@@ -3886,9 +3823,7 @@ def merge_duplicate_pattern_candidate(candidate_key: str, *, rule_id: int) -> di
             "occurrence_count": occurrence_count,
             "log_level": representative_level,
             "message": canonical_template or representative_message,
-            "normalized_message": normalize_log_text(
-                canonical_template or representative_message
-            ),
+            "normalized_message": normalize_log_text(canonical_template or representative_message),
             "stacktrace": normalize_stacktrace(representative_stack),
             "service_name": representative_service,
             "first_seen": first_seen,
@@ -3904,9 +3839,7 @@ def merge_duplicate_pattern_candidate(candidate_key: str, *, rule_id: int) -> di
             row_level = str(log_row[2]).upper()
             row_message = str(log_row[3] or "")
             row_stack = str(log_row[4] or "")
-            alias_fingerprints.add(
-                fingerprint_id(row_service, row_level, row_message, row_stack)
-            )
+            alias_fingerprints.add(fingerprint_id(row_service, row_level, row_message, row_stack))
             alias_fingerprints.add(
                 fingerprint_id(
                     row_service,
@@ -4029,9 +3962,7 @@ def merge_duplicate_pattern_candidate(candidate_key: str, *, rule_id: int) -> di
     return {
         "merged": True,
         "canonical_fingerprint": canonical_fingerprint,
-        "merged_fingerprints": [
-            fp for fp in old_fingerprints if fp != canonical_fingerprint
-        ],
+        "merged_fingerprints": [fp for fp in old_fingerprints if fp != canonical_fingerprint],
         "occurrence_count": occurrence_count,
         "chroma": chroma_result,
     }
@@ -4058,13 +3989,9 @@ def _match_score(match: dict[str, Any]) -> float:
 
 
 def _exact_known_match(conn: sqlite3.Connection, fp: str) -> tuple[bool, str]:
-    if conn.execute(
-        "SELECT 1 FROM knowledge_cards WHERE fingerprint=? LIMIT 1", (fp,)
-    ).fetchone():
+    if conn.execute("SELECT 1 FROM knowledge_cards WHERE fingerprint=? LIMIT 1", (fp,)).fetchone():
         return True, "knowledge_cards"
-    if conn.execute(
-        "SELECT 1 FROM known_patterns WHERE fingerprint=? LIMIT 1", (fp,)
-    ).fetchone():
+    if conn.execute("SELECT 1 FROM known_patterns WHERE fingerprint=? LIMIT 1", (fp,)).fetchone():
         return True, "known_patterns"
     return False, ""
 
@@ -4174,15 +4101,10 @@ def _pattern_status_from_matches(
     )
     best_match = _top_similarity([m for m in [approved_match, observed_match] if m])
     best_score = _match_score(best_match) if best_match else 0.0
-    if (
-        best_match
-        and best_score >= PATTERN_KNOWN_SIMILARITY_THRESHOLD
-    ):
+    if best_match and best_score >= PATTERN_KNOWN_SIMILARITY_THRESHOLD:
         metadata = best_match.get("metadata") or {}
         similar_fp = str(metadata.get("fingerprint") or best_match.get("id") or "")
-        source = (
-            "incident_analyses" if best_match is approved_match else "pattern_clusters"
-        )
+        source = "incident_analyses" if best_match is approved_match else "pattern_clusters"
         return {
             "pattern_status": "known_similar",
             "match_source": source,
@@ -4201,9 +4123,7 @@ def _pattern_status_from_matches(
             "pattern_status": "observed_existing",
             "match_source": "fingerprints",
             "similar_fingerprint": similar_fp,
-            "similarity_score": (
-                float(best_match.get("similarity") or 0) if best_match else 1.0
-            ),
+            "similarity_score": (float(best_match.get("similarity") or 0) if best_match else 1.0),
         }
 
     return {
@@ -4224,8 +4144,7 @@ def _build_pattern_documents(items: list[dict[str, Any]]) -> list[dict[str, Any]
                 "fingerprint": str(item.get("fingerprint") or ""),
                 "log_level": str(item.get("log_level") or ""),
                 "drain_template": str(
-                    item.get("drain_template")
-                    or drain_log_template(str(item.get("message") or ""))
+                    item.get("drain_template") or drain_log_template(str(item.get("message") or ""))
                 ),
                 "message_template": str(item.get("message_template") or ""),
                 "normalized_message": str(item.get("normalized_message") or ""),
@@ -4251,9 +4170,7 @@ def _upsert_pattern_clusters(items: list[dict[str, Any]]) -> None:
 
 
 def save_new_pattern_clusters(items: list[dict[str, Any]]) -> dict[str, Any] | None:
-    new_items = [
-        item for item in items if str(item.get("pattern_status") or "") == "new_pattern"
-    ]
+    new_items = [item for item in items if str(item.get("pattern_status") or "") == "new_pattern"]
     documents = _build_pattern_documents(new_items)
     if not documents:
         return None
@@ -4272,9 +4189,50 @@ def fetch_pattern_cluster(
     return groups.get(fingerprint)
 
 
-def recommendation_for(
-    conn: sqlite3.Connection, fp: str, sub_category: str
-) -> dict[str, str]:
+def fetch_fingerprint_counts_for_analysis_date(
+    *, service_name: str, fingerprints: list[str], analysis_date: str
+) -> dict[str, int]:
+    """Count canonical fingerprints from raw logs for one analysis date."""
+
+    requested = {str(item).strip() for item in fingerprints if str(item).strip()}
+    counts = {fingerprint: 0 for fingerprint in requested}
+    if not service_name or not requested or not analysis_date:
+        return counts
+    db_path = _resolve_db_path()
+    if not Path(db_path).exists():
+        return counts
+    with sqlite3.connect(db_path) as conn:
+        ensure_schema(conn)
+        known_signature_map = _known_pattern_signature_map(conn)
+        rows = conn.execute(
+            """
+            SELECT service_name, level, message, COALESCE(stack_trace, '')
+            FROM service_logs
+            WHERE service_name=? AND substr(created_at, 1, 10)=?
+            """,
+            (service_name, analysis_date),
+        ).fetchall()
+        for row_service, level, message, stacktrace in rows:
+            raw_fingerprint = fingerprint_id(
+                str(row_service),
+                str(level).upper(),
+                str(message or ""),
+                str(stacktrace or ""),
+            )
+            canonical_fingerprint = _canonical_fingerprint(
+                conn,
+                raw_fingerprint,
+                service_name=str(row_service),
+                log_level=str(level),
+                message=str(message or ""),
+                known_signature_map=known_signature_map,
+            )
+            if canonical_fingerprint in counts:
+                counts[canonical_fingerprint] += 1
+    return counts
+
+
+def recommendation_for(conn: sqlite3.Connection, fp: str, sub_category: str) -> dict[str, str]:
     """Return recommendation by Knowledge Card, Known Pattern, then rule fallback priority."""
     cur = conn.cursor()
     row = cur.execute(
@@ -4303,9 +4261,7 @@ def recommendation_for(
             "타임아웃/재시도/서킷브레이커 설정 점검",
         ),
     }
-    cause, action = rules.get(
-        sub_category, ("원인 미상", "로그와 최근 배포 변경사항을 추가 분석")
-    )
+    cause, action = rules.get(sub_category, ("원인 미상", "로그와 최근 배포 변경사항을 추가 분석"))
     return {"cause": cause, "recommendation": action, "confidence": "MEDIUM"}
 
 
@@ -4371,18 +4327,12 @@ def _bucket_start(value: str, bucket_size: str) -> str:
         # Floor the minute to the nearest 10-minute boundary
         # (e.g. 10:00-10:09 -> 10:00, 10:10-10:19 -> 10:10).
         minute = (parsed.minute // 10) * 10
-        return parsed.replace(minute=minute, second=0, microsecond=0).isoformat(
-            timespec="seconds"
-        )
+        return parsed.replace(minute=minute, second=0, microsecond=0).isoformat(timespec="seconds")
     if bucket_size == "30min":
         minute = 30 if parsed.minute >= 30 else 0
-        return parsed.replace(minute=minute, second=0, microsecond=0).isoformat(
-            timespec="seconds"
-        )
+        return parsed.replace(minute=minute, second=0, microsecond=0).isoformat(timespec="seconds")
     if bucket_size == "hour":
-        return parsed.replace(minute=0, second=0, microsecond=0).isoformat(
-            timespec="seconds"
-        )
+        return parsed.replace(minute=0, second=0, microsecond=0).isoformat(timespec="seconds")
     return parsed.date().isoformat()
 
 
@@ -4557,9 +4507,7 @@ def _upsert_fingerprint_merge_groups(
     merge_groups: list[dict[str, Any]] = []
     for candidate in candidates:
         fingerprints = [
-            str(fp)
-            for fp in candidate.get("fingerprints", [])
-            if str(fp) in groups_by_fingerprint
+            str(fp) for fp in candidate.get("fingerprints", []) if str(fp) in groups_by_fingerprint
         ]
         if len(fingerprints) < 2:
             continue
@@ -4568,8 +4516,7 @@ def _upsert_fingerprint_merge_groups(
             key=lambda fp: int(groups_by_fingerprint[fp].get("occurrence_count") or 0),
         )
         total_count = sum(
-            int(groups_by_fingerprint[fp].get("occurrence_count") or 0)
-            for fp in fingerprints
+            int(groups_by_fingerprint[fp].get("occurrence_count") or 0) for fp in fingerprints
         )
         similarity = float(candidate.get("confidence") or 0)
         group = {
@@ -4637,9 +4584,7 @@ def _vector_id(scope_key: str, bucket_start: str, bucket_size: str, version: str
 MetricBucket = tuple[str, str, str]
 
 
-def _metric_bucket_where(
-    alias: str, buckets: set[MetricBucket]
-) -> tuple[str, list[Any]]:
+def _metric_bucket_where(alias: str, buckets: set[MetricBucket]) -> tuple[str, list[Any]]:
     if not buckets:
         return "", []
     clauses: list[str] = []
@@ -4863,9 +4808,7 @@ def _fetch_event_time_windows(
             "anomaly_count": int(row[11] or 0),
             "max_risk_score": int(row[12] or 0),
             "top_fingerprints": [
-                item
-                for item in _load_json_list(str(row[13] or "[]"))
-                if isinstance(item, dict)
+                item for item in _load_json_list(str(row[13] or "[]")) if isinstance(item, dict)
             ],
         }
         for row in rows
@@ -5034,9 +4977,7 @@ def _trajectory_id(
     return "TRJ-" + hashlib.sha1(raw.encode("utf-8")).hexdigest()[:14].upper()
 
 
-def _trajectory_cluster_id(
-    service_name: str, bucket_size: str, member_ids: list[str]
-) -> str:
+def _trajectory_cluster_id(service_name: str, bucket_size: str, member_ids: list[str]) -> str:
     raw = f"{service_name}|{bucket_size}|{'|'.join(sorted(member_ids))}"
     return "TC-" + hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12].upper()
 
@@ -5120,9 +5061,7 @@ def _event_window_lookup(
     return {
         (str(row[0]), str(row[1]), str(row[2])): {
             "top_fingerprints": [
-                item
-                for item in _load_json_list(str(row[3] or "[]"))
-                if isinstance(item, dict)
+                item for item in _load_json_list(str(row[3] or "[]")) if isinstance(item, dict)
             ]
         }
         for row in rows
@@ -5144,14 +5083,10 @@ def _trajectory_top_fingerprints(
             fingerprint = str(fp_item.get("fingerprint") or "")
             if not fingerprint:
                 continue
-            counts[fingerprint] = counts.get(fingerprint, 0) + int(
-                fp_item.get("count") or 0
-            )
+            counts[fingerprint] = counts.get(fingerprint, 0) + int(fp_item.get("count") or 0)
     return [
         {"fingerprint": fingerprint, "count": count}
-        for fingerprint, count in sorted(
-            counts.items(), key=lambda pair: (-pair[1], pair[0])
-        )[:5]
+        for fingerprint, count in sorted(counts.items(), key=lambda pair: (-pair[1], pair[0]))[:5]
     ]
 
 
@@ -5180,15 +5115,11 @@ def _build_trajectory_record(
     bucket_size = str(items[0].get("bucket_size") or "")
     start_bucket = str(items[0].get("bucket_start") or "")
     end_bucket = str(items[-1].get("bucket_start") or "")
-    features_by_step = [
-        _load_json_dict(_json_dict(item.get("features", {}))) for item in items
-    ]
+    features_by_step = [_load_json_dict(_json_dict(item.get("features", {}))) for item in items]
     risks = [int(features.get("max_risk_score") or 0) for features in features_by_step]
     labels = [str(item.get("label") or "normal") for item in items]
     flat_vector = [
-        value
-        for features in features_by_step
-        for value in _trajectory_step_vector(features)
+        value for features in features_by_step for value in _trajectory_step_vector(features)
     ]
     top_fingerprints = _trajectory_top_fingerprints(items, windows)
     risk_delta = (risks[-1] if risks else 0) - (risks[0] if risks else 0)
@@ -5381,9 +5312,7 @@ def _fetch_trajectories(
             "end_bucket": str(row[5]),
             "vector_ids": [str(item) for item in _load_json_list(str(row[6] or "[]"))],
             "top_fingerprints": [
-                item
-                for item in _load_json_list(str(row[7] or "[]"))
-                if isinstance(item, dict)
+                item for item in _load_json_list(str(row[7] or "[]")) if isinstance(item, dict)
             ],
             "features": _load_json_dict(str(row[8] or "{}")),
             "flat_vector": [
@@ -5418,9 +5347,7 @@ def _hdbscan_trajectory_labels(vectors: list[list[float]]) -> list[int]:
     return [int(label) for label in labels]
 
 
-def _fallback_trajectory_groups(
-    trajectories: list[dict[str, Any]]
-) -> list[list[dict[str, Any]]]:
+def _fallback_trajectory_groups(trajectories: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
     buckets: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
     for item in trajectories:
         top = [
@@ -5460,14 +5387,10 @@ def _cluster_top_fingerprints(items: list[dict[str, Any]]) -> list[dict[str, Any
             fingerprint = str(fp_item.get("fingerprint") or "")
             if not fingerprint:
                 continue
-            counts[fingerprint] = counts.get(fingerprint, 0) + int(
-                fp_item.get("count") or 0
-            )
+            counts[fingerprint] = counts.get(fingerprint, 0) + int(fp_item.get("count") or 0)
     return [
         {"fingerprint": fingerprint, "count": count}
-        for fingerprint, count in sorted(
-            counts.items(), key=lambda pair: (-pair[1], pair[0])
-        )[:5]
+        for fingerprint, count in sorted(counts.items(), key=lambda pair: (-pair[1], pair[0]))[:5]
     ]
 
 
@@ -5537,9 +5460,7 @@ def _upsert_trajectory_clusters(
     clusters: list[dict[str, Any]] = []
     for items in buckets.values():
         bucket_clusters: list[dict[str, Any]] = []
-        labels = _hdbscan_trajectory_labels(
-            [item.get("flat_vector", []) for item in items]
-        )
+        labels = _hdbscan_trajectory_labels([item.get("flat_vector", []) for item in items])
         if labels and len(labels) == len(items):
             by_label: dict[int, list[dict[str, Any]]] = {}
             for label, item in zip(labels, items, strict=False):
@@ -5553,9 +5474,7 @@ def _upsert_trajectory_clusters(
             )
         if not bucket_clusters:
             bucket_clusters.extend(
-                _trajectory_cluster_record(
-                    items=group, algorithm="fixed_window_signature_fallback"
-                )
+                _trajectory_cluster_record(items=group, algorithm="fixed_window_signature_fallback")
                 for group in _fallback_trajectory_groups(items)
             )
         clusters.extend(bucket_clusters)
@@ -5639,13 +5558,9 @@ def _fetch_trajectory_clusters(
             "bucket_size": str(row[2]),
             "algorithm": str(row[3]),
             "representative_trajectory_id": str(row[4]),
-            "member_trajectory_ids": [
-                str(item) for item in _load_json_list(str(row[5] or "[]"))
-            ],
+            "member_trajectory_ids": [str(item) for item in _load_json_list(str(row[5] or "[]"))],
             "top_fingerprints": [
-                item
-                for item in _load_json_list(str(row[6] or "[]"))
-                if isinstance(item, dict)
+                item for item in _load_json_list(str(row[6] or "[]")) if isinstance(item, dict)
             ],
             "label": str(row[7] or ""),
             "member_count": int(row[8] or 0),
@@ -5709,9 +5624,7 @@ def _upsert_anomaly_daily_count(
     )
 
 
-def fetch_anomaly_daily_counts(
-    service_name: str = "", *, limit: int = 30
-) -> list[dict[str, Any]]:
+def fetch_anomaly_daily_counts(service_name: str = "", *, limit: int = 30) -> list[dict[str, Any]]:
     """Return recent persisted anomaly counts grouped by analysis date."""
     db_path = _resolve_db_path()
     if not Path(db_path).exists():
@@ -5789,9 +5702,7 @@ def _accepted_normal_max_allowed(rule: dict[str, Any]) -> int | None:
     return int(math.ceil(accepted_count * multiplier))
 
 
-def _accepted_normal_rule_active(
-    rule: dict[str, Any], *, now: datetime | None = None
-) -> bool:
+def _accepted_normal_rule_active(rule: dict[str, Any], *, now: datetime | None = None) -> bool:
     """A rule applies only while it is active and not past its expiry."""
 
     if str(rule.get("status") or "") != "active":
@@ -5933,9 +5844,7 @@ def _anomaly_type_for(
             previous = datetime.fromisoformat(
                 str(group["previous_last_seen"]).replace("Z", "+00:00")
             )
-            current = datetime.fromisoformat(
-                str(group["first_seen"]).replace("Z", "+00:00")
-            )
+            current = datetime.fromisoformat(str(group["first_seen"]).replace("Z", "+00:00"))
             if current - previous >= timedelta(days=RECURRENCE_MIN_SILENCE_DAYS):
                 return True, "RECURRENCE", "MEDIUM"
         except ValueError:
@@ -6184,9 +6093,7 @@ def run_detection_pipeline(
         _repair_approved_duplicate_candidates(conn, service_name)
         cur = conn.cursor()
         cutoff = (
-            (datetime.utcnow() - timedelta(days=days_back)).isoformat(
-                timespec="seconds"
-            )
+            (datetime.utcnow() - timedelta(days=days_back)).isoformat(timespec="seconds")
             if days_back is not None and analysis_date is None
             else None
         )
@@ -6237,8 +6144,7 @@ def run_detection_pipeline(
             params,
         ).fetchall()
         existing_fingerprints = {
-            str(row[0])
-            for row in cur.execute("SELECT fingerprint FROM fingerprints").fetchall()
+            str(row[0]) for row in cur.execute("SELECT fingerprint FROM fingerprints").fetchall()
         }
         known_signature_map = _known_pattern_signature_map(conn)
         groups: dict[str, dict[str, Any]] = {}
@@ -6270,19 +6176,11 @@ def run_detection_pipeline(
                 {
                     "fingerprint": fp,
                     "occurrence_count": (
-                        0
-                        if analysis_date
-                        else int(existing[0] or 0)
-                        if existing
-                        else 0
+                        0 if analysis_date else int(existing[0] or 0) if existing else 0
                     ),
                     "log_level": level.upper(),
                     "message": (
-                        msg
-                        if analysis_date
-                        else str(existing[3] or msg)
-                        if existing
-                        else msg
+                        msg if analysis_date else str(existing[3] or msg) if existing else msg
                     ),
                     "normalized_message": normalized_message,
                     "stacktrace": (
@@ -6335,22 +6233,14 @@ def run_detection_pipeline(
         group_items = _apply_drain_templates(list(groups.values()))
         groups = {str(item.get("fingerprint") or ""): item for item in group_items}
         group_contexts = [_pattern_cluster_context(item) for item in group_items]
-        approved_match_groups = find_similar_analysis_documents_batch(
-            queries=group_contexts
-        )
-        observed_match_groups = find_similar_pattern_clusters_batch(
-            queries=group_contexts
-        )
+        approved_match_groups = find_similar_analysis_documents_batch(queries=group_contexts)
+        observed_match_groups = find_similar_pattern_clusters_batch(queries=group_contexts)
         for index, g in enumerate(group_items):
             approved_matches = (
-                approved_match_groups[index]
-                if index < len(approved_match_groups)
-                else []
+                approved_match_groups[index] if index < len(approved_match_groups) else []
             )
             observed_matches = (
-                observed_match_groups[index]
-                if index < len(observed_match_groups)
-                else []
+                observed_match_groups[index] if index < len(observed_match_groups) else []
             )
             g.update(
                 _pattern_status_from_matches(
@@ -6394,10 +6284,7 @@ def run_detection_pipeline(
 
         all_groups = groups if analysis_date else _load_fingerprint_groups(conn, service_name)
         ignored = {
-            r[0]
-            for r in cur.execute(
-                "SELECT fingerprint FROM exception_registry"
-            ).fetchall()
+            r[0] for r in cur.execute("SELECT fingerprint FROM exception_registry").fetchall()
         }
         ignored_signatures = set()
         for row in cur.execute("""
@@ -6417,8 +6304,8 @@ def run_detection_pipeline(
                 normalized = normalize_log_text(message)
             if normalized and level:
                 ignored_signatures.add((normalized, level))
-        accepted_normal_by_fp, accepted_normal_by_signature = (
-            _load_active_accepted_normal_rules(conn)
+        accepted_normal_by_fp, accepted_normal_by_signature = _load_active_accepted_normal_rules(
+            conn
         )
         accepted_normal_now = datetime.utcnow()
         accepted_normal_states: dict[str, dict[str, Any]] = {}
@@ -6438,14 +6325,10 @@ def run_detection_pipeline(
             known = g["pattern_status"] in {"known_exact", "known_similar"}
             baseline = max(
                 1,
-                math.ceil(
-                    g["occurrence_count"] / (3 if g["occurrence_count"] >= 25 else 1)
-                ),
+                math.ceil(g["occurrence_count"] / (3 if g["occurrence_count"] >= 25 else 1)),
             )
             spike_ratio = round((g["occurrence_count"] / baseline) * 100, 1)
-            metric = _metric_baseline(
-                conn, service_name=g["service_name"], fingerprint=fp
-            )
+            metric = _metric_baseline(conn, service_name=g["service_name"], fingerprint=fp)
             anomaly, anomaly_type, severity = _anomaly_type_for(
                 group=g, known=known, spike_ratio=spike_ratio, metric=metric
             )
@@ -6466,12 +6349,8 @@ def run_detection_pipeline(
                 accepted_normal_states[fp] = {
                     "accepted_normal": True,
                     "accepted_normal_id": int(accepted_normal_rule.get("id") or 0),
-                    "accepted_normal_reason": str(
-                        accepted_normal_rule.get("reason") or ""
-                    ),
-                    "accepted_normal_status": str(
-                        accepted_normal_rule.get("status") or "active"
-                    ),
+                    "accepted_normal_reason": str(accepted_normal_rule.get("reason") or ""),
+                    "accepted_normal_status": str(accepted_normal_rule.get("status") or "active"),
                     "anomaly_type": anomaly_type,
                 }
             if is_ignored:
@@ -6503,9 +6382,7 @@ def run_detection_pipeline(
             score = min(
                 100,
                 LEVEL_SCORE.get(g["log_level"], 5)
-                + CRITICALITY_SCORE.get(
-                    SERVICE_CRITICALITY.get(g["service_name"], "LOW"), 5
-                )
+                + CRITICALITY_SCORE.get(SERVICE_CRITICALITY.get(g["service_name"], "LOW"), 5)
                 + min(20, g["occurrence_count"] // 5),
             )
             if is_ignored:
@@ -6537,9 +6414,7 @@ def run_detection_pipeline(
             recs.append(r)
         conn.commit()
         total_logs = int(signature_count)
-        exception_count = cur.execute(
-            "SELECT COUNT(*) FROM exception_registry"
-        ).fetchone()[0]
+        exception_count = cur.execute("SELECT COUNT(*) FROM exception_registry").fetchone()[0]
     visible_groups = []
     exception_excluded_logs = 0
     ignored_fingerprints = set(ignored)
@@ -6571,33 +6446,23 @@ def run_detection_pipeline(
             groups_by_fingerprint={str(g["fingerprint"]): g for g in visible_groups},
         )
         pattern_clusters = build_pattern_clusters(model_conn, visible_groups)
-        merge_groups = _fetch_fingerprint_merge_groups(
-            model_conn, status="pending", limit=50
-        )
+        merge_groups = _fetch_fingerprint_merge_groups(model_conn, status="pending", limit=50)
         if include_time_windows:
             updated_event_time_windows = _upsert_event_time_windows(
                 model_conn,
                 service_name=service_name,
                 dirty_buckets=dirty_metric_buckets,
             )
-            _upsert_system_state_vectors(
-                model_conn, windows=updated_event_time_windows
-            )
+            _upsert_system_state_vectors(model_conn, windows=updated_event_time_windows)
             _upsert_trajectories(model_conn, service_name=service_name)
             _upsert_trajectory_clusters(model_conn, service_name=service_name)
-            event_time_windows = _fetch_event_time_windows(
-                model_conn, service_name=service_name
-            )
+            event_time_windows = _fetch_event_time_windows(model_conn, service_name=service_name)
             system_state_vectors = _fetch_system_state_vectors(
                 model_conn, service_name=service_name
             )
-            all_trajectories = _fetch_trajectories(
-                model_conn, service_name=service_name, limit=500
-            )
+            all_trajectories = _fetch_trajectories(model_conn, service_name=service_name, limit=500)
             trajectories = all_trajectories[:TRAJECTORY_RETURN_LIMIT]
-            trajectory_clusters = _fetch_trajectory_clusters(
-                model_conn, service_name=service_name
-            )
+            trajectory_clusters = _fetch_trajectory_clusters(model_conn, service_name=service_name)
             nearest_trajectory_patterns = _nearest_trajectory_patterns(
                 all_trajectories, trajectory_clusters
             )
@@ -6649,16 +6514,10 @@ def run_detection_pipeline(
     latest_trajectories_10min = trajectories_10min
     latest_trajectory_clusters_10min = trajectory_clusters_10min
     visible_impacts = [
-        impact
-        for impact in impacts
-        if impact["fingerprint"] not in ignored_fingerprints
+        impact for impact in impacts if impact["fingerprint"] not in ignored_fingerprints
     ]
-    visible_recs = [
-        rec for rec in recs if rec["fingerprint"] not in ignored_fingerprints
-    ]
-    anomalies = [
-        item for item in anomalies if item["pattern"] not in ignored_fingerprints
-    ]
+    visible_recs = [rec for rec in recs if rec["fingerprint"] not in ignored_fingerprints]
+    anomalies = [item for item in anomalies if item["pattern"] not in ignored_fingerprints]
     daily_analysis_date = date_start or datetime.utcnow().date().isoformat()
     semantic_clusters = build_semantic_log_clusters(
         visible_groups,
@@ -6682,24 +6541,18 @@ def run_detection_pipeline(
         )
         semantic_conn.commit()
     known_count = sum(
-        1
-        for group in visible_groups
-        if group["pattern_status"] in {"known_exact", "known_similar"}
+        1 for group in visible_groups if group["pattern_status"] in {"known_exact", "known_similar"}
     )
-    new_count = sum(
-        1 for group in visible_groups if group["pattern_status"] == "new_pattern"
-    )
+    new_count = sum(1 for group in visible_groups if group["pattern_status"] == "new_pattern")
     accepted_normal_count = sum(
         1
         for group in visible_groups
-        if group.get("accepted_normal")
-        and group.get("anomaly_type") == "ACCEPTED_NORMAL"
+        if group.get("accepted_normal") and group.get("anomaly_type") == "ACCEPTED_NORMAL"
     )
     accepted_normal_breach_count = sum(
         1
         for group in visible_groups
-        if group.get("accepted_normal")
-        and group.get("anomaly_type") == "ACCEPTED_NORMAL_BREACH"
+        if group.get("accepted_normal") and group.get("anomaly_type") == "ACCEPTED_NORMAL_BREACH"
     )
     top_impact = max(
         visible_impacts,
@@ -6982,9 +6835,7 @@ def build_rag_case_card(
     stacktrace = str(context.get("stacktrace") or "")
     occurrence_count = int(context.get("occurrence_count") or 0)
     title = f"{service_name} {sub_category} case ({fingerprint})"
-    summary = (
-        f"{service_name}에서 {sub_category} 패턴이 {occurrence_count}회 관측되었습니다."
-    )
+    summary = f"{service_name}에서 {sub_category} 패턴이 {occurrence_count}회 관측되었습니다."
     symptoms = [
         f"{service_name} 서비스에서 {log_level} 로그가 발생했습니다.",
         f"동일 fingerprint({fingerprint})가 {occurrence_count}회 관측되었습니다.",

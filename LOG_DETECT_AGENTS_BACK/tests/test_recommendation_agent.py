@@ -128,7 +128,7 @@ def _state():
 
 
 def test_recommendation_agent_uses_structured_llm_actions(monkeypatch):
-    fake = FakeMCPClient([_recommendation(), _evaluation(86, True)])
+    fake = FakeMCPClient([_recommendation(), _evaluation(92, True)])
     monkeypatch.setattr("app.agents.recommendation.get_mcp_client", lambda: fake)
 
     result = RecommendationAgent().run(_state())
@@ -145,7 +145,7 @@ def test_recommendation_agent_uses_structured_llm_actions(monkeypatch):
     ]
     assert "대표 오류 시나리오를 재현" not in result["final"]["generated_answer"]
     assert result["final"]["evidence_bundle"]["recommendation_source"] == "llm_rag"
-    assert result["final"]["evidence_bundle"]["quality_score"] == 86
+    assert result["final"]["evidence_bundle"]["quality_score"] == 92
     assert result["final"]["evidence_bundle"]["quality_gate_status"] == "passed"
     assert result["final"]["evidence_bundle"]["quality_attempts"] == 1
     assert result["final"]["evidence_bundle"]["referenced_knowledge_card_ids"] == [
@@ -162,7 +162,7 @@ def test_recommendation_agent_retries_until_quality_threshold(monkeypatch):
             _recommendation("timeout 원인을 검토합니다"),
             _evaluation(72, False, "구체적인 수정 대상과 검증 방법을 추가하세요."),
             _recommendation("PaymentClient.call timeout 처리 로직을 보강합니다"),
-            _evaluation(84, True),
+            _evaluation(92, True),
         ]
     )
     monkeypatch.setattr("app.agents.recommendation.get_mcp_client", lambda: fake)
@@ -172,7 +172,7 @@ def test_recommendation_agent_retries_until_quality_threshold(monkeypatch):
     assert result["final"]["recommended_actions"][0]["action"] == (
         "PaymentClient.call timeout 처리 로직을 보강합니다"
     )
-    assert result["final"]["evidence_bundle"]["quality_score"] == 84
+    assert result["final"]["evidence_bundle"]["quality_score"] == 92
     assert result["final"]["evidence_bundle"]["quality_attempts"] == 2
     assert len([call for call in fake.calls if call[0] == "openai.generate_text"]) == 4
     reasoning_events = result["evidence"]["agent_reasoning_events"]
@@ -185,7 +185,7 @@ def test_recommendation_agent_retries_until_quality_threshold(monkeypatch):
     assert any(
         event["kind"] == "self_correction"
         and event["status"] == "completed"
-        and event["metadata"]["score"] == 84
+        and event["metadata"]["score"] == 92
         for event in reasoning_events
     )
 
@@ -196,7 +196,7 @@ def test_recommendation_agent_hard_fail_overrides_high_score(monkeypatch):
             _weak_recommendation(),
             _evaluation(92, True, "좋습니다."),
             _recommendation("PaymentClient.call timeout 처리 로직을 보강합니다"),
-            _evaluation(84, True),
+            _evaluation(92, True),
         ]
     )
     monkeypatch.setattr("app.agents.recommendation.get_mcp_client", lambda: fake)
@@ -206,8 +206,33 @@ def test_recommendation_agent_hard_fail_overrides_high_score(monkeypatch):
     assert result["final"]["recommended_actions"][0]["action"] == (
         "PaymentClient.call timeout 처리 로직을 보강합니다"
     )
-    assert result["final"]["evidence_bundle"]["quality_score"] == 84
+    assert result["final"]["evidence_bundle"]["quality_score"] == 92
     assert result["final"]["evidence_bundle"]["quality_attempts"] == 2
+
+
+def test_recommendation_agent_easy_perfect_score_triggers_retry(monkeypatch):
+    fake = FakeMCPClient(
+        [
+            _recommendation(),
+            _evaluation(100, True, "완벽합니다."),
+            _recommendation("PaymentClient.call timeout 처리 로직을 보강합니다"),
+            _evaluation(92, True),
+        ]
+    )
+    monkeypatch.setattr("app.agents.recommendation.get_mcp_client", lambda: fake)
+
+    result = RecommendationAgent().run(_state())
+    evidence = result["final"]["evidence_bundle"]
+
+    assert evidence["quality_score"] == 92
+    assert evidence["quality_gate_status"] == "passed"
+    assert evidence["quality_attempts"] == 2
+    scores = [
+        event["metadata"]["score"]
+        for event in result["evidence"]["agent_reasoning_events"]
+        if event["kind"] == "self_correction" and "score" in event["metadata"]
+    ]
+    assert scores == [89, 92]
 
 
 def test_recommendation_agent_falls_back_when_structured_json_invalid(monkeypatch):

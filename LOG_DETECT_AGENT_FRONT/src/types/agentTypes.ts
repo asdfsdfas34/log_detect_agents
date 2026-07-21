@@ -94,6 +94,7 @@ export interface KnownPatternSaveResponse {
 
 export interface FingerprintManualMergeRequest {
   service_name: string
+  analysis_date?: string
   fingerprints: string[]
   cause: string
   recommendation: string
@@ -740,6 +741,11 @@ export interface Cluster {
   cluster: string
   service_name?: string
   count: number
+  lifetime_count?: number
+  count_scope?: {
+    type: 'analysis_date'
+    date: string
+  }
   message?: string
   log_level?: string
   stacktrace?: string

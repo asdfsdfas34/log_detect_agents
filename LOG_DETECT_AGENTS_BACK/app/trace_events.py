@@ -12,6 +12,8 @@ never placed on the event stream.
 
 from __future__ import annotations
 
+import json
+import logging
 from datetime import UTC, datetime
 from typing import Any, Literal
 
@@ -54,6 +56,17 @@ TraceLayer = Literal[
 # Maximum length for any free-text summary placed on the stream.
 _MAX_SUMMARY_CHARS = 400
 _TRACE_EVENTS_KEY = "agent_trace_events"
+_CONSOLE_METADATA_KEYS = (
+    "tool_name",
+    "next_agent",
+    "skill_id",
+    "score",
+    "threshold",
+    "passed",
+    "hard_fail_count",
+)
+
+logger = logging.getLogger(__name__)
 
 
 def _trace_events(state: SharedState) -> list[dict[str, Any]]:
@@ -141,9 +154,45 @@ def record_trace_event(
         }
         events.append(event)
         emit_event("trace", event)
+        _log_trace_event(event)
         return event
     except Exception:  # noqa: BLE001 - trace failures must never break analysis
         return None
+
+
+def _log_trace_event(event: dict[str, Any]) -> None:
+    """Write a compact, redaction-safe trace line to the backend console."""
+
+    if not logger.isEnabledFor(logging.INFO):
+        return
+    metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
+    console_event = {
+        "request_id": event.get("request_id"),
+        "sequence": event.get("sequence"),
+        "kind": event.get("kind"),
+        "event_type": event.get("event_type"),
+        "status": event.get("status"),
+        "agent": event.get("agent_name"),
+        "component": event.get("component"),
+        "attempt": event.get("attempt"),
+        "max_attempts": event.get("max_attempts"),
+        "duration_ms": event.get("duration_ms"),
+        "fallback_used": event.get("fallback_used"),
+        "title": event.get("title"),
+    }
+    console_event.update(
+        {
+            key: metadata[key]
+            for key in _CONSOLE_METADATA_KEYS
+            if key in metadata
+        }
+    )
+    if isinstance(event.get("error"), dict):
+        console_event["error_type"] = event["error"].get("type")
+    logger.info(
+        "AGENT_TRACE %s",
+        json.dumps(console_event, ensure_ascii=False, separators=(",", ":")),
+    )
 
 
 def summarize_tool_result(result: Any) -> dict[str, Any]:

@@ -758,6 +758,10 @@ def _requirement_satisfied(requirement: str, state: dict[str, Any]) -> bool:
         return bool(
             evidence.get("duplicate_pattern_candidates")
             or evidence.get("clusters")
+            # The scoped runner executes Pattern Fingerprint (priority 30)
+            # before Duplicate Pattern Detection (priority 70), so collected
+            # logs are a valid upstream source for this planned artifact.
+            or evidence.get("normalized_logs")
             or any(
                 item.get("fingerprint")
                 for item in evidence.get("normalized_logs", [])
@@ -893,11 +897,9 @@ def _score_skill(
     ):
         score = 0.9
         reasons.append("fingerprint_or_template_available")
-    elif skill_id == "duplicate_pattern_detection" and evidence.get(
-        "duplicate_pattern_candidates"
-    ):
+    elif skill_id == "duplicate_pattern_detection" and evidence.get("normalized_logs"):
         score = 0.85
-        reasons.append("duplicate_candidates_available")
+        reasons.append("fingerprint_source_logs_available")
     elif skill_id == "fingerprint_merge" and any(
         str(item.get("status", "pending")) == "approved"
         for item in evidence.get("duplicate_pattern_candidates", [])

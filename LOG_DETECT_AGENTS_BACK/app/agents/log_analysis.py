@@ -8,7 +8,7 @@ from collections import Counter
 from difflib import SequenceMatcher
 from typing import Any
 
-from app.db.scenario_store import fetch_known_patterns_for_agents
+from app.db.scenario_store import fetch_known_patterns_for_agents, run_detection_pipeline
 from app.mcp import get_mcp_client
 from app.patternops.registry import (
     fetch_pattern_contracts_for_agents,
@@ -127,8 +127,31 @@ class LogAnalysisAgent:
                 "log_normalization": self._normalize_logs_skill,
                 "pattern_fingerprint": self._fingerprint_patterns_skill,
                 "known_pattern_match": self._match_patterns_skill,
+                "duplicate_pattern_detection": self._detect_duplicate_patterns_skill,
             },
         )
+
+    @staticmethod
+    def _detect_duplicate_patterns_skill(state: SharedState) -> SharedState:
+        """Generate duplicate-pattern recommendations as a LogAnalysis skill."""
+
+        systems = state["scope"].get("systems") or []
+        service_name = str(systems[0]) if systems else ""
+        analysis_date = str(state["scope"].get("time_range", {}).get("from") or "")[:10]
+        scenario = run_detection_pipeline(
+            service_name or None,
+            analysis_date=analysis_date or None,
+        )
+        evidence = state["evidence"]
+        evidence["scenario_analysis"] = scenario
+        evidence["duplicate_pattern_candidates"] = scenario.get(
+            "duplicate_pattern_candidates", []
+        )
+        evidence["fingerprint_merge_groups"] = scenario.get("fingerprint_merge_groups", [])
+        evidence["pattern_clusters"] = scenario.get("pattern_clusters", [])
+        evidence["semantic_clusters"] = scenario.get("semantic_clusters", [])
+        evidence["summary"] = scenario.get("summary", {})
+        return state
 
     def _normalize_logs_skill(self, state: SharedState) -> SharedState:
         logs = state["evidence"]["normalized_logs"]

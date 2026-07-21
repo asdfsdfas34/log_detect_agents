@@ -12,6 +12,7 @@ class Scope(TypedDict):
 
 
 class Evidence(TypedDict):
+    scenario_analysis: dict
     normalized_logs: list[dict]
     suppressed_logs: list[dict]
     known_pattern_matches: list[dict]
@@ -108,6 +109,7 @@ def create_initial_state(
         "request_id": request_id,
         "scope": scope,
         "evidence": {
+            "scenario_analysis": {},
             "normalized_logs": [],
             "suppressed_logs": [],
             "known_pattern_matches": [],

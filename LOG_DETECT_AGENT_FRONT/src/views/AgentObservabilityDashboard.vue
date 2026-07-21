@@ -152,12 +152,16 @@ const filteredEvents = computed<AgentTraceEvent[]>(() => {
       return false
     }
     if (search) {
+      const metadataValues = Object.values(event.metadata ?? {}).flatMap((value) =>
+        Array.isArray(value) ? value.map(String) : [String(value ?? '')]
+      )
       const haystack = [
         event.title,
         event.summary,
         event.agent_name,
         event.request_id,
         event.metadata?.tool_name,
+        ...metadataValues,
         ...event.evidence_refs
       ]
         .filter((value): value is string => typeof value === 'string')
